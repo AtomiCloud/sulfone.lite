@@ -436,6 +436,7 @@ See language-specific guides for implementation details:
 - [TypeScript/Bun](./languages/typescript.md) - bun:test
 - [C#/.NET](./languages/csharp.md) - xUnit + FluentAssertions
 - [Go](./languages/go.md) - testing + testify
+- [TypeScript/Bun Quality Gates](../typescript-quality/) - bun:test setup, should preload, and Knip workflows
 
 ## Related Articles
 

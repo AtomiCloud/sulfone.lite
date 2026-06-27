@@ -74,6 +74,7 @@ Full documentation: [testing/](../../../docs/developer/standard/testing/)
 
 Related skills:
 
+- [`/typescript-quality`](../typescript-quality/) — For bun:test, should setup, and Knip workflows
 - [`/stateless-oop-di`](../stateless-oop-di/) — For testable code design
 - [`/three-layer-architecture`](../three-layer-architecture/) — For testing pure domain logic
 - [`/domain-modeling`](../domain-modeling/) — For domain types used in tests

@@ -4,12 +4,17 @@
 
 Bun test runner with `should` assertion library.
 
+For package setup, `bunfig.toml`, and the required Knip quality gates, see
+[TypeScript/Bun Quality Gates](../../typescript-quality/).
+
+With the standard preload, use `.should` assertions without importing `should`
+in every test. Import `should` directly only when using function-form assertions
+such as `should(value).be.null()`.
+
 ## Test Structure: describe / it
 
 ```typescript
 import { describe, it, beforeEach } from 'bun:test';
-import '../setup.ts';
-import should from 'should';
 
 describe('UserService', () => {
   let mockRepo: IUserRepository;
@@ -39,8 +44,6 @@ describe('UserService', () => {
 ## Assertions (should)
 
 ```typescript
-import should from 'should';
-
 // Equality
 actual.should.equal(expected); // strict equality
 actual.should.deepEqual(expected); // deep equality
@@ -49,7 +52,7 @@ actual.should.deepEqual(expected); // deep equality
 result.should.be.true();
 result.should.be.false();
 
-// Null/undefined
+// Function form requires: import should from 'should';
 should(value).be.null();
 should(value).be.undefined();
 value.should.not.be.undefined();
@@ -84,7 +87,7 @@ value.should.be.an.Object();
 value.should.be.an.Array();
 value.should.be.a.Function();
 
-// Errors
+// Function form requires: import should from 'should';
 should(() => fn()).throw();
 should(() => fn()).throw('message');
 should(() => fn()).throw(Error);
@@ -103,7 +106,6 @@ actual.should.not.equal(other);
 
 ```typescript
 import { describe, it } from 'bun:test';
-import should from 'should';
 
 describe('StatusFormatter', () => {
   it.each([

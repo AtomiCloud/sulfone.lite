@@ -10,5 +10,6 @@ Reference: [docs/developer/standard/linting.md](../../../docs/developer/standard
 ## Key Points
 
 - Pre-commit hooks run treefmt, shellcheck, gitlint, and infisical
+- TypeScript/Bun projects add conservative two-pass Knip through `/typescript-quality`
 - Treefmt handles nixfmt, prettier, shfmt, and actionlint
 - Run `pls lint` or `pre-commit run --all-files` to execute

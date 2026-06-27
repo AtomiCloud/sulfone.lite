@@ -98,6 +98,7 @@ atomi/shared:
     - .claude/skills/three-layer-architecture/SKILL.md
     - .claude/skills/three-layer-architecture/examples.md
     - .claude/skills/three-layer-architecture/reference.md
+    - .claude/skills/typescript-quality/SKILL.md
     - .claude/skills/utilities/SKILL.md
     - .claude/skills/validation/SKILL.md
     - docs/developer/standard/datetime/index.md
@@ -129,6 +130,7 @@ atomi/shared:
     - docs/developer/standard/three-layer-architecture/languages/csharp.md
     - docs/developer/standard/three-layer-architecture/languages/go.md
     - docs/developer/standard/three-layer-architecture/languages/typescript.md
+    - docs/developer/standard/typescript-quality/index.md
     - docs/developer/standard/utilities/index.md
     - docs/developer/standard/utilities/languages/csharp.md
     - docs/developer/standard/utilities/languages/go.md
@@ -163,6 +165,7 @@ managed_files:
   - .claude/skills/three-layer-architecture/SKILL.md
   - .claude/skills/three-layer-architecture/examples.md
   - .claude/skills/three-layer-architecture/reference.md
+  - .claude/skills/typescript-quality/SKILL.md
   - .claude/skills/utilities/SKILL.md
   - .claude/skills/validation/SKILL.md
   - .coderabbit.yaml
@@ -220,6 +223,7 @@ managed_files:
   - docs/developer/standard/three-layer-architecture/languages/csharp.md
   - docs/developer/standard/three-layer-architecture/languages/go.md
   - docs/developer/standard/three-layer-architecture/languages/typescript.md
+  - docs/developer/standard/typescript-quality/index.md
   - docs/developer/standard/utilities/index.md
   - docs/developer/standard/utilities/languages/csharp.md
   - docs/developer/standard/utilities/languages/go.md

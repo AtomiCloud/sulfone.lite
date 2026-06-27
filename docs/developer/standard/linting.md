@@ -50,18 +50,20 @@ The pre-commit hooks in this project include:
 - **gitlint** — Commit message linting
 - **shellcheck** — Shell script linting
 - **enforce-exec** — Enforce execute permissions on shell scripts
+- **knip** — Conservative dead-file detection for TypeScript/Bun projects when the project has Bun tooling
 
 ## Common Pre-Commit Hooks
 
-| Hook                 | Purpose                           |
-| -------------------- | --------------------------------- |
-| `treefmt`            | Format code (nix, yaml, sh, etc.) |
-| `a-infisical`        | Scan all files for secrets        |
-| `a-infisical-staged` | Scan staged files for secrets     |
-| `a-gitlint`          | Lint commit messages              |
-| `a-enforce-gitlint`  | Enforce gitlint rules via sg      |
-| `a-shellcheck`       | Lint shell scripts                |
-| `a-enforce-exec`     | Enforce execute permissions       |
+| Hook                 | Purpose                                 |
+| -------------------- | --------------------------------------- |
+| `treefmt`            | Format code (nix, yaml, sh, etc.)       |
+| `a-infisical`        | Scan all files for secrets              |
+| `a-infisical-staged` | Scan staged files for secrets           |
+| `a-gitlint`          | Lint commit messages                    |
+| `a-enforce-gitlint`  | Enforce gitlint rules via sg            |
+| `a-shellcheck`       | Lint shell scripts                      |
+| `a-enforce-exec`     | Enforce execute permissions             |
+| `a-knip`             | Conservative TypeScript dead-file check |
 
 ## Configuration
 
@@ -96,3 +98,16 @@ The shell script simply calls `pre-commit run --all-files`.
 | **Environment**   | Nix shell                          |
 | **Configuration** | `nix/pre-commit.nix`               |
 | **CI**            | Run via `scripts/ci/pre-commit.sh` |
+
+## TypeScript/Bun Projects
+
+TypeScript/Bun projects should use the conservative Knip pre-commit workflow
+from [TypeScript/Bun Quality Gates](./typescript-quality/). The pre-commit
+variant runs Knip twice and blocks only on unused files:
+
+```bash
+bun run knip:precommit
+```
+
+Agents must use the noisier `bun run knip:agent` workflow outside pre-commit and
+inspect the findings manually.
