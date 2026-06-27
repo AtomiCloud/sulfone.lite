@@ -4,10 +4,10 @@ atomi/workspace:
     - version: 45
       time: 2026-06-27T16:24:21.961273Z
       answers:
-        atomi/service:
+        cyan/nix/basic:
           type: String
-          value: lite
-        atomi/docker:
+          value: yes
+        atomi/helm:
           type: Bool
           value: false
         atomi/secret:
@@ -16,18 +16,18 @@ atomi/workspace:
         atomi/llm:
           type: Bool
           value: true
-        atomi/helm:
-          type: Bool
-          value: false
-        atomi/platform:
-          type: String
-          value: sulfone
-        cyan/nix/basic:
-          type: String
-          value: yes
         cyan/nix/llm:
           type: String
           value: yes
+        atomi/platform:
+          type: String
+          value: sulfone
+        atomi/docker:
+          type: Bool
+          value: false
+        atomi/service:
+          type: String
+          value: lite
       deterministic_states: {}
   files:
     - .claude/skills/ci-cd-workflows/SKILL.md
@@ -74,16 +74,97 @@ atomi/workspace:
     - scripts/ci/pre-commit.sh
     - scripts/ci/release.sh
     - scripts/ci/setup.sh
+atomi/shared:
+  active: true
+  history:
+    - version: 5
+      time: 2026-06-27T16:47:18.613198Z
+      answers: {}
+      deterministic_states: {}
+  files:
+    - .claude/skills/datetime/SKILL.md
+    - .claude/skills/domain-modeling/SKILL.md
+    - .claude/skills/domain-modeling/examples.md
+    - .claude/skills/domain-modeling/reference.md
+    - .claude/skills/error-handling/SKILL.md
+    - .claude/skills/error-handling/examples.md
+    - .claude/skills/error-handling/reference.md
+    - .claude/skills/stateless-oop-di/SKILL.md
+    - .claude/skills/stateless-oop-di/examples.md
+    - .claude/skills/stateless-oop-di/reference.md
+    - .claude/skills/testing/SKILL.md
+    - .claude/skills/testing/examples.md
+    - .claude/skills/testing/reference.md
+    - .claude/skills/three-layer-architecture/SKILL.md
+    - .claude/skills/three-layer-architecture/examples.md
+    - .claude/skills/three-layer-architecture/reference.md
+    - .claude/skills/utilities/SKILL.md
+    - .claude/skills/validation/SKILL.md
+    - docs/developer/standard/datetime/index.md
+    - docs/developer/standard/datetime/languages/csharp.md
+    - docs/developer/standard/datetime/languages/go.md
+    - docs/developer/standard/datetime/languages/typescript.md
+    - docs/developer/standard/domain-driven-design/index.md
+    - docs/developer/standard/domain-driven-design/languages/csharp.md
+    - docs/developer/standard/domain-driven-design/languages/go.md
+    - docs/developer/standard/domain-driven-design/languages/typescript.md
+    - docs/developer/standard/functional-practices/index.md
+    - docs/developer/standard/functional-practices/languages/csharp.md
+    - docs/developer/standard/functional-practices/languages/go.md
+    - docs/developer/standard/functional-practices/languages/typescript.md
+    - docs/developer/standard/software-design-philosophy/index.md
+    - docs/developer/standard/solid-principles/index.md
+    - docs/developer/standard/solid-principles/languages/csharp.md
+    - docs/developer/standard/solid-principles/languages/go.md
+    - docs/developer/standard/solid-principles/languages/typescript.md
+    - docs/developer/standard/stateless-oop-di/index.md
+    - docs/developer/standard/stateless-oop-di/languages/csharp.md
+    - docs/developer/standard/stateless-oop-di/languages/go.md
+    - docs/developer/standard/stateless-oop-di/languages/typescript.md
+    - docs/developer/standard/testing/index.md
+    - docs/developer/standard/testing/languages/csharp.md
+    - docs/developer/standard/testing/languages/go.md
+    - docs/developer/standard/testing/languages/typescript.md
+    - docs/developer/standard/three-layer-architecture/index.md
+    - docs/developer/standard/three-layer-architecture/languages/csharp.md
+    - docs/developer/standard/three-layer-architecture/languages/go.md
+    - docs/developer/standard/three-layer-architecture/languages/typescript.md
+    - docs/developer/standard/utilities/index.md
+    - docs/developer/standard/utilities/languages/csharp.md
+    - docs/developer/standard/utilities/languages/go.md
+    - docs/developer/standard/utilities/languages/typescript.md
+    - docs/developer/standard/validation/index.md
+    - docs/developer/standard/validation/languages/csharp.md
+    - docs/developer/standard/validation/languages/go.md
+    - docs/developer/standard/validation/languages/typescript.md
 managed_files:
   - .claude/skills/ci-cd-workflows/SKILL.md
   - .claude/skills/conventional-commits/SKILL.md
+  - .claude/skills/datetime/SKILL.md
+  - .claude/skills/domain-modeling/SKILL.md
+  - .claude/skills/domain-modeling/examples.md
+  - .claude/skills/domain-modeling/reference.md
+  - .claude/skills/error-handling/SKILL.md
+  - .claude/skills/error-handling/examples.md
+  - .claude/skills/error-handling/reference.md
   - .claude/skills/linting/SKILL.md
   - .claude/skills/nix/SKILL.md
   - .claude/skills/nix/reference.md
   - .claude/skills/semantic-release/SKILL.md
   - .claude/skills/service-tree/SKILL.md
   - .claude/skills/shell-conventions/SKILL.md
+  - .claude/skills/stateless-oop-di/SKILL.md
+  - .claude/skills/stateless-oop-di/examples.md
+  - .claude/skills/stateless-oop-di/reference.md
   - .claude/skills/taskfile-conventions/SKILL.md
+  - .claude/skills/testing/SKILL.md
+  - .claude/skills/testing/examples.md
+  - .claude/skills/testing/reference.md
+  - .claude/skills/three-layer-architecture/SKILL.md
+  - .claude/skills/three-layer-architecture/examples.md
+  - .claude/skills/three-layer-architecture/reference.md
+  - .claude/skills/utilities/SKILL.md
+  - .claude/skills/validation/SKILL.md
   - .coderabbit.yaml
   - .envrc
   - .github/actionlint.yaml
@@ -104,12 +185,49 @@ managed_files:
   - docs/developer/CommitConventions.md
   - docs/developer/standard/ci-cd.md
   - docs/developer/standard/conventional-commits.md
+  - docs/developer/standard/datetime/index.md
+  - docs/developer/standard/datetime/languages/csharp.md
+  - docs/developer/standard/datetime/languages/go.md
+  - docs/developer/standard/datetime/languages/typescript.md
+  - docs/developer/standard/domain-driven-design/index.md
+  - docs/developer/standard/domain-driven-design/languages/csharp.md
+  - docs/developer/standard/domain-driven-design/languages/go.md
+  - docs/developer/standard/domain-driven-design/languages/typescript.md
+  - docs/developer/standard/functional-practices/index.md
+  - docs/developer/standard/functional-practices/languages/csharp.md
+  - docs/developer/standard/functional-practices/languages/go.md
+  - docs/developer/standard/functional-practices/languages/typescript.md
   - docs/developer/standard/linting.md
   - docs/developer/standard/nix.md
   - docs/developer/standard/semantic-release.md
   - docs/developer/standard/service-tree.md
   - docs/developer/standard/shell-scripts.md
+  - docs/developer/standard/software-design-philosophy/index.md
+  - docs/developer/standard/solid-principles/index.md
+  - docs/developer/standard/solid-principles/languages/csharp.md
+  - docs/developer/standard/solid-principles/languages/go.md
+  - docs/developer/standard/solid-principles/languages/typescript.md
+  - docs/developer/standard/stateless-oop-di/index.md
+  - docs/developer/standard/stateless-oop-di/languages/csharp.md
+  - docs/developer/standard/stateless-oop-di/languages/go.md
+  - docs/developer/standard/stateless-oop-di/languages/typescript.md
   - docs/developer/standard/taskfile.md
+  - docs/developer/standard/testing/index.md
+  - docs/developer/standard/testing/languages/csharp.md
+  - docs/developer/standard/testing/languages/go.md
+  - docs/developer/standard/testing/languages/typescript.md
+  - docs/developer/standard/three-layer-architecture/index.md
+  - docs/developer/standard/three-layer-architecture/languages/csharp.md
+  - docs/developer/standard/three-layer-architecture/languages/go.md
+  - docs/developer/standard/three-layer-architecture/languages/typescript.md
+  - docs/developer/standard/utilities/index.md
+  - docs/developer/standard/utilities/languages/csharp.md
+  - docs/developer/standard/utilities/languages/go.md
+  - docs/developer/standard/utilities/languages/typescript.md
+  - docs/developer/standard/validation/index.md
+  - docs/developer/standard/validation/languages/csharp.md
+  - docs/developer/standard/validation/languages/go.md
+  - docs/developer/standard/validation/languages/typescript.md
   - flake.nix
   - nix/env.nix
   - nix/fmt.nix
@@ -119,76 +237,3 @@ managed_files:
   - scripts/ci/pre-commit.sh
   - scripts/ci/release.sh
   - scripts/ci/setup.sh
-file_conflicts:
-  - path: nix/packages.nix
-    resolution: resolver
-    resolver_used:
-      id: 71e49199-667a-46be-9c82-91c848953489
-      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
-      docker_tag: f8802e-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: nix/pre-commit.nix
-    resolution: resolver
-    resolver_used:
-      id: 71e49199-667a-46be-9c82-91c848953489
-      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
-      docker_tag: f8802e-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: nix/shells.nix
-    resolution: resolver
-    resolver_used:
-      id: 71e49199-667a-46be-9c82-91c848953489
-      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
-      docker_tag: f8802e-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: .envrc
-    resolution: resolver
-    resolver_used:
-      id: cef27eb6-fce0-4699-a335-b132463bc9a7
-      docker_ref: ghcr.io/atomicloud/ketone.md-resolver/md
-      docker_tag: 769c12-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: nix/fmt.nix
-    resolution: resolver
-    resolver_used:
-      id: 71e49199-667a-46be-9c82-91c848953489
-      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
-      docker_tag: f8802e-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: .gitignore
-    resolution: resolver
-    resolver_used:
-      id: e1d2f3b6-75ad-4b31-9c2f-915244d25f6d
-      docker_ref: ghcr.io/atomicloud/ketone.ignore-resolver/ignore
-      docker_tag: c94f78-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: CLAUDE.md
-    resolution: resolver
-    resolver_used:
-      id: cef27eb6-fce0-4699-a335-b132463bc9a7
-      docker_ref: ghcr.io/atomicloud/ketone.md-resolver/md
-      docker_tag: 769c12-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
-  - path: nix/env.nix
-    resolution: resolver
-    resolver_used:
-      id: 71e49199-667a-46be-9c82-91c848953489
-      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
-      docker_tag: f8802e-main
-    variations:
-      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
-      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
