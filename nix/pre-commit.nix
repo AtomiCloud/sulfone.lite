@@ -4,7 +4,7 @@
   pre-commit-lib,
 }:
 pre-commit-lib.run {
-  src = ./.;
+  src = ../.;
 
   hooks = {
     a-enforce-exec = {
@@ -52,6 +52,16 @@ pre-commit-lib.run {
       description = "Scan for possible secrets in staged files";
       entry = "${packages.infisical}/bin/infisical scan git-changes --staged -v";
       name = "Secrets Scanning (Staged files)";
+      pass_filenames = false;
+      language = "system";
+    };
+
+    a-knip = {
+      enable = true;
+      description = "Run conservative two-pass Knip dead-file detection";
+      entry = "${packages.bun}/bin/bun scripts/ci/knip-precommit.ts";
+      files = "(^|/)(package\\.json|bun\\.lockb?|knip(\\.precommit)?\\.json|bunfig\\.toml|tsconfig[^/]*\\.json|.*\\.(js|cjs|mjs|jsx|ts|cts|mts|tsx))$";
+      name = "Knip dead code";
       pass_filenames = false;
       language = "system";
     };

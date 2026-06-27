@@ -8,6 +8,7 @@ with packages;
 
   lint = [
     actionlint
+    bun
     gitlint
     go-task
     pre-commit

@@ -71,6 +71,7 @@ atomi/workspace:
     - nix/packages.nix
     - nix/pre-commit.nix
     - nix/shells.nix
+    - scripts/ci/knip-precommit.ts
     - scripts/ci/pre-commit.sh
     - scripts/ci/release.sh
     - scripts/ci/setup.sh
@@ -238,6 +239,7 @@ managed_files:
   - nix/packages.nix
   - nix/pre-commit.nix
   - nix/shells.nix
+  - scripts/ci/knip-precommit.ts
   - scripts/ci/pre-commit.sh
   - scripts/ci/release.sh
   - scripts/ci/setup.sh
