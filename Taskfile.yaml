@@ -1,0 +1,11 @@
+version: '3'
+includes: {}
+tasks:
+  setup:
+    desc: 'Setup the repository'
+    cmds:
+      - ./scripts/ci/setup.sh
+  lint:
+    desc: 'Lints the whole code-base'
+    cmds:
+      - pre-commit run --all-files

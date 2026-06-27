@@ -1,0 +1,194 @@
+atomi/workspace:
+  active: true
+  history:
+    - version: 45
+      time: 2026-06-27T16:24:21.961273Z
+      answers:
+        atomi/service:
+          type: String
+          value: lite
+        atomi/docker:
+          type: Bool
+          value: false
+        atomi/secret:
+          type: Bool
+          value: false
+        atomi/llm:
+          type: Bool
+          value: true
+        atomi/helm:
+          type: Bool
+          value: false
+        atomi/platform:
+          type: String
+          value: sulfone
+        cyan/nix/basic:
+          type: String
+          value: yes
+        cyan/nix/llm:
+          type: String
+          value: yes
+      deterministic_states: {}
+  files:
+    - .claude/skills/ci-cd-workflows/SKILL.md
+    - .claude/skills/conventional-commits/SKILL.md
+    - .claude/skills/linting/SKILL.md
+    - .claude/skills/nix/SKILL.md
+    - .claude/skills/nix/reference.md
+    - .claude/skills/semantic-release/SKILL.md
+    - .claude/skills/service-tree/SKILL.md
+    - .claude/skills/shell-conventions/SKILL.md
+    - .claude/skills/taskfile-conventions/SKILL.md
+    - .coderabbit.yaml
+    - .envrc
+    - .github/actionlint.yaml
+    - .github/dependabot.yml
+    - .github/workflows/cd.yaml
+    - .github/workflows/ci.yaml
+    - .github/workflows/release.yaml
+    - .github/workflows/⚡reusable-precommit.yaml
+    - .github/workflows/⚡reusable-release.yaml
+    - .github/workflows/🛡️merge-gatekeeper.yml
+    - .gitignore
+    - .gitlint
+    - .prettierrc.yaml
+    - CLAUDE.md
+    - README.md
+    - Taskfile.yaml
+    - atomi_release.yaml
+    - docs/developer/CommitConventions.md
+    - docs/developer/standard/ci-cd.md
+    - docs/developer/standard/conventional-commits.md
+    - docs/developer/standard/linting.md
+    - docs/developer/standard/nix.md
+    - docs/developer/standard/semantic-release.md
+    - docs/developer/standard/service-tree.md
+    - docs/developer/standard/shell-scripts.md
+    - docs/developer/standard/taskfile.md
+    - flake.nix
+    - nix/env.nix
+    - nix/fmt.nix
+    - nix/packages.nix
+    - nix/pre-commit.nix
+    - nix/shells.nix
+    - scripts/ci/pre-commit.sh
+    - scripts/ci/release.sh
+    - scripts/ci/setup.sh
+managed_files:
+  - .claude/skills/ci-cd-workflows/SKILL.md
+  - .claude/skills/conventional-commits/SKILL.md
+  - .claude/skills/linting/SKILL.md
+  - .claude/skills/nix/SKILL.md
+  - .claude/skills/nix/reference.md
+  - .claude/skills/semantic-release/SKILL.md
+  - .claude/skills/service-tree/SKILL.md
+  - .claude/skills/shell-conventions/SKILL.md
+  - .claude/skills/taskfile-conventions/SKILL.md
+  - .coderabbit.yaml
+  - .envrc
+  - .github/actionlint.yaml
+  - .github/dependabot.yml
+  - .github/workflows/cd.yaml
+  - .github/workflows/ci.yaml
+  - .github/workflows/release.yaml
+  - .github/workflows/⚡reusable-precommit.yaml
+  - .github/workflows/⚡reusable-release.yaml
+  - .github/workflows/🛡️merge-gatekeeper.yml
+  - .gitignore
+  - .gitlint
+  - .prettierrc.yaml
+  - CLAUDE.md
+  - README.md
+  - Taskfile.yaml
+  - atomi_release.yaml
+  - docs/developer/CommitConventions.md
+  - docs/developer/standard/ci-cd.md
+  - docs/developer/standard/conventional-commits.md
+  - docs/developer/standard/linting.md
+  - docs/developer/standard/nix.md
+  - docs/developer/standard/semantic-release.md
+  - docs/developer/standard/service-tree.md
+  - docs/developer/standard/shell-scripts.md
+  - docs/developer/standard/taskfile.md
+  - flake.nix
+  - nix/env.nix
+  - nix/fmt.nix
+  - nix/packages.nix
+  - nix/pre-commit.nix
+  - nix/shells.nix
+  - scripts/ci/pre-commit.sh
+  - scripts/ci/release.sh
+  - scripts/ci/setup.sh
+file_conflicts:
+  - path: nix/packages.nix
+    resolution: resolver
+    resolver_used:
+      id: 71e49199-667a-46be-9c82-91c848953489
+      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
+      docker_tag: f8802e-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: nix/pre-commit.nix
+    resolution: resolver
+    resolver_used:
+      id: 71e49199-667a-46be-9c82-91c848953489
+      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
+      docker_tag: f8802e-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: nix/shells.nix
+    resolution: resolver
+    resolver_used:
+      id: 71e49199-667a-46be-9c82-91c848953489
+      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
+      docker_tag: f8802e-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: .envrc
+    resolution: resolver
+    resolver_used:
+      id: cef27eb6-fce0-4699-a335-b132463bc9a7
+      docker_ref: ghcr.io/atomicloud/ketone.md-resolver/md
+      docker_tag: 769c12-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: nix/fmt.nix
+    resolution: resolver
+    resolver_used:
+      id: 71e49199-667a-46be-9c82-91c848953489
+      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
+      docker_tag: f8802e-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: .gitignore
+    resolution: resolver
+    resolver_used:
+      id: e1d2f3b6-75ad-4b31-9c2f-915244d25f6d
+      docker_ref: ghcr.io/atomicloud/ketone.ignore-resolver/ignore
+      docker_tag: c94f78-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: CLAUDE.md
+    resolution: resolver
+    resolver_used:
+      id: cef27eb6-fce0-4699-a335-b132463bc9a7
+      docker_ref: ghcr.io/atomicloud/ketone.md-resolver/md
+      docker_tag: 769c12-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+  - path: nix/env.nix
+    resolution: resolver
+    resolver_used:
+      id: 71e49199-667a-46be-9c82-91c848953489
+      docker_ref: ghcr.io/atomicloud/ketone.nix-resolver/nix
+      docker_tag: f8802e-main
+    variations:
+      - template_id: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+      - template_id: b304ab1c-173d-4650-a0d9-93d5d67e2d3a

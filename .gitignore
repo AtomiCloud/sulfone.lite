@@ -1,0 +1,40 @@
+### AtomiCloud
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+.kloop/
+
+### IDE
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+*.swn
+*.swo
+*.swp
+.idea/
+.vscode/
+
+### Linux
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+*~
+
+### macOS
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+.DS_Store
+._*
+
+### Nix
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+.direnv/
+result
+result-*
+
+### nix-init
+#### source: cddc0866-e5ef-4c99-9d10-7fa1c608da4e
+.direnv
+.pre-commit-config.yaml
+
+### Project
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+.kagent/
+
+### Windows
+#### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
+Thumbs.db
+desktop.ini

@@ -1,0 +1,8 @@
+name: CI
+on:
+  push:
+jobs:
+  precommit:
+    name: Pre-Commit
+    uses: ./.github/workflows/⚡reusable-precommit.yaml
+    secrets: inherit
