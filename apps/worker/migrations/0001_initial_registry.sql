@@ -1,0 +1,13 @@
+CREATE TABLE users (id TEXT PRIMARY KEY, handle TEXT NOT NULL UNIQUE, admin INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE tokens (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, secret_hash TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE artifacts (id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0, moderation_state TEXT NOT NULL DEFAULT 'active');
+CREATE TABLE versions (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, version TEXT NOT NULL, published_at TEXT, object_key TEXT, sha256 TEXT, size INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, likes INTEGER NOT NULL DEFAULT 0, search_text TEXT NOT NULL DEFAULT '');
+CREATE TABLE artifact_objects (version_id TEXT NOT NULL, part TEXT NOT NULL, object_key TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (version_id, part));
+CREATE TABLE refs (version_id TEXT NOT NULL, kind TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, version TEXT, integrity TEXT);
+CREATE TABLE likes (user_id TEXT NOT NULL, artifact_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (user_id, artifact_id));
+CREATE TABLE downloads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, version_id TEXT, created_at TEXT NOT NULL);
+CREATE TABLE audit (id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE artifact_counters (kind TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, next_version INTEGER NOT NULL, PRIMARY KEY (kind, owner, name));
+CREATE UNIQUE INDEX version_identity_idx ON versions (artifact_id, version);
+CREATE INDEX artifacts_filter_idx ON artifacts (kind, moderation_state, disabled, owner, name);
+CREATE VIRTUAL TABLE artifact_search USING fts5(version_id UNINDEXED, search_text);

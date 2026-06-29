@@ -5,8 +5,7 @@ All binaries, tools, and PATH are managed by **Nix**. Do not install tools manua
 ## Prerequisites
 
 1. **[Nix](https://nixos.org/download)** — package manager
-2. **[Docker](https://docs.docker.com/get-docker)** — container runtime
-3. **[direnv](https://direnv.net/docs/installation.html)** — auto-loads the nix shell on `cd`
+2. **[direnv](https://direnv.net/docs/installation.html)** — auto-loads the nix shell on `cd`
 
 ## Getting Started
 

@@ -33,6 +33,16 @@ result-*
 ### Project
 #### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
 .kagent/
+.tmp/
+node_modules/
+apps/worker/.dev.vars
+apps/worker/.wrangler/
+apps/web/.next/
+apps/web/.next-e2e/
+apps/web/next-env.d.ts
+dist/
+!examples/artifacts/*/dist/
+!examples/artifacts/*/dist/index.js
 
 ### Windows
 #### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a

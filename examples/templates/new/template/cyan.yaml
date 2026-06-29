@@ -1,0 +1,7 @@
+cyanprint: 4
+kind: template
+owner: __OWNER__
+name: __NAME__
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default

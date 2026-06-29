@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: new
+description: Scaffold a CyanPrint v4 template artifact.
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default

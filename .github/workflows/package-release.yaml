@@ -1,0 +1,14 @@
+name: package-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  packages:
+    uses: ./.github/workflows/reusable-package-release.yaml
+    secrets: inherit

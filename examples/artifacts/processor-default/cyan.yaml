@@ -1,0 +1,6 @@
+cyanprint: 4
+kind: processor
+owner: cyanprint
+name: default
+entry: src/index.ts
+bundledEntry: dist/index.js

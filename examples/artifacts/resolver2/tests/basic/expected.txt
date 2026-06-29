@@ -1,0 +1,4 @@
+ignore-type-1
+ignore-type-1
+internal
+ignore-type-2

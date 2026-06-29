@@ -1,0 +1,16 @@
+name = "cyanprint-registry-local"
+main = "src/index.ts"
+compatibility_date = "2026-06-27"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cyanprint-local"
+database_id = "local"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "cyanprint-local-r2"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "local"

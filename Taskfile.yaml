@@ -9,3 +9,75 @@ tasks:
     desc: 'Lints the whole code-base'
     cmds:
       - pre-commit run --all-files
+  typecheck:
+    desc: 'Typecheck the Bun monorepo'
+    cmds:
+      - bun run typecheck
+  unit:
+    desc: 'Run unit tests'
+    cmds:
+      - bun run unit
+  integration:
+    desc: 'Run integration tests'
+    cmds:
+      - bun run integration
+  build:
+    desc: 'Build all packages'
+    cmds:
+      - bun run build
+  dev:
+    desc: 'Run local registry Worker and web UI with token minting enabled'
+    cmds:
+      - printf 'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n' > apps/worker/.dev.vars
+      - bun run --filter @cyanprint/worker db:migrate:local
+      - |
+        set -e
+        bun run worker:dev &
+        worker_pid=$!
+        CYANPRINT_REGISTRY_URL=http://127.0.0.1:8787 \
+        CYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev \
+        CYANPRINT_WEB_ENABLE_LOCAL_TOKEN_PROXY=1 \
+        CYANPRINT_WEB_LOCAL_TOKEN_PROXY_SECRET=web-local-secret \
+          bun run web:dev --hostname 127.0.0.1 --port 3000 &
+        web_pid=$!
+        trap 'kill "$worker_pid" "$web_pid" 2>/dev/null || true' INT TERM EXIT
+        wait "$worker_pid" "$web_pid"
+  token:
+    desc: 'Mint a local registry API token'
+    cmds:
+      - bun run scripts/dev/mint-local-token.ts
+  e2e:
+    desc: 'Run all e2e tests with named cases'
+    cmds:
+      - bun run e2e
+  seed:check:
+    desc: 'Validate seeded registry artifacts and object payloads'
+    cmds:
+      - bun run seed:check
+  verify:
+    desc: 'Run typecheck, unit, integration, seed, and e2e'
+    cmds:
+      - bun run typecheck
+      - bun run test
+      - bun run seed:check
+      - bun run e2e
+  ci:local:
+    desc: 'Run the full local CI script'
+    cmds:
+      - bun run ci:local
+  worker:dev:
+    desc: 'Run local Worker'
+    cmds:
+      - bun run worker:dev
+  web:dev:
+    desc: 'Run local web UI'
+    cmds:
+      - bun run web:dev --hostname 127.0.0.1 --port 3000
+  release:check:
+    desc: 'Validate release packaging metadata'
+    cmds:
+      - bun run release:check
+  package:check:
+    desc: 'Validate package artifacts'
+    cmds:
+      - bun run package:check

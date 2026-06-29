@@ -54,6 +54,16 @@
         env = import ./nix/env.nix {
           inherit pkgs packages;
         };
+        apps = {
+          cyanprint = {
+            type = "app";
+            program = "${packages.cyanprint}/bin/cyanprint";
+          };
+          default = {
+            type = "app";
+            program = "${packages.cyanprint}/bin/cyanprint";
+          };
+        };
         devShells = import ./nix/shells.nix {
           inherit pkgs env packages;
           shellHook = checks.pre-commit-check.shellHook;
@@ -68,6 +78,7 @@
           checks
           formatter
           packages
+          apps
           devShells
           ;
       }

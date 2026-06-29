@@ -1,0 +1,16 @@
+{
+  "name": "@cyanprint/artifact-bundler",
+  "version": "4.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p ../../tsconfig.json --noEmit",
+    "typecheck": "tsc -p ../../tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@cyanprint/contracts": "workspace:*",
+    "yaml": "2.8.2"
+  }
+}

@@ -1,0 +1,26 @@
+name: reusable-package-release
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-atomi-nix-store-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: AtomiCloud/actions.setup-nix@v3
+      - run: nix develop .#ci -c bun install --frozen-lockfile
+      - run: nix develop .#ci -c bun run ci:local
+      - name: Release packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CYANPRINT_RELEASE_TOKEN: ${{ secrets.CYANPRINT_RELEASE_TOKEN }}
+        run: nix develop .#releaser -c ./scripts/ci/goreleaser-release.sh

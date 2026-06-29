@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: nix
+description: Add a Bun-friendly Nix development shell.
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default

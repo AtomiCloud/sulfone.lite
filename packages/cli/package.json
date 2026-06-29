@@ -1,0 +1,22 @@
+{
+  "name": "@cyanprint/cli",
+  "version": "4.0.0",
+  "type": "module",
+  "bin": {
+    "cyanprint": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "bun build src/main.ts --compile --outfile ../../dist/cyanprint",
+    "typecheck": "tsc -p ../../tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "8.5.2",
+    "@cyanprint/artifact-bundler": "workspace:*",
+    "@cyanprint/contracts": "workspace:*",
+    "@cyanprint/core": "workspace:*",
+    "@cyanprint/registry-client": "workspace:*",
+    "chalk": "5.6.2",
+    "commander": "15.0.0",
+    "fzstd": "0.1.1"
+  }
+}

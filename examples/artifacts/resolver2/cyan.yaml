@@ -1,0 +1,6 @@
+cyanprint: 4
+kind: resolver
+owner: cyanprint
+name: resolver2
+entry: src/index.ts
+bundledEntry: dist/index.js

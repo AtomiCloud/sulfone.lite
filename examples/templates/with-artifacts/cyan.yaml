@@ -1,0 +1,12 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: with-artifacts
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default
+  - cyanprint/uppercase
+plugins:
+  - cyanprint/footer
+resolvers:
+  - cyanprint/keep-user

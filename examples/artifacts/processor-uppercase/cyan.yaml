@@ -1,0 +1,6 @@
+cyanprint: 4
+kind: processor
+owner: cyanprint
+name: uppercase
+entry: src/index.ts
+bundledEntry: dist/index.js

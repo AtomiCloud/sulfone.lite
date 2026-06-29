@@ -1,0 +1,46 @@
+version: 2
+project_name: cyanprint
+before:
+  hooks:
+    - bun install --frozen-lockfile
+builds:
+  - id: cyanprint
+    builder: bun
+    binary: cyanprint
+    main: packages/cli/src/main.ts
+    targets:
+      - darwin-x64
+      - darwin-arm64
+      - linux-x64
+      - linux-arm64
+      - windows-x64
+archives:
+  - ids: [cyanprint]
+    formats: [tar.gz]
+checksum:
+  name_template: 'checksums.txt'
+homebrew_casks:
+  - name: cyanprint
+    ids: [cyanprint]
+    binaries:
+      - cyanprint
+    homepage: https://cyanprint.dev
+    description: CyanPrint v4 local-first template runtime
+    repository:
+      owner: cyanprint
+      name: homebrew-tap
+      token: '{{ .Env.CYANPRINT_RELEASE_TOKEN }}'
+scoops:
+  - name: cyanprint
+    homepage: https://cyanprint.dev
+    description: CyanPrint v4 local-first template runtime
+    repository:
+      owner: cyanprint
+      name: scoop-bucket
+      token: '{{ .Env.CYANPRINT_RELEASE_TOKEN }}'
+nfpms:
+  - id: packages
+    package_name: cyanprint
+    maintainer: CyanPrint <maintainers@cyanprint.dev>
+    ids: [cyanprint]
+    formats: [deb, rpm, apk, archlinux]

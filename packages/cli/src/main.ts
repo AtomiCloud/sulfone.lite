@@ -1,0 +1,328 @@
+#!/usr/bin/env bun
+import type { PromptAdapter } from '@cyanprint/contracts';
+import { Command, CommanderError } from 'commander';
+import { cacheCommand } from './commands/cache';
+import { createCommand } from './commands/create';
+import { pushCommand } from './commands/push';
+import { searchCommand } from './commands/search';
+import { testCommand } from './commands/test';
+import { tryCommand } from './commands/try';
+import { trustCommand } from './commands/trust';
+import { updateCommand } from './commands/update';
+import { inquirerPromptAdapter } from './inquirer-prompt-adapter';
+import { brand, failure, ReportedCliError } from './ui';
+import { VERSION } from './version';
+
+type OptionValues = Record<string, string | boolean | undefined>;
+
+type ProgramRuntime = {
+  jsonErrors?: boolean;
+  promptAdapterFactory?: (answers: Record<string, unknown>) => PromptAdapter;
+  silent?: boolean;
+};
+
+type CliOptionSpec = {
+  flag: string;
+  value?: string;
+  description: string;
+  defaultValue?: string;
+  required?: boolean;
+};
+
+export function createProgram(runtime: ProgramRuntime = {}): Command {
+  const promptAdapterFactory = runtime.promptAdapterFactory ?? inquirerPromptAdapter;
+  const program = new Command();
+  program
+    .name('cyanprint')
+    .description('CyanPrint v4 local-first template runtime')
+    .version(`cyanprint ${VERSION}`, '-v, --version', 'print the CyanPrint version')
+    .exitOverride()
+    .configureOutput({
+      outputError: message => {
+        if (!runtime.jsonErrors) {
+          console.error(failure(message.trimEnd()));
+        }
+      },
+    })
+    .addHelpText('beforeAll', `${brand()}\nFast Bun-native templates, resolvers, processors, and plugins.\n`)
+    .addHelpText(
+      'afterAll',
+      `
+Examples:
+  cyanprint create cyanprint/nextjs-app --out ./app
+  cyanprint create ./examples/templates/hello --out ./app --headless --answers answers.json
+  cyanprint search nextjs --kind template --registry http://127.0.0.1:8787
+  cyanprint test ./examples/templates/hello
+  cyanprint push ./examples/artifacts/processor-default --dry-run
+`,
+    );
+  if (!runtime.jsonErrors) {
+    program.showHelpAfterError();
+  }
+
+  withOptions(
+    program
+      .command('create')
+      .argument('<template>', 'template path or registry reference')
+      .argument('[out]', 'output directory; defaults to the current directory')
+      .description('create a project from a template'),
+    CREATE_OPTIONS,
+  ).action(async (template: string, out: string | undefined, options: OptionValues) => {
+    await createCommand([template, ...(out ? [out] : []), ...optionArgv(options, CREATE_OPTIONS)], {
+      promptAdapterFactory,
+      silent: runtime.silent,
+    });
+  });
+
+  withOptions(
+    program
+      .command('try')
+      .argument('<template>', 'template path or registry reference')
+      .argument('[out]', 'optional output directory; defaults to a temp scratch folder')
+      .description('try a template locally'),
+    TRY_OPTIONS,
+  ).action(async (template: string, out: string | undefined, options: OptionValues) => {
+    await tryCommand([template, ...(out ? [out] : []), ...optionArgv(options, TRY_OPTIONS)], {
+      promptAdapterFactory,
+    });
+  });
+
+  withOptions(
+    program
+      .command('update')
+      .argument('<project>', 'project directory to update')
+      .description('update a project with a newer template output'),
+    UPDATE_OPTIONS,
+  ).action(async (project: string, options: OptionValues) => {
+    await updateCommand([project, ...optionArgv(options, UPDATE_OPTIONS)], {
+      promptAdapterFactory,
+    });
+  });
+
+  withOptions(
+    program
+      .command('test')
+      .argument('<target>', 'template, processor, plugin, or resolver directory')
+      .description('run standard artifact tests and snapshots'),
+    TEST_OPTIONS,
+  ).action(async (target: string, options: OptionValues) => {
+    await testCommand([target, ...optionArgv(options, TEST_OPTIONS)]);
+  });
+
+  withOptions(
+    program
+      .command('push')
+      .argument('<artifact>', 'artifact directory')
+      .description('validate, bundle, and publish an artifact'),
+    PUSH_OPTIONS,
+  ).action(async (artifact: string, options: OptionValues) => {
+    await pushCommand([artifact, ...optionArgv(options, PUSH_OPTIONS)]);
+  });
+
+  withOptions(
+    program
+      .command('search')
+      .argument('[query]', 'artifact name, owner/name, or README text')
+      .description('search templates, template groups, processors, plugins, and resolvers'),
+    SEARCH_OPTIONS,
+  ).action(async (query: string | undefined, options: OptionValues) => {
+    await searchCommand([...(query ? [query] : []), ...optionArgv(options, SEARCH_OPTIONS)]);
+  });
+
+  withOptions(
+    program
+      .command('cache')
+      .argument('[action]', 'inspect or clean', 'inspect')
+      .description('inspect or clean the local artifact cache'),
+    CACHE_OPTIONS,
+  ).action(async (action: string, options: OptionValues) => {
+    await cacheCommand([action, ...optionArgv(options, CACHE_OPTIONS)]);
+  });
+
+  withOptions(
+    program
+      .command('trust')
+      .argument('[action]', 'inspect or approve', 'inspect')
+      .argument('[scope]', 'organization, template, or version trust scope')
+      .argument('[ref]', 'artifact reference to approve')
+      .description('inspect or approve trusted artifacts'),
+    TRUST_OPTIONS,
+  ).action(async (action: string, scope: string | undefined, ref: string | undefined, options: OptionValues) => {
+    await trustCommand([
+      action,
+      ...[scope, ref].filter((value): value is string => Boolean(value)),
+      ...optionArgv(options, TRUST_OPTIONS),
+    ]);
+  });
+
+  program
+    .command('version')
+    .description('print the CyanPrint version')
+    .action(() => {
+      console.log(`cyanprint ${VERSION}`);
+    });
+
+  return program;
+}
+
+export async function main(argv: string[] = Bun.argv.slice(2), runtime: ProgramRuntime = {}): Promise<void> {
+  const jsonErrors = runtime.jsonErrors ?? hasJsonFlag(argv);
+  try {
+    await createProgram({ ...runtime, jsonErrors }).parseAsync(argv, { from: 'user' });
+  } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0) {
+      return;
+    }
+    if (error instanceof CommanderError && !jsonErrors) {
+      process.exitCode = error.exitCode;
+      return;
+    }
+    if (error instanceof ReportedCliError && !jsonErrors) {
+      process.exitCode = 1;
+      return;
+    }
+    printCliError(error, jsonErrors);
+    process.exitCode = error instanceof CommanderError ? error.exitCode : 1;
+  }
+}
+
+function withOptions(command: Command, specs: CliOptionSpec[]): Command {
+  for (const spec of specs) {
+    const declaration = `--${spec.flag}${spec.value ? ` ${spec.value}` : ''}`;
+    if (spec.required) {
+      command.requiredOption(declaration, spec.description, spec.defaultValue);
+    } else {
+      command.option(declaration, spec.description, spec.defaultValue);
+    }
+  }
+  return command;
+}
+
+function optionArgv(options: OptionValues, specs: CliOptionSpec[]): string[] {
+  const argv: string[] = [];
+  for (const spec of specs) {
+    const value = options[optionKey(spec.flag)];
+    if (value === true) {
+      argv.push(`--${spec.flag}`);
+    } else if (typeof value === 'string') {
+      argv.push(`--${spec.flag}`, value);
+    }
+  }
+  return argv;
+}
+
+function optionKey(flag: string): string {
+  return flag.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+}
+
+function hasJsonFlag(argv: string[]): boolean {
+  return argv.includes('--json');
+}
+
+function printCliError(error: unknown, json: boolean): void {
+  const problem =
+    error && typeof error === 'object' && 'problem' in error ? (error as { problem: unknown }).problem : undefined;
+  const message =
+    problem && typeof problem === 'object' && 'message' in problem
+      ? String(problem.message)
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  if (json) {
+    console.error(
+      JSON.stringify(
+        {
+          status: 'error',
+          problem: problem ?? (error instanceof CommanderError ? { code: error.code, message } : { message }),
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.error(failure(message));
+  }
+}
+
+const CREATE_OPTIONS: CliOptionSpec[] = [
+  { flag: 'out', value: '<dir>', description: 'output directory; overrides positional out' },
+  { flag: 'answers', value: '<file>', description: 'JSON answers file for headless or prefilled runs' },
+  { flag: 'headless', description: 'disable prompts and require supplied/default answers' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+  { flag: 'registry', value: '<url>', description: 'registry base URL' },
+  { flag: 'cache-dir', value: '<dir>', description: 'cache directory' },
+  { flag: 'bypass-cache', description: 'download fresh registry artifacts' },
+  { flag: 'trust', description: 'trust the resolved template for this run' },
+  { flag: 'trust-fixture', value: '<name>', description: 'local trust fixture name' },
+  { flag: 'trust-dir', value: '<dir>', description: 'trust store directory' },
+];
+
+const TRY_OPTIONS: CliOptionSpec[] = [
+  { flag: 'out', value: '<dir>', description: 'output directory; defaults to a temp scratch folder' },
+  ...CREATE_OPTIONS.slice(1),
+];
+
+const UPDATE_OPTIONS: CliOptionSpec[] = [
+  {
+    flag: 'template',
+    value: '<template>',
+    description: 'template path or registry reference',
+    required: true,
+  },
+  { flag: 'answers', value: '<file>', description: 'JSON answers file for headless or prefilled runs' },
+  { flag: 'headless', description: 'disable prompts and require supplied/default answers' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+  { flag: 'registry', value: '<url>', description: 'registry base URL' },
+  { flag: 'cache-dir', value: '<dir>', description: 'cache directory' },
+  { flag: 'bypass-cache', description: 'download fresh registry artifacts' },
+  { flag: 'trust', description: 'trust the resolved template for this run' },
+  { flag: 'trust-fixture', value: '<name>', description: 'local trust fixture name' },
+  { flag: 'trust-dir', value: '<dir>', description: 'trust store directory' },
+];
+
+const TEST_OPTIONS: CliOptionSpec[] = [
+  { flag: 'answers', value: '<file>', description: 'JSON answers file for template tests' },
+  { flag: 'out', value: '<dir>', description: 'template test output directory' },
+  { flag: 'snapshot', value: '<file>', description: 'snapshot file for template output' },
+  { flag: 'update-snapshots', description: 'rewrite expected snapshots' },
+  { flag: 'tests', value: '<dir>', description: 'artifact-specific tests directory' },
+  { flag: 'report', value: '<file>', description: 'write JSON report to a file' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+const PUSH_OPTIONS: CliOptionSpec[] = [
+  { flag: 'registry', value: '<url>', description: 'registry base URL' },
+  { flag: 'dry-run', description: 'validate without publishing' },
+  { flag: 'script-only', description: 'publish a script-only template' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+const SEARCH_OPTIONS: CliOptionSpec[] = [
+  { flag: 'registry', value: '<url>', description: 'registry base URL', defaultValue: 'http://127.0.0.1:8787' },
+  { flag: 'kind', value: '<kind>', description: 'template, template-group, processor, plugin, or resolver' },
+  { flag: 'query', value: '<text>', description: 'query text; overrides empty positional query' },
+  { flag: 'limit', value: '<number>', description: 'maximum results', defaultValue: '20' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+const CACHE_OPTIONS: CliOptionSpec[] = [
+  { flag: 'cache-dir', value: '<dir>', description: 'cache directory' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+const TRUST_OPTIONS: CliOptionSpec[] = [
+  { flag: 'scope', value: '<scope>', description: 'organization, template, or version trust scope' },
+  { flag: 'ref', value: '<ref>', description: 'artifact reference to approve' },
+  { flag: 'kind', value: '<kind>', description: 'artifact kind', defaultValue: 'template' },
+  { flag: 'trust-dir', value: '<dir>', description: 'trust store directory' },
+  { flag: 'owner', value: '<owner>', description: 'artifact owner' },
+  { flag: 'name', value: '<name>', description: 'artifact name' },
+  { flag: 'version', value: '<version>', description: 'registry-assigned integer version' },
+  { flag: 'integrity', value: '<sha>', description: 'artifact integrity' },
+  { flag: 'pins-fingerprint', value: '<hash>', description: 'dependency pins fingerprint' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+if (import.meta.main) {
+  await main();
+}

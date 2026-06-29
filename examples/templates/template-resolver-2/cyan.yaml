@@ -1,0 +1,10 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: template-resolver-2
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default
+resolvers:
+  - cyanprint/resolver1
+  - cyanprint/resolver2

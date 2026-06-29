@@ -1,8 +1,16 @@
 name: CI
 on:
   push:
+  pull_request:
 jobs:
-  precommit:
-    name: Pre-Commit
-    uses: ./.github/workflows/⚡reusable-precommit.yaml
-    secrets: inherit
+  local-ci:
+    name: Local CI
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-atomi-nix-store-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: AtomiCloud/actions.setup-nix@v3
+      - run: nix develop .#ci -c bun install --frozen-lockfile
+      - run: nix develop .#ci -c bun run ci:local

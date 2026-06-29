@@ -1,0 +1,18 @@
+cyanprint: 4
+kind: template-group
+owner: cyanprint
+name: basic-group
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default
+templates:
+  - cyanprint/hello
+  - cyanprint/with-artifacts
+presets:
+  templates:
+    cyanprint/hello:
+      answers:
+        name: Group Hello
+    cyanprint/with-artifacts:
+      answers:
+        name: Artifact Project

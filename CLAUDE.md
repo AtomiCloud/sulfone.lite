@@ -1,6 +1,6 @@
 # CI/CD
 
-This project uses GitHub Actions for CI/CD. The base CI runs pre-commit hooks using nscloud runners. See [docs/developer/standard/ci-cd.md](docs/developer/standard/ci-cd.md) for details.
+This project uses GitHub Actions for CI/CD. The base CI runs the full local CyanPrint v4 gate with nscloud runners; package releases use GoReleaser through `.github/workflows/package-release.yaml`.
 
 # Conventional Commits
 
@@ -13,8 +13,7 @@ All binaries, tools, and PATH are managed by **Nix**. Do not install tools manua
 ## Prerequisites
 
 1. **Nix** — package manager ([install](https://nixos.org/download))
-2. **Docker** — container runtime ([install](https://docs.docker.com/get-docker))
-3. **direnv** — auto-loads the nix shell on `cd` ([install](https://direnv.net/docs/installation.html))
+2. **direnv** — auto-loads the nix shell on `cd` ([install](https://direnv.net/docs/installation.html))
 
 ## Getting Started
 

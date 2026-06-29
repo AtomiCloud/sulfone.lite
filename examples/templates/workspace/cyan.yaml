@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: workspace
+description: Scaffold a Bun monorepo workspace.
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default

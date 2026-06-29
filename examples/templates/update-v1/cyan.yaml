@@ -1,0 +1,7 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: update-example
+bundledEntry: cyan.ts
+processors:
+  - cyanprint/default

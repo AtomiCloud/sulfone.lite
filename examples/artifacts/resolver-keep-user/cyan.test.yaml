@@ -1,0 +1,19 @@
+cases:
+  - name: current-wins
+    prior: tests/current-wins/prior.txt
+    current: tests/current-wins/current.txt
+    target: tests/current-wins/target.txt
+    expected: tests/current-wins/expected.txt
+    validations:
+      - contains: 'user edit'
+      - notContains: 'template edit'
+  - name: folder-current-wins
+    prior: tests/folder-current-wins/prior
+    current: tests/folder-current-wins/current
+    target: tests/folder-current-wins/target
+    expected: tests/folder-current-wins/expected
+    validations:
+      - path: README.md
+        contains: 'user folder edit'
+      - path: README.md
+        notContains: 'template folder edit'

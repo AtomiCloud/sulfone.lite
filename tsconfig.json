@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "allowJs": false,
+    "baseUrl": ".",
+    "composite": false,
+    "declaration": true,
+    "declarationMap": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "paths": {
+      "@cyanprint/artifact-bundler": ["packages/artifact-bundler/src/index.ts"],
+      "@cyanprint/artifact-runner": ["packages/artifact-runner/src/index.ts"],
+      "@cyanprint/contracts": ["packages/contracts/src/index.ts"],
+      "@cyanprint/core": ["packages/core/src/index.ts"],
+      "@cyanprint/registry-client": ["packages/registry-client/src/index.ts"],
+      "@atomicloud/cyan-sdk": ["packages/cyan-sdk-compat/src/index.ts"]
+    },
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2023",
+    "types": ["bun-types"]
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "e2e/**/*.ts",
+    "examples/**/*.ts",
+    "packages/**/*.ts",
+    "scripts/**/*.ts"
+  ],
+  "exclude": ["apps/web/next-env.d.ts"]
+}
