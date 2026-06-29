@@ -9,7 +9,7 @@ const goreleaser = Bun.spawnSync(['goreleaser', 'check', '.goreleaser.yaml'], {
     ...process.env,
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'remote.origin.url',
-    GIT_CONFIG_VALUE_0: 'https://github.com/cyanprint/cyanprint',
+    GIT_CONFIG_VALUE_0: 'https://github.com/AtomiCloud/sulfone.lite',
   },
 });
 if (!goreleaser.success) {
@@ -32,7 +32,7 @@ if (!version.success || version.stdout.toString().trim() !== `cyanprint ${expect
   throw new Error('compiled cyanprint binary did not report the exact package version without external bun');
 }
 const installDocs = await Bun.file('docs/user/install.md').text();
-if (!installDocs.includes('nix profile install github:cyanprint/cyanprint#cyanprint')) {
+if (!installDocs.includes('nix profile install github:AtomiCloud/sulfone.lite#cyanprint')) {
   throw new Error('install docs missing Nix install path');
 }
 if (!(await Bun.file('examples/templates/nix/cyan.yaml').exists())) {

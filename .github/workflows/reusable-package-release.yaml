@@ -22,5 +22,6 @@ jobs:
       - name: Release packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CYANPRINT_RELEASE_TOKEN: ${{ secrets.CYANPRINT_RELEASE_TOKEN }}
+          SCOOP_BREW_TOKEN: ${{ secrets.SCOOP_BREW_TOKEN }}
+          FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
         run: nix develop .#releaser -c ./scripts/ci/goreleaser-release.sh

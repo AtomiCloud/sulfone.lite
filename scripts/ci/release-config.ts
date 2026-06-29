@@ -39,13 +39,12 @@ export function assertGoreleaserConfig(config: GoreleaserConfig): void {
 
   const brew = asObjectArray(config.homebrew_casks, 'homebrew_casks').find(item => item.name === 'cyanprint');
   assert(brew, 'GoReleaser homebrew_casks must include cyanprint.');
-  assertContainsAll(asStringArray(brew.ids, 'homebrew_casks.ids'), ['cyanprint'], 'homebrew cask ids');
   assertContainsAll(asStringArray(brew.binaries, 'homebrew_casks.binaries'), ['cyanprint'], 'homebrew cask binaries');
-  assertRepository(brew.repository, 'homebrew_casks.repository');
+  assertRepository(brew.repository, 'homebrew_casks.repository', 'homebrew-tap');
 
   const scoop = asObjectArray(config.scoops, 'scoops').find(item => item.name === 'cyanprint');
   assert(scoop, 'GoReleaser scoops must include cyanprint.');
-  assertRepository(scoop.repository, 'scoops.repository');
+  assertRepository(scoop.repository, 'scoops.repository', 'scoop-bucket');
 
   const nfpm = asObjectArray(config.nfpms, 'nfpms').find(item => item.id === 'packages');
   assert(nfpm, 'GoReleaser nfpms must include packages.');
@@ -54,16 +53,11 @@ export function assertGoreleaserConfig(config: GoreleaserConfig): void {
   assertContainsAll(asStringArray(nfpm.formats, 'nfpms.formats'), ['deb', 'rpm', 'apk', 'archlinux'], 'nfpm formats');
 }
 
-function assertRepository(value: unknown, label: string): void {
+function assertRepository(value: unknown, label: string, repositoryName: string): void {
   const repository = value as { owner?: unknown; name?: unknown; token?: unknown } | undefined;
-  assert(typeof repository?.owner === 'string' && repository.owner.length > 0, `${label}.owner is required.`);
-  assert(typeof repository?.name === 'string' && repository.name.length > 0, `${label}.name is required.`);
-  if (repository.owner === 'cyanprint' && (repository.name === 'homebrew-tap' || repository.name === 'scoop-bucket')) {
-    assert(
-      repository.token === '{{ .Env.CYANPRINT_RELEASE_TOKEN }}',
-      `${label}.token must use CYANPRINT_RELEASE_TOKEN.`,
-    );
-  }
+  assert(repository?.owner === 'AtomiCloud', `${label}.owner must be AtomiCloud.`);
+  assert(repository.name === repositoryName, `${label}.name must be ${repositoryName}.`);
+  assert(repository.token === '{{ .Env.SCOOP_BREW_TOKEN }}', `${label}.token must use SCOOP_BREW_TOKEN.`);
 }
 
 function asObjectArray(value: unknown, label: string): Array<Record<string, unknown>> {

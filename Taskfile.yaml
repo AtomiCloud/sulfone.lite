@@ -42,6 +42,19 @@ tasks:
         web_pid=$!
         trap 'kill "$worker_pid" "$web_pid" 2>/dev/null || true' INT TERM EXIT
         wait "$worker_pid" "$web_pid"
+  deploy:
+    desc: 'Deploy Worker and web UI with local Wrangler credentials'
+    cmds:
+      - task: deploy:worker
+      - task: deploy:web
+  deploy:worker:
+    desc: 'Deploy registry Worker with local Wrangler credentials'
+    cmds:
+      - bun run deploy:worker
+  deploy:web:
+    desc: 'Deploy Next.js web UI to Cloudflare with local Wrangler credentials'
+    cmds:
+      - bun run deploy:web
   token:
     desc: 'Mint a local registry API token'
     cmds:

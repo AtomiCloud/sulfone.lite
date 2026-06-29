@@ -21,26 +21,30 @@ checksum:
   name_template: 'checksums.txt'
 homebrew_casks:
   - name: cyanprint
-    ids: [cyanprint]
     binaries:
       - cyanprint
     homepage: https://cyanprint.dev
     description: CyanPrint v4 local-first template runtime
     repository:
-      owner: cyanprint
+      owner: AtomiCloud
       name: homebrew-tap
-      token: '{{ .Env.CYANPRINT_RELEASE_TOKEN }}'
+      token: '{{ .Env.SCOOP_BREW_TOKEN }}'
 scoops:
   - name: cyanprint
     homepage: https://cyanprint.dev
     description: CyanPrint v4 local-first template runtime
     repository:
-      owner: cyanprint
+      owner: AtomiCloud
       name: scoop-bucket
-      token: '{{ .Env.CYANPRINT_RELEASE_TOKEN }}'
+      token: '{{ .Env.SCOOP_BREW_TOKEN }}'
 nfpms:
   - id: packages
     package_name: cyanprint
-    maintainer: CyanPrint <maintainers@cyanprint.dev>
+    vendor: AtomiCloud
+    homepage: https://cyanprint.dev/
+    maintainer: Ernest Ng <kirinnee97@gmail.com>
+    description: CyanPrint v4 local-first template runtime
+    license: MIT
     ids: [cyanprint]
+    meta: false
     formats: [deb, rpm, apk, archlinux]

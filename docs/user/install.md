@@ -3,26 +3,26 @@
 ## Homebrew
 
 ```bash
-brew tap cyanprint/homebrew-tap
+brew tap AtomiCloud/homebrew-tap
 brew install --cask cyanprint
 ```
 
 ## Scoop
 
 ```bash
-scoop bucket add cyanprint https://github.com/cyanprint/scoop-bucket
+scoop bucket add atomicloud https://github.com/AtomiCloud/scoop-bucket
 scoop install cyanprint
 ```
 
 ## Nix
 
 ```bash
-nix profile install github:cyanprint/cyanprint#cyanprint
+nix profile install github:AtomiCloud/sulfone.lite#cyanprint
 ```
 
 ## apt/deb
 
-Download the `.deb` release artifact, then install it locally:
+Install from the AtomiCloud Gemfury apt repository, or download the `.deb` release artifact and install it locally:
 
 ```bash
 sudo apt install ./cyanprint_*_amd64.deb
@@ -30,7 +30,7 @@ sudo apt install ./cyanprint_*_amd64.deb
 
 ## yum/rpm
 
-Download the `.rpm` release artifact, then install it locally:
+Install from the AtomiCloud Gemfury yum repository, or download the `.rpm` release artifact and install it locally:
 
 ```bash
 sudo yum install ./cyanprint-*.x86_64.rpm
@@ -38,7 +38,7 @@ sudo yum install ./cyanprint-*.x86_64.rpm
 
 ## apk
 
-Download the `.apk` release artifact, then install it locally:
+Install from the AtomiCloud Gemfury apk repository, or download the `.apk` release artifact and install it locally:
 
 ```bash
 sudo apk add --allow-untrusted ./cyanprint_*.apk
