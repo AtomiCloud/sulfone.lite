@@ -22,6 +22,7 @@ with packages;
   ];
 
   releaser = [
+    pnpm
     sg
   ];
 
