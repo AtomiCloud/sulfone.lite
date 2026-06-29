@@ -1,6 +1,7 @@
 name: package-release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
