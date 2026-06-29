@@ -2,9 +2,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 
 const defaults = {
   CYANPRINT_REGISTRY_WORKER_NAME: 'cyanprint-registry',
+  CYANPRINT_REGISTRY_DOMAIN: 'registry.cyanprint.dev',
   CYANPRINT_D1_DATABASE_NAME: 'cyanprint-registry',
   CYANPRINT_R2_BUCKET_NAME: 'cyanprint-registry-artifacts',
   CYANPRINT_WEB_WORKER_NAME: 'cyanprint-web',
+  CYANPRINT_WEB_DOMAIN: 'cyanprint.dev',
   CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: 'cyanprint-web-opennext-cache',
   CYANPRINT_RELEASE_REGISTRY_URL: 'https://registry.cyanprint.dev',
 };

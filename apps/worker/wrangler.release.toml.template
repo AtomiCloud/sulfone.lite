@@ -2,6 +2,10 @@ name = "${CYANPRINT_REGISTRY_WORKER_NAME}"
 main = "../../apps/worker/src/index.ts"
 compatibility_date = "2026-06-27"
 
+[[routes]]
+pattern = "${CYANPRINT_REGISTRY_DOMAIN}"
+custom_domain = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "${CYANPRINT_D1_DATABASE_NAME}"

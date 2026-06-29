@@ -13,10 +13,12 @@ The registry runs as a Hono app on Cloudflare Workers.
 Stable release names live in Wrangler config and can be overridden by GitHub org variables:
 
 - Registry Worker: `cyanprint-registry`
+- Registry custom domain: `registry.cyanprint.dev`
 - Registry D1 database: `cyanprint-registry`
 - Registry R2 bucket: `cyanprint-registry-artifacts`
 - Registry KV namespace: `cyanprint-registry`
 - Web Worker: `cyanprint-web`
+- Web custom domain: `cyanprint.dev`
 - Web OpenNext cache R2 bucket: `cyanprint-web-opennext-cache`
 
 Cloudflare-generated IDs are not checked in.
@@ -29,6 +31,13 @@ pls deploy:release
 ```
 
 The task creates or finds the release D1 database, R2 buckets, and KV namespace by name, writes `.tmp/cloudflare/release.env`, renders Wrangler configs, applies remote D1 migrations, then deploys the registry Worker and web Worker.
+
+The release Wrangler configs attach Worker Custom Domains:
+
+- `registry.cyanprint.dev` -> registry Worker
+- `cyanprint.dev` -> web Worker
+
+The `cyanprint.dev` zone must be active in the same Cloudflare account. The hostnames must not already be attached to another Worker, Pages project, or conflicting DNS record.
 
 To only create or discover the Cloudflare resources:
 
