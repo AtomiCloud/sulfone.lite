@@ -27,6 +27,7 @@ let
           goreleaser
           go-task
           infisical
+          pnpm
           pre-commit
           shellcheck
           treefmt
