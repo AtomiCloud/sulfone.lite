@@ -15,6 +15,7 @@ export type BundleResult = {
 
 const resolverSymbol = Symbol.for('cyanprint.resolver');
 const workspaceResolvedPackages = new Set(['@atomicloud/cyan-sdk', 'smob', 'yaml']);
+const workspaceFallbackPackages = new Set(['eta']);
 
 function resolverGlobal(): Record<PropertyKey, unknown> {
   return globalThis as unknown as Record<PropertyKey, unknown>;
@@ -133,10 +134,13 @@ export async function compileRuntimeBundle(args: { entrypoint: string; output: s
           name: 'cyanprint-workspace-dependency-resolver',
           setup(build) {
             build.onResolve({ filter: /.*/ }, args => {
-              if (!workspaceResolvedPackages.has(args.path)) {
-                return undefined;
+              if (workspaceResolvedPackages.has(args.path)) {
+                return { path: Bun.resolveSync(args.path, import.meta.dir) };
               }
-              return { path: Bun.resolveSync(args.path, import.meta.dir) };
+              if (workspaceFallbackPackages.has(args.path) && !canResolveFromImporter(args.path, args.importer)) {
+                return { path: Bun.resolveSync(args.path, import.meta.dir) };
+              }
+              return undefined;
             });
           },
         },
@@ -159,6 +163,15 @@ export async function compileRuntimeBundle(args: { entrypoint: string; output: s
     }
   } finally {
     await rm(tempOut, { recursive: true, force: true });
+  }
+}
+
+function canResolveFromImporter(specifier: string, importer: string): boolean {
+  try {
+    Bun.resolveSync(specifier, importer ? dirname(importer) : process.cwd());
+    return true;
+  } catch {
+    return false;
   }
 }
 

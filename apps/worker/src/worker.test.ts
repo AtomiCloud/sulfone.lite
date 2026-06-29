@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
+import { readdir } from 'node:fs/promises';
 import { sha256 } from '@cyanprint/core';
 import { artifactIntegrity, artifactVersionId } from '@cyanprint/contracts';
 import { seedArtifacts, seedObjectPayloads } from '@cyanprint/registry-client';
@@ -12,6 +13,13 @@ const testEnv = {
   CYANPRINT_ENABLE_LOCAL_AUTH: '1',
   CYANPRINT_ENABLE_REGISTRY_SEEDS: '1',
   CYANPRINT_LOCAL_DEV_SECRET: 'cyanprint-local-dev',
+};
+const githubOAuthEnv = {
+  CYANPRINT_GITHUB_CLIENT_ID: 'github-client',
+  CYANPRINT_GITHUB_CLIENT_SECRET: 'github-secret',
+  CYANPRINT_GITHUB_ADMIN_LOGINS: 'octouser',
+  CYANPRINT_AUTH_RETURN_ORIGINS: 'https://cyanprint.dev',
+  CYANPRINT_WEB_URL: 'https://cyanprint.dev',
 };
 
 beforeEach(() => {
@@ -43,6 +51,53 @@ async function localToken(
   });
   const token = (await response.json()) as { id: string; token: string };
   return { ...token, session };
+}
+
+async function githubSession(env: WorkerBindings): Promise<string> {
+  const start = await app.request(
+    '/auth/github/start?return_to=https%3A%2F%2Fcyanprint.dev%2Fauth%2Fcallback',
+    {},
+    env,
+  );
+  expect(start.status).toBe(302);
+  const authorize = new URL(start.headers.get('location') ?? '');
+  const callback = await app.request(
+    `/auth/github/callback?code=oauth-code&state=${encodeURIComponent(authorize.searchParams.get('state') ?? '')}`,
+    {},
+    env,
+  );
+  expect(callback.status).toBe(302);
+  const returned = new URL(callback.headers.get('location') ?? '');
+  const handoff = returned.searchParams.get('handoff') ?? '';
+  const consumed = await app.request(
+    '/auth/github/consume',
+    {
+      method: 'POST',
+      body: JSON.stringify({ handoff }),
+    },
+    env,
+  );
+  expect(consumed.status).toBe(200);
+  return ((await consumed.json()) as { session: string }).session;
+}
+
+async function withMockGitHubOAuth<T>(fn: (env: WorkerBindings) => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'https://github.com/login/oauth/access_token') {
+      return Response.json({ access_token: 'gho_test' });
+    }
+    if (url === 'https://api.github.com/user') {
+      return Response.json({ id: 12345, login: 'OctoUser' });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+  try {
+    return await fn(githubOAuthEnv);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 async function uploadObject(
@@ -117,9 +172,13 @@ async function createTestCloudflareBindings(
   options: { seed?: boolean } = {},
 ): Promise<WorkerBindings & { close(): void }> {
   const db = new Database(':memory:');
-  for (const statement of (await Bun.file('apps/worker/migrations/0001_initial_registry.sql').text()).split(';')) {
-    if (statement.trim()) {
-      db.run(statement);
+  const migrationDir = 'apps/worker/migrations';
+  const migrationFiles = (await readdir(migrationDir)).filter(file => file.endsWith('.sql')).sort();
+  for (const file of migrationFiles) {
+    for (const statement of (await Bun.file(`${migrationDir}/${file}`).text()).split(';')) {
+      if (statement.trim()) {
+        db.run(statement);
+      }
     }
   }
   const kv = new Map<string, string>();
@@ -210,6 +269,143 @@ describe('tokens user profile session admin permission artifact registry batch r
     expect(token.status).toBe(200);
     const list = await app.request('/tokens', { headers: { 'x-cyanprint-session': session } });
     expect(await list.text()).not.toContain('secretHash');
+  });
+
+  test('GitHub OAuth creates a registry session through a one-time handoff', async () => {
+    await withMockGitHubOAuth(async env => {
+      const start = await app.request(
+        '/auth/github/start?return_to=https%3A%2F%2Fcyanprint.dev%2Fauth%2Fcallback',
+        {},
+        env,
+      );
+      expect(start.status).toBe(302);
+      const authorize = new URL(start.headers.get('location') ?? '');
+      expect(authorize.hostname).toBe('github.com');
+      expect(authorize.searchParams.get('client_id')).toBe('github-client');
+
+      const callback = await app.request(
+        `/auth/github/callback?code=oauth-code&state=${encodeURIComponent(authorize.searchParams.get('state') ?? '')}`,
+        {},
+        env,
+      );
+      expect(callback.status).toBe(302);
+      const returned = new URL(callback.headers.get('location') ?? '');
+      expect(returned.origin).toBe('https://cyanprint.dev');
+      const handoff = returned.searchParams.get('handoff') ?? '';
+      expect(handoff.startsWith('cph_')).toBe(true);
+
+      const consumed = await app.request(
+        '/auth/github/consume',
+        {
+          method: 'POST',
+          body: JSON.stringify({ handoff }),
+        },
+        env,
+      );
+      expect(consumed.status).toBe(200);
+      const session = ((await consumed.json()) as { session: string }).session;
+      const me = await app.request('/me', { headers: { 'x-cyanprint-session': session } }, env);
+      expect(await me.json()).toEqual({
+        user: { id: 'github:12345', handle: 'octouser', login: 'octouser', admin: true },
+      });
+      const tokenResponse = await app.request('/tokens', {
+        method: 'POST',
+        headers: { 'x-cyanprint-session': session },
+        body: JSON.stringify({ name: 'github-admin' }),
+      });
+      const token = ((await tokenResponse.json()) as { token: string }).token;
+      const demotedAdmin = await app.request('/admin/artifacts', { headers: { authorization: `Bearer ${token}` } });
+      expect(demotedAdmin.status).toBe(403);
+      const stillAdmin = await app.request('/admin/artifacts', { headers: { authorization: `Bearer ${token}` } }, env);
+      expect(stillAdmin.status).toBe(200);
+      const logout = await app.request('/auth/logout', { method: 'POST', headers: { 'x-cyanprint-session': session } });
+      expect(logout.status).toBe(200);
+      const afterLogout = await app.request('/me', { headers: { 'x-cyanprint-session': session } });
+      expect(afterLogout.status).toBe(401);
+      const replay = await app.request('/auth/github/consume', {
+        method: 'POST',
+        body: JSON.stringify({ handoff }),
+      });
+      expect(replay.status).toBe(401);
+    });
+  });
+
+  test('GitHub users can choose a CyanPrint handle that survives re-login', async () => {
+    await withMockGitHubOAuth(async env => {
+      const firstSession = await githubSession(env);
+      const renamed = await app.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': firstSession },
+          body: JSON.stringify({ handle: 'cyan-admin' }),
+        },
+        env,
+      );
+      expect(renamed.status).toBe(200);
+      expect(await renamed.json()).toEqual({
+        user: { id: 'github:12345', handle: 'cyan-admin', login: 'octouser', admin: true },
+      });
+
+      const tokenResponse = await app.request('/tokens', {
+        method: 'POST',
+        headers: { 'x-cyanprint-session': firstSession },
+        body: JSON.stringify({ name: 'renamed-admin' }),
+      });
+      const token = ((await tokenResponse.json()) as { token: string }).token;
+      const admin = await app.request('/admin/artifacts', { headers: { authorization: `Bearer ${token}` } }, env);
+      expect(admin.status).toBe(200);
+
+      const secondSession = await githubSession(env);
+      const me = await app.request('/me', { headers: { 'x-cyanprint-session': secondSession } }, env);
+      expect(await me.json()).toEqual({
+        user: { id: 'github:12345', handle: 'cyan-admin', login: 'octouser', admin: true },
+      });
+    });
+  });
+
+  test('profile handles are validated and unique', async () => {
+    const session = await localSession('user_member');
+    const invalid = await app.request('/me', {
+      method: 'PATCH',
+      headers: { 'x-cyanprint-session': session },
+      body: JSON.stringify({ handle: 'no' }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ code: 'invalid_handle' });
+
+    const duplicate = await app.request('/me', {
+      method: 'PATCH',
+      headers: { 'x-cyanprint-session': session },
+      body: JSON.stringify({ handle: 'local' }),
+    });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({ code: 'handle_taken' });
+  });
+
+  test('D1-backed profile handle updates return duplicate only for unique handle conflicts', async () => {
+    const bindings = await createTestCloudflareBindings();
+    try {
+      const storage = createCloudflareBindingStorage(bindings);
+      await storage.upsertUser({ id: 'user_a', handle: 'publisher-a', admin: false });
+      await storage.upsertUser({ id: 'user_b', handle: 'publisher-b', admin: false });
+      await storage.createSession('user_a', 'cps_d1_a');
+
+      const duplicate = await createApp(storage).request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': 'cps_d1_a' },
+          body: JSON.stringify({ handle: 'publisher-b' }),
+        },
+        bindings,
+      );
+      expect(duplicate.status).toBe(409);
+      expect(await duplicate.json()).toMatchObject({ code: 'handle_taken' });
+      expect(await storage.getUser('user_a')).toMatchObject({ handle: 'publisher-a' });
+    } finally {
+      bindings.close();
+    }
   });
 
   test('upload sessions validate parts and finalize with server-assigned versions', async () => {

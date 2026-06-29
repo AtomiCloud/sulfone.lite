@@ -78,7 +78,7 @@ export class RegistryClient {
   async createLocalSession(
     userId = 'user_local',
     devSecret = process.env.CYANPRINT_LOCAL_DEV_SECRET ?? '',
-  ): Promise<{ session: string; user: { id: string; handle: string; admin: boolean } }> {
+  ): Promise<{ session: string; user: { id: string; handle: string; login?: string; admin: boolean } }> {
     return this.post('/auth/local-session', { userId }, { 'x-cyanprint-dev-secret': devSecret });
   }
 

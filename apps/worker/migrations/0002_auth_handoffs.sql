@@ -1,0 +1,3 @@
+CREATE TABLE IF NOT EXISTS auth_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS oauth_states (id TEXT PRIMARY KEY, return_to TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_handoffs (id TEXT PRIMARY KEY, session TEXT NOT NULL, user_id TEXT NOT NULL, expires_at TEXT NOT NULL);

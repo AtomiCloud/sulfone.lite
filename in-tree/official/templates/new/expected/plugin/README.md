@@ -7,11 +7,11 @@ This plugin receives `{ files, config }` and returns a file map. Use plugins for
 ## Test
 
 ```bash
-cyanprint test .
+bun run test
 ```
 
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" bun run push
 ```

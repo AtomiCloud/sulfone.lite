@@ -14,7 +14,7 @@ import {
   upsertArtifact,
   type SeedObjectPayload,
 } from '@cyanprint/registry-client';
-import type { RegistryStorage, StoredUploadSession } from './types';
+import type { RegistryStorage, StoredAuthHandoff, StoredOAuthState, StoredUploadSession } from './types';
 
 export function createCloudflareLocalStorage(
   seed: ArtifactVersion[] = [],
@@ -23,7 +23,9 @@ export function createCloudflareLocalStorage(
   const state = createLocalRegistryState();
   const objects = new Map<string, { ref: ObjectRef; payload: Uint8Array }>();
   const uploads = new Map<string, StoredUploadSession>();
-  const sessions = new Map<string, string>();
+  const sessions = new Map<string, { userId: string; expiresAt: string }>();
+  const oauthStates = new Map<string, StoredOAuthState>();
+  const authHandoffs = new Map<string, StoredAuthHandoff>();
   const likes = new Set<string>();
   const downloads: Array<{ artifactId: string; createdAt: string }> = [];
   state.artifacts.push(...seed.map(artifact => structuredClone(artifact)));
@@ -40,15 +42,64 @@ export function createCloudflareLocalStorage(
     getUser(id) {
       return state.users.find(user => user.id === id);
     },
+    upsertUser(user) {
+      const existing = state.users.findIndex(item => item.id === user.id);
+      if (existing >= 0) {
+        const current = state.users[existing]!;
+        state.users[existing] = {
+          ...current,
+          handle: user.handle,
+          login: user.login ?? current.login,
+          admin: Boolean(user.admin),
+        };
+        return;
+      }
+      state.users.push({ id: user.id, handle: user.handle, login: user.login, admin: Boolean(user.admin) });
+    },
+    updateUserHandle(userId, handle) {
+      const duplicate = state.users.some(user => user.id !== userId && user.handle === handle);
+      if (duplicate) {
+        return 'duplicate';
+      }
+      const user = state.users.find(item => item.id === userId);
+      if (!user) {
+        return 'not_found';
+      }
+      user.handle = handle;
+      return 'updated';
+    },
     listUsers() {
       return state.users;
     },
     createSession(userId, session) {
-      sessions.set(session, userId);
+      sessions.set(session, { userId, expiresAt: sessionExpiresAt() });
     },
     getSessionUser(session) {
-      const userId = sessions.get(session);
-      return userId ? this.getUser(userId) : undefined;
+      const record = sessions.get(session);
+      if (!record || Date.parse(record.expiresAt) <= Date.now()) {
+        sessions.delete(session);
+        return undefined;
+      }
+      return this.getUser(record.userId);
+    },
+    deleteSession(session) {
+      sessions.delete(session);
+    },
+    saveOAuthState(state) {
+      oauthStates.set(state.id, state);
+    },
+    consumeOAuthState(id) {
+      const state = oauthStates.get(id);
+      oauthStates.delete(id);
+      return state && Date.parse(state.expiresAt) > Date.now() ? state : undefined;
+    },
+    saveAuthHandoff(handoff) {
+      authHandoffs.set(handoff.id, handoff);
+    },
+    consumeAuthHandoff(id) {
+      const handoff = authHandoffs.get(id);
+      authHandoffs.delete(id);
+      return handoff && Date.parse(handoff.expiresAt) > Date.now() ? handoff : undefined;
     },
     createToken(record) {
       const index = state.tokens.findIndex(token => token.id === record.id);
@@ -60,6 +111,15 @@ export function createCloudflareLocalStorage(
     },
     listTokens() {
       return state.tokens;
+    },
+    listTokensForUser(userId) {
+      return state.tokens.filter(token => token.userId === userId);
+    },
+    revokeTokenForUser(userId, tokenId) {
+      const token = state.tokens.find(item => item.id === tokenId && item.userId === userId);
+      if (token) {
+        token.revoked = true;
+      }
     },
     findTokenByHash(secretHash) {
       return state.tokens.find(token => token.secretHash === secretHash && !token.revoked);
@@ -227,6 +287,10 @@ function objectKey(ref: ObjectRef): string {
 
 function cloneBytes(payload: Uint8Array): Uint8Array {
   return payload.slice();
+}
+
+function sessionExpiresAt(): string {
+  return new Date(Date.now() + 60 * 60 * 24 * 30 * 1000).toISOString();
 }
 
 function objectsMatch(left: ObjectRef | undefined, right: ObjectRef): boolean {

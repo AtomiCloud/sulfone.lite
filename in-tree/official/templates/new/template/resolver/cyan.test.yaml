@@ -1,14 +1,15 @@
 cases:
   - name: latest-wins
     resolverInputs:
-      - path: tests/latest-wins/current.txt
+      - path: tests/latest-wins/current
         origin:
           template: current
           layer: 1
-      - path: tests/latest-wins/target.txt
+      - path: tests/latest-wins/target
         origin:
           template: target
           layer: 2
-    expected: tests/latest-wins/expected.txt
+    expected: tests/latest-wins/expected
     validations:
-      - contains: target
+      - path: shared.txt
+        contains: target

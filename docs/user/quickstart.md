@@ -1,35 +1,55 @@
 # Quickstart
 
-Install Bun first.
+CyanPrint is a Bun-native registry and CLI for local-first project generation. Templates download from the registry, execute on your machine, and use pinned processors, plugins, and resolvers so creates and updates stay deterministic.
+
+## Use CyanPrint
+
+Install dependencies and run a template locally:
 
 ```bash
 bun install
-bun run cyan -- create examples/templates/hello --out .tmp/hello --headless --answers examples/templates/hello/answers.json --json
+bun run cyan -- create examples/templates/hello .tmp/hello --headless --answers examples/templates/hello/answers.json --json
 ```
 
-CyanPrint v4 supports Bun and TypeScript only.
-
-## Find Artifacts
-
-Start the local registry, mint a local token, then search:
+Search the registry:
 
 ```bash
-pls dev
-pls token
 cyanprint search next
-cyanprint search --kind processor prettier
+cyanprint search --kind template app
 cyanprint search --kind resolver keep-user --json
 ```
 
-Search covers templates, template groups, processors, plugins, and resolvers. The web UI uses the same artifact model and keeps search text, kind filters, and theme in the URL so links are shareable.
+Try a template without committing to an output directory:
+
+```bash
+cyanprint try examples/templates/hello
+```
+
+Create a project from a registry template:
+
+```bash
+cyanprint create cyan/new my-project
+```
+
+Update a generated project later:
+
+```bash
+cyanprint update my-project --template cyan/new
+```
+
+Publishers sign in through the web portal, mint an API token, then publish with:
+
+```bash
+cyanprint push my-template --token "$CYANPRINT_TOKEN"
+```
 
 ## Artifact Roles
 
-- **Templates** generate project files from a folder-based template and `cyan.ts`.
+- **Templates** ask questions, read a folder-based template archive, and describe generated output.
 - **Template groups** compose child templates into one install flow.
 - **Processors** transform generated files after templates run, for example formatting.
-- **Plugins** add or modify generated files, for example adding a footer.
-- **Resolvers** decide update conflicts across prior, current, and target file states.
+- **Plugins** add or modify generated files after processors.
+- **Resolvers** fold same-path outputs or update conflicts into one result.
 
 ## Dependencies
 

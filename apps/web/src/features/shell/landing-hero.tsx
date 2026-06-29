@@ -1,4 +1,6 @@
 import type { ArtifactVersion } from '@cyanprint/contracts';
+import { ArrowRight, Box, Code2, GitBranch, Search } from 'lucide-react';
+import Link from 'next/link';
 import { Badge } from '../../components/ui/badge';
 import { ButtonLink } from '../../components/ui/button';
 
@@ -6,49 +8,49 @@ export function LandingHero({ artifacts }: { artifacts: ArtifactVersion[] }) {
   const counts = countKinds(artifacts);
   return (
     <section className="hero">
-      <div className="hero-scene" aria-hidden="true">
-        <div className="scene-rail rail-one" />
-        <div className="scene-rail rail-two" />
+      <div className="hero-paper" aria-hidden="true">
+        <span className="paper-line line-a" />
+        <span className="paper-line line-b" />
+        <span className="paper-line line-c" />
       </div>
       <div className="hero-content">
         <Badge>Local-first registry</Badge>
-        <h1>CyanPrint v4</h1>
+        <h1>CyanPrint</h1>
         <p>
-          A Bun-native template registry where templates download once, execute locally, and stay deterministic through
-          pinned processors, plugins, and resolvers.
+          Ship folder-based templates, pinned processors, plugins, and resolvers through a registry that still runs
+          every generation locally with Bun.
         </p>
+        <div className="hero-search-card">
+          <Search aria-hidden="true" size={18} />
+          <span>Find a template, processor, plugin, or resolver</span>
+          <Link href="/search">
+            Search
+            <ArrowRight aria-hidden="true" size={16} />
+          </Link>
+        </div>
         <div className="hero-actions">
-          <ButtonLink href="/artifacts/template">Browse templates</ButtonLink>
-          <ButtonLink href="/docs/user/quickstart" tone="secondary">
-            Read quickstart
+          <ButtonLink href="/docs/user/quickstart">Start using it</ButtonLink>
+          <ButtonLink href="/docs/user/artifact-authoring" tone="secondary">
+            Write templates
           </ButtonLink>
         </div>
-        <div className="hero-dashboard" aria-label="Registry artifact summary">
-          <div className="hero-stats">
-            <span>
-              <strong>{counts.template ?? 0}</strong>
-              templates
-            </span>
-            <span>
-              <strong>{counts.processor ?? 0}</strong>
-              processors
-            </span>
-            <span>
-              <strong>{counts.resolver ?? 0}</strong>
-              resolvers
-            </span>
-          </div>
-          <div className="hero-feed">
-            {artifacts.slice(0, 4).map(artifact => (
-              <span key={artifact.id}>
-                <Badge>{artifact.kind}</Badge>
-                <strong>
-                  {artifact.owner}/{artifact.name}
-                </strong>
-              </span>
-            ))}
-          </div>
-        </div>
+      </div>
+      <div className="hero-ledger" aria-label="Registry summary">
+        <span>
+          <Box aria-hidden="true" size={18} />
+          <strong>{counts.template ?? 0}</strong>
+          templates
+        </span>
+        <span>
+          <Code2 aria-hidden="true" size={18} />
+          <strong>{(counts.processor ?? 0) + (counts.plugin ?? 0)}</strong>
+          processors + plugins
+        </span>
+        <span>
+          <GitBranch aria-hidden="true" size={18} />
+          <strong>{counts.resolver ?? 0}</strong>
+          resolvers
+        </span>
       </div>
     </section>
   );

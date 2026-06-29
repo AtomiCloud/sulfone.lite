@@ -121,7 +121,7 @@ export function recordToFiles(
   previous: VfsFile[],
   options: { preservePrevious?: boolean } = {},
 ): VfsFile[] {
-  const files = new Map(options.preservePrevious === false ? [] : previous.map(file => [file.path, file]));
+  const files = new Map(options.preservePrevious === true ? previous.map(file => [file.path, file]) : []);
   for (const [path, content] of Object.entries(record)) {
     files.set(path, {
       path,

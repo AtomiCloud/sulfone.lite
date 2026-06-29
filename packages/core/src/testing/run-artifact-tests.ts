@@ -263,11 +263,17 @@ function parseManifestCase(
   const validations = readValidations(record.validations, `cases[${index}].validations`);
   const commands = readCommandValidations(record.commands, `cases[${index}].commands`);
   if (kind === 'resolver') {
+    const resolverInputs = Array.isArray(record.resolverInputs)
+      ? record.resolverInputs.map((input, inputIndex) =>
+          readKetoneResolverInput(artifactDir, input, `cases[${index}].resolverInputs[${inputIndex}]`),
+        )
+      : undefined;
     return {
       name,
       prior: readOptionalPath(artifactDir, record.prior),
       current: readOptionalPath(artifactDir, record.current),
       target: readOptionalPath(artifactDir, record.target),
+      resolverInputs,
       expected: readOptionalPath(artifactDir, record.expected),
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),

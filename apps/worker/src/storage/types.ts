@@ -25,13 +25,22 @@ export type ArtifactSearchPage = {
 export type RegistryStorage = {
   mode: 'cloudflare-bindings' | 'in-memory';
   bindings: Array<'D1' | 'R2' | 'KV'>;
-  getCurrentUser(): MaybePromise<{ id: string; handle: string; admin?: boolean } | undefined>;
-  getUser(id: string): MaybePromise<{ id: string; handle: string; admin?: boolean } | undefined>;
-  listUsers(): MaybePromise<Array<{ id: string; handle: string; admin?: boolean }>>;
+  getCurrentUser(): MaybePromise<RegistryUser | undefined>;
+  getUser(id: string): MaybePromise<RegistryUser | undefined>;
+  upsertUser(user: RegistryUser): MaybePromise<void>;
+  updateUserHandle(userId: string, handle: string): MaybePromise<'updated' | 'duplicate' | 'not_found'>;
+  listUsers(): MaybePromise<RegistryUser[]>;
   createSession(userId: string, session: string): MaybePromise<void>;
-  getSessionUser(session: string): MaybePromise<{ id: string; handle: string; admin?: boolean } | undefined>;
+  getSessionUser(session: string): MaybePromise<RegistryUser | undefined>;
+  deleteSession(session: string): MaybePromise<void>;
+  saveOAuthState(state: StoredOAuthState): MaybePromise<void>;
+  consumeOAuthState(id: string): MaybePromise<StoredOAuthState | undefined>;
+  saveAuthHandoff(handoff: StoredAuthHandoff): MaybePromise<void>;
+  consumeAuthHandoff(id: string): MaybePromise<StoredAuthHandoff | undefined>;
   createToken(record: TokenRecord): MaybePromise<void>;
   listTokens(): MaybePromise<TokenRecord[]>;
+  listTokensForUser(userId: string): MaybePromise<TokenRecord[]>;
+  revokeTokenForUser(userId: string, tokenId: string): MaybePromise<void>;
   findTokenByHash(secretHash: string): MaybePromise<TokenRecord | undefined>;
   listArtifacts(kind?: string): MaybePromise<ArtifactVersion[]>;
   searchArtifacts(args?: ArtifactSearchArgs): MaybePromise<ArtifactSearchPage>;
@@ -58,6 +67,13 @@ export type RegistryStorage = {
   getObjectBytes(ref: ObjectRef): MaybePromise<Uint8Array | undefined>;
 };
 
+export type RegistryUser = {
+  id: string;
+  handle: string;
+  login?: string;
+  admin?: boolean;
+};
+
 export type StoredUploadSession = {
   id: string;
   userId: string;
@@ -65,5 +81,18 @@ export type StoredUploadSession = {
   owner: string;
   name: string;
   objects: ArtifactObjects;
+  expiresAt: string;
+};
+
+export type StoredOAuthState = {
+  id: string;
+  returnTo: string;
+  expiresAt: string;
+};
+
+export type StoredAuthHandoff = {
+  id: string;
+  session: string;
+  userId: string;
   expiresAt: string;
 };

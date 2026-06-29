@@ -1,111 +1,116 @@
 # Artifact Authoring
 
-CyanPrint v4 has five artifact kinds:
+CyanPrint artifacts are small folders with a `cyan.yaml`, a `README.md`, and a bundled TypeScript entry. Templates also carry a template archive so files stay folder-based instead of being inlined in code.
 
-- **template**: folder-based project generator.
-- **template-group**: combines child templates.
-- **processor**: transforms generated files after template output.
-- **plugin**: adds or edits generated files after processors.
-- **resolver**: handles update merges across prior, current, and target content.
+## Write Templates
 
-## Create
-
-Create a new artifact from the default registry scaffold:
+Create a new artifact scaffold:
 
 ```bash
-cyanprint create cyan/new my-artifact
+cyanprint create cyan/new my-template
 ```
 
-For local development, the same scaffold is available in the repo:
+For local development inside this repo:
 
 ```bash
-cyanprint create in-tree/official/templates/new my-artifact
+cyanprint create in-tree/official/templates/new my-template
 ```
 
-Create a runtime artifact by copying one of the examples when you want a minimal fixture:
+A template usually looks like this:
 
-```bash
-cp -R in-tree/official/processors/default my-processor
-cp -R examples/artifacts/plugin-footer my-plugin
-cp -R examples/artifacts/resolver-keep-user my-resolver
+```text
+my-template/
+  cyan.yaml
+  cyan.ts
+  README.md
+  template/
+    package.json
+    src/index.ts
 ```
 
-Every artifact needs `cyan.yaml`, `README.md`, and a bundled entry:
+The manifest identifies the artifact and declares the processors, plugins, resolvers, and child templates it may use:
 
 ```yaml
 cyanprint: 4
-kind: processor
+kind: template
 owner: cyan
-name: prettier
-bundledEntry: dist/index.js
+name: app
+bundledEntry: dist/cyan.js
+
+processors:
+  - cyan/default
+resolvers:
+  - cyanprint/keep-user
 ```
 
-Templates and template groups usually include an archive of their template folder. Processors, plugins, and resolvers can be script-only.
+The `cyan.ts` script asks questions and returns pure data:
 
-Runtime artifacts export one plain function:
+```ts
+export default async function cyan({ prompt }) {
+  const name = await prompt.text('Project name');
+
+  return {
+    files: [
+      {
+        mode: 'template',
+        base: 'template',
+        glob: ['**/*'],
+        data: { name },
+        processors: [{ ref: 'cyan/default' }],
+      },
+    ],
+  };
+}
+```
+
+Use `mode: 'copy'` for binary assets or files that should not be rendered as text. Use `mode: 'template'` when files need prompt data.
+
+## Write Runtime Artifacts
+
+Processors, plugins, and resolvers use the same plain-function style:
 
 ```ts
 export function processor(input) {
-  const { files } = input;
-  return files;
+  return input.files;
 }
 
 export function plugin(input) {
-  const { files } = input;
-  return files;
+  return input.files;
 }
 
 export function resolver(input) {
-  const latest = [...input.files].sort((left, right) => right.origin.layer - left.origin.layer)[0];
+  const latest = input.files.at(-1);
   return latest?.content ?? '';
 }
 ```
 
-Processors and plugins take `{ files, config }` and return a file map. Resolvers take `{ files, config }`, where `files` is an array of versions for the same path with `{ path, content, origin: { template, layer } }`. A resolver returns either resolved text or `{ path, content }`.
+Processors and plugins receive `{ files, config }` and return a file map. Resolvers receive `{ files, config }`, where `files` is every version of the same path, then return the folded result.
 
-## Dependencies
+## Test
 
-Declare dependencies with user-friendly string refs. The section gives the kind:
-
-```yaml
-templates:
-  - cyan/new
-processors:
-  - cyan/default
-plugins:
-  - cyanprint/footer
-resolvers:
-  - cyanprint/keep-user@7
-```
-
-Authors can omit versions. Push resolves omitted refs and pins exact integer versions. At runtime, CyanPrint rejects processors, plugins, resolvers, or child templates returned by `cyan.ts` unless they were declared in `cyan.yaml`.
-
-## Update
-
-Change source files, rebuild the bundled entry, then run tests:
+Every artifact can use `cyan.test.yaml` with input fixtures, expected output fixtures, and validation commands:
 
 ```bash
-bun run build
+cyanprint test my-template
 cyanprint test my-processor
+cyanprint test my-resolver
 ```
 
-For templates, update the snapshot when the intended output changes:
+Update snapshots only when the expected output intentionally changes:
 
 ```bash
 cyanprint test my-template --update-snapshots
 ```
 
-For processors, plugins, and resolvers, update `cyan.test.yaml` and fixture folders together so the behavior stays reviewable.
+## Publish
 
-## Push
-
-Run `cyanprint test` before publishing. `push` validates the manifest, bundle, dependencies, object hashes, and upload refs:
+Run tests before publishing. Push validates the manifest, bundle, dependencies, object hashes, and upload refs:
 
 ```bash
-cyanprint push my-processor --registry http://127.0.0.1:8787 --token "$CYANPRINT_TOKEN"
+cyanprint push my-template --registry https://registry.cyanprint.dev --token "$CYANPRINT_TOKEN"
 ```
 
-The client uploads `cyan.yaml`, `README.md`, bundled script, and optional archive as separate R2 objects. The registry finalizes the upload and atomically assigns the next integer version in D1.
+The client uploads `cyan.yaml`, `README.md`, bundled script, and optional template archive as separate R2 objects. The registry finalizes the upload and assigns the next integer version in D1.
 
 ## Document
 
@@ -114,17 +119,5 @@ Each README should include:
 - what the artifact does
 - expected inputs and outputs
 - dependencies and why they are needed
-- examples for create, update, or test
+- create, update, and test examples
 - compatibility notes for template output and resolver behavior
-
-## Search
-
-Search locally or against the registry:
-
-```bash
-cyanprint search auth
-cyanprint search --kind template next
-cyanprint search --kind resolver keep-user --json
-```
-
-The web UI uses the same registry data and keeps search state in the URL.

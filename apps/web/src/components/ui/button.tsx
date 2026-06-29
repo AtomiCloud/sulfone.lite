@@ -25,7 +25,12 @@ export function ButtonLink({
   tone = 'primary',
   href,
   ...props
-}: AnchorHTMLAttributes<HTMLAnchorElement> & { tone?: ButtonTone; href: string; children: ReactNode }) {
+}: AnchorHTMLAttributes<HTMLAnchorElement> & {
+  children: ReactNode;
+  href: string;
+  prefetch?: boolean;
+  tone?: ButtonTone;
+}) {
   return (
     <Link className={cn(tones[tone], className)} href={href} {...props}>
       {children}

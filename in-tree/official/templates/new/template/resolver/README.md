@@ -7,11 +7,11 @@ This resolver receives all versions of the same path and folds them into one out
 ## Test
 
 ```bash
-cyanprint test .
+bun run test
 ```
 
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" bun run push
 ```

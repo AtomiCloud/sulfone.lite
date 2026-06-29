@@ -1547,6 +1547,31 @@ describe('main template parity fixtures', () => {
     }
   });
 
+  test('new template generated runtime artifacts pass their own artifact tests', async () => {
+    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-new-generated-'));
+    try {
+      const template = join(root, 'in-tree/official/templates/new');
+      const generated = [
+        ['processor', 'answers-processor.json'],
+        ['plugin', 'answers-plugin.json'],
+        ['resolver', 'answers-resolver.json'],
+      ] as const;
+      for (const [kind, answers] of generated) {
+        const artifactOut = join(out, kind);
+        await createProject({
+          template,
+          outDir: artifactOut,
+          headless: true,
+          answers: JSON.parse(await Bun.file(join(template, answers)).text()) as Record<string, unknown>,
+        });
+        const report = await runArtifactTests({ artifactDir: artifactOut });
+        expect(report, kind).toMatchObject({ passed: 1, failed: 0 });
+      }
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
   for (const name of ['workspace', 'nix']) {
     test(`${name} template matches its README snapshot`, async () => {
       const out = await mkdtemp(join(tmpdir(), `cyanprint-test-template-${name}-`));

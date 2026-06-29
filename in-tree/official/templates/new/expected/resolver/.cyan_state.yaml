@@ -3,7 +3,7 @@ template:
   owner: cyan
   name: new
   version: local
-  source: examples/templates/new
+  source: in-tree/official/templates/new
 answers:
   owner: acme
   name: keep-latest
@@ -13,73 +13,423 @@ answers:
 deterministicState: {}
 files:
   - path: .cyan/skills/cyanprint-authoring.md
-    sha256: b6cc33bfde61980705ddd04f9fc23c5ab5f85209d6eef212a072b5da7637df2c
+    sha256: 1519641bc4469824ea9f8cc0b8ce873459f98b907c03f83ea9535f7c3bfd5709
     content: >
       # CyanPrint Authoring Skill
 
 
-      Use this when creating or editing this artifact.
+      Use this when creating or editing this artifact. The goal is to leave the
+      artifact deterministic, folder-first, easy to test, and easy for another
+      agent to continue.
 
 
-      - Keep `cyan.yaml`, `README.md`, and the bundled entry aligned.
+      ## Artifact Contract
 
-      - Keep runtime code local-first and deterministic.
 
-      - Runtime artifacts export one named function: `processor`, `plugin`, or
-      `resolver`.
+      - Keep `cyan.yaml`, `README.md`, `package.json`, tests, and the bundled
+      entry aligned.
 
-      - Resolver output must be deterministic from the supplied versions and
-      config.
+      - Keep execution local-first. Do not require Docker or server-side
+      execution.
+
+      - Declare every template, processor, plugin, and resolver dependency in
+      `cyan.yaml`. Runtime output may only reference declared dependencies.
+
+      - Keep versions out of authored dependency refs unless intentionally
+      pinning an older version. Push resolves omitted versions and pins them.
+
+      - Run generated code through Bun and TypeScript-compatible APIs only.
+
+
+      ## Templates
+
+
+      A good template is a folder plus a small `cyan.ts` planner. It should ask
+      focused questions, return pure data, and never write directly to the
+      target project.
+
+
+      Recommended shape:
+
+
+      ```ts
+
+      export default async function cyan(prompt) {
+        const project = await prompt.text('project', 'Project name', { default: 'Keep Latest Resolver App' });
+
+        return {
+          processors: [
+            {
+              name: 'cyan/default',
+              files: [{ root: 'template', glob: '**/*', type: 'Template' }],
+              config: { vars: { PROJECT: project, TITLE: 'Keep Latest Resolver' } },
+            },
+          ],
+        };
+      }
+
+      ```
+
+
+      Rules for template quality:
+
+
+      - Put generated files under `template/`; do not inline file bodies in
+      `cyan.ts` unless the file is tiny and dynamic by nature.
+
+      - Use `type: 'Template'` for text files that need variables. Use `type:
+      'Copy'` for binary assets, images, fonts, lockfiles, or any file that
+      should not be UTF-8 rendered.
+
+      - Keep prompts deterministic. Defaults should produce a valid project
+      without extra user input.
+
+      - Prefer one clear question over many clever ones. If a dependency
+      template needs an answer, pass it explicitly through presets or returned
+      template data.
+
+      - Include resolvers when multiple templates may touch the same path. Same
+      resolver + same config should merge commutatively; no resolver should be
+      an intentional last-writer-wins choice.
+
+
+      ## Processors and Plugins
+
+
+      Processors and plugins receive `{ files, config }` and return a complete
+      file map.
+
+
+      - Processors should be deterministic transforms: render, format,
+      normalize, sort, or validate output.
+
+      - Plugins should add or make final edits after processors. Keep plugin
+      behavior explicit and narrow.
+
+      - Never mutate hidden global state. Never read the target project
+      directly.
+
+      - Preserve unrelated files unless the artifact is intentionally replacing
+      them.
+
+      - If importing packages, add them to `package.json` and run `bun run
+      build` before test or push.
+
+
+      ## Resolvers
+
+
+      Resolvers receive every candidate for the same path as `{ files, config }`
+      and return one folded result.
+
+
+      - Treat resolver input order as meaningful only through explicit metadata
+      such as `origin.layer`.
+
+      - Make equal inputs idempotent.
+
+      - Document when the resolver prefers user content, generated content,
+      latest layer, or a structured merge.
+
+      - Add fixtures for at least: clean merge, same resolver same config,
+      different config, and no-resolver fallback when relevant.
+
+
+      ## Build and Bundle
+
+
+      This scaffold includes `package.json` scripts. Use them as the default
+      path:
+
+
+      ```bash
+
+      bun install
+
+      bun run build
+
+      bun run test
+
+      ```
+
+
+      `bun run build` produces the bundled entry under `dist/`. That bundle is
+      what gets uploaded for runtime artifacts, and it is what keeps imports
+      from packages deterministic.
   - path: .cyan/skills/cyanprint-documenting.md
-    sha256: 1b523ac90e95fd123b0d2e9f143c3f36654f4a9ae3627a222c6b6a93fee617a1
-    content: |
+    sha256: cb378980f9f4ca464fc70479eda28f4df86abce778e6dcd7eb4adb74a1c3a9c5
+    content: >
       # CyanPrint Documenting Skill
 
-      Use this when updating README or examples.
 
-      - Explain what the resolver folds and why.
-      - List config keys and conflict behavior.
-      - Show one test command and one push command.
+      Use this when updating README, examples, or docs inside this artifact. The
+      README should let a human or agent use the artifact without reading the
+      implementation first.
+
+
+      ## README Structure
+
+
+      Include these sections in order when they apply:
+
+
+      1. Title and one-sentence purpose.
+
+      2. What the artifact generates or transforms.
+
+      3. Inputs: prompts, config keys, expected files, and dependency refs.
+
+      4. Outputs: generated files, renamed paths, resolver behavior, or plugin
+      additions.
+
+      5. Dependencies and why each is declared in `cyan.yaml`.
+
+      6. Build/test commands.
+
+      7. Push command and token requirement.
+
+      8. Compatibility notes and known merge behavior.
+
+
+      ## Writing Good Examples
+
+
+      - Prefer commands that work from the artifact folder.
+
+      - Show headless commands with answer files when prompts exist.
+
+      - Mention `bun run build` before `cyanprint test` if `bundledEntry` is
+      under `dist/`.
+
+      - Keep examples copy-pasteable; avoid placeholders except for secrets like
+      `$CYANPRINT_TOKEN`.
+
+
+      ## Template Documentation
+
+
+      For templates, document:
+
+
+      - every prompt and default
+
+      - the folder roots copied or rendered
+
+      - processors used per root
+
+      - binary asset handling with `Copy`
+
+      - resolver expectations when files overlap with dependency templates
+
+
+      ## Runtime Artifact Documentation
+
+
+      For processors, plugins, and resolvers, document:
+
+
+      - the exact input shape
+
+      - all config keys and defaults
+
+      - what is preserved, modified, added, or removed
+
+      - fixture names and what each fixture proves
   - path: .cyan/skills/cyanprint-pushing.md
-    sha256: 55c6a5d0eb01ca1ab0ccd24b47289494037993bbdb4b12a4bf573d707c6af63d
-    content: |
+    sha256: e19c2ca0f12d533263e7f02ac7fb7d77470385e5ffc6ede7ce784b1440b69ecb
+    content: >
       # CyanPrint Pushing Skill
 
-      Use this before publishing.
 
-      - Run tests locally first.
-      - Use `cyanprint push . --token "$CYANPRINT_TOKEN"`.
-      - Let the registry assign the next integer version.
+      Use this before publishing to a registry.
+
+
+      ## Pre-Push Checklist
+
+
+      - `cyan.yaml` has the right `kind`, `owner`, `name`, `entry`, and
+      `bundledEntry`.
+
+      - All dependencies are declared as friendly refs under the correct
+      section.
+
+      - `README.md` explains behavior, config, tests, and compatibility.
+
+      - `bun run build` succeeds and writes the bundled entry.
+
+      - `bun run test` succeeds.
+
+      - No generated secrets, local cache files, or temporary output are
+      included in the artifact folder.
+
+
+      ## Publish
+
+
+      Use an API token minted from the CyanPrint web portal:
+
+
+      ```bash
+
+      CYANPRINT_TOKEN='<token>' bun run push
+
+      ```
+
+
+      The registry assigns the next integer version. Do not hand-edit
+      registry-assigned versions. If dependency versions are omitted in
+      `cyan.yaml`, push resolves and pins them during publish.
+
+
+      ## Dry Run
+
+
+      Before publishing a new artifact shape, run:
+
+
+      ```bash
+
+      cyanprint push . --dry-run
+
+      ```
+
+
+      Dry run validates the manifest, bundle, dependencies, object model, and
+      archive rules without committing a version.
   - path: .cyan/skills/cyanprint-searching.md
-    sha256: 66f16a93e41f600d0453733b2fdaf83155f2fbfdcf7320efeae0e4fc2ed2eba1
+    sha256: 781e3dfa7c9033a748d48aec045faeb967c3dba3eb4c57e2b995f0233f0330f2
     content: >
       # CyanPrint Searching Skill
 
 
-      Use this before adding a dependency.
+      Use this before adding or changing dependencies.
 
 
-      - Search resolvers: `cyanprint search --kind resolver <query>`.
+      ## Search Commands
 
-      - Prefer one resolver per conflict family and document config
-      compatibility.
+
+      ```bash
+
+      cyanprint search <query>
+
+      cyanprint search --kind template <query>
+
+      cyanprint search --kind processor <query>
+
+      cyanprint search --kind plugin <query>
+
+      cyanprint search --kind resolver <query>
+
+      ```
+
+
+      ## Choosing Dependencies
+
+
+      - Prefer official `cyan/*` artifacts when they fit.
+
+      - Prefer a resolver over last-writer-wins when two templates write the
+      same path intentionally.
+
+      - Avoid copying dependency behavior into this artifact unless the behavior
+      is truly private to this artifact.
+
+      - Add dependencies to `cyan.yaml` without versions unless you
+      intentionally need an older pinned version.
+
+      - After adding a dependency, add a test fixture that proves the dependency
+      is invoked and that the returned artifact ref is declared.
+
+
+      ## Search in the Web UI
+
+
+      Use the registry search page for discovery and README review. Keep the URL
+      query when sharing a dependency candidate with another agent so they see
+      the same kind filter and query.
   - path: .cyan/skills/cyanprint-updating.md
-    sha256: 5c842fcc8bc3bf53fb00de1fd4405007f8bd8a044fae5c388590cb81bc4b5150
+    sha256: 1fe85e623d1b25ee280345dea345f1126a09d7346f36371d5947bcb19a13e0cd
     content: >
       # CyanPrint Updating Skill
 
 
-      Use this when changing behavior.
+      Use this when changing behavior, fixtures, prompts, dependencies, or
+      generated output.
 
 
-      - Update resolver fixtures and expected output together.
+      ## Update Checklist
 
-      - Run `cyanprint test .` before publishing.
 
-      - Include cases for same resolver config, different config, and no
-      resolver when relevant.
+      1. Read `cyan.yaml` and identify the artifact kind.
+
+      2. Read `README.md` and the relevant `.cyan/skills/*` files before editing
+      behavior.
+
+      3. Update source and fixture files together. Do not change behavior
+      without a test fixture that shows the new output.
+
+      4. Run `bun run build` when `cyan.ts` or `src/index.ts` imports packages
+      or when `bundledEntry` points into `dist/`.
+
+      5. Run `bun run test` or the equivalent `cyanprint test .` command.
+
+      6. Update README examples and dependency notes if the public behavior
+      changed.
+
+
+      ## Template Updates
+
+
+      For templates, update all three layers together:
+
+
+      - `cyan.ts` prompt and returned pure Cyan object
+
+      - files under `template/`
+
+      - expected output fixtures under `expected/`
+
+
+      Use snapshot updates only when the output change is intentional:
+
+
+      ```bash
+
+      bun run build
+
+      cyanprint test . --answers answers.json --update-snapshots
+
+      ```
+
+
+      Then inspect the changed expected files manually. A snapshot update is not
+      a substitute for review.
+
+
+      ## Processor and Plugin Updates
+
+
+      - Add or update `tests/<case>/input` and `tests/<case>/expected`.
+
+      - Use `config` in `cyan.test.yaml` for behavior that depends on options.
+
+      - Include command validations for behavior that is easier to assert with
+      code, such as JSON parseability, package installability, or exact
+      formatting.
+
+
+      ## Resolver Updates
+
+
+      - Include fixtures that represent actual conflict shapes.
+
+      - Keep resolver config small and serializable.
+
+      - Verify expired assumptions: if a resolver used to receive two files, add
+      a test for three or more files if multiple templates can now converge on
+      the path.
   - path: .github/workflows/ci.yml
-    sha256: 80d3b8f3c1632b93cb7fb10112137e2c81bd7186074f833a7beaeb946a01938a
+    sha256: 40dfb6ad1af58fe663c317ef70de727355f3c0df7694f22a990b06fa6dead54a
     content: >
       name: cyanprint
 
@@ -106,24 +456,25 @@ files:
                 sudo apt-get update
                 sudo apt-get install -y cyanprint
             - name: Test artifact
-              run: cyanprint test .
+              run: bun run test
   - path: cyan.test.yaml
-    sha256: 85dc44bc4bd20ab404ea6f99f397b2e7a0022b7243128db4c2fc04769694db5c
+    sha256: 511d1e7357694d0197ac74ee83e6de6c2919824ed3bc2fb4e63bd8f2f6e84674
     content: |
       cases:
         - name: latest-wins
           resolverInputs:
-            - path: tests/latest-wins/current.txt
+            - path: tests/latest-wins/current
               origin:
                 template: current
                 layer: 1
-            - path: tests/latest-wins/target.txt
+            - path: tests/latest-wins/target
               origin:
                 template: target
                 layer: 2
-          expected: tests/latest-wins/expected.txt
+          expected: tests/latest-wins/expected
           validations:
-            - contains: target
+            - path: shared.txt
+              contains: target
   - path: cyan.yaml
     sha256: 23fdfba9005513b167cbfe8feb781e211ec5d02c178f26fdbc27274205a928e3
     content: |
@@ -134,8 +485,26 @@ files:
       description: A CyanPrint v4 resolver.
       entry: src/index.ts
       bundledEntry: dist/index.js
+  - path: package.json
+    sha256: 78376eaa0a8f450bfe05f52297bb42d08a51a0493e079bc7fdbfc8f04c012c71
+    content: >
+      {
+        "name": "keep-latest",
+        "type": "module",
+        "private": true,
+        "scripts": {
+          "build": "bun build ./src/index.ts --target bun --format esm --outfile ./dist/index.js",
+          "test": "bun run build && cyanprint test .",
+          "push": "bun run build && cyanprint push ."
+        },
+        "dependencies": {},
+        "devDependencies": {
+          "@types/bun": "^1.3.4",
+          "typescript": "^5.9.3"
+        }
+      }
   - path: README.md
-    sha256: 0cfca7b1e5b0c5c4b4fe0d2f9cea84270a14c963a54a3fc764b3370091d4cb96
+    sha256: 81ebc1be31fa3e07b2b6a69bf217f19e15d1767339ed26d37b2b7d37ea321e11
     content: >
       # Keep Latest Resolver
 
@@ -152,7 +521,7 @@ files:
 
       ```bash
 
-      cyanprint test .
+      bun run test
 
       ```
 
@@ -162,7 +531,7 @@ files:
 
       ```bash
 
-      cyanprint push . --token "$CYANPRINT_TOKEN"
+      CYANPRINT_TOKEN="<token>" bun run push
 
       ```
   - path: src/index.ts
@@ -173,15 +542,15 @@ files:
         const latest = [...input.files].sort((left, right) => right.origin.layer - left.origin.layer)[0];
         return latest?.content ?? '';
       }
-  - path: tests/latest-wins/current.txt
+  - path: tests/latest-wins/current/shared.txt
     sha256: 48aa6cae8c70abdb28631d22b316e6d9f9d0768ec2911de7090e248b2afe6ca1
     content: |
       current
-  - path: tests/latest-wins/expected.txt
+  - path: tests/latest-wins/expected/shared.txt
     sha256: c97ecfda4d205190b973232dcfdb0c29748521c2534dd866bcc782f30b086738
     content: |
       target
-  - path: tests/latest-wins/target.txt
+  - path: tests/latest-wins/target/shared.txt
     sha256: c97ecfda4d205190b973232dcfdb0c29748521c2534dd866bcc782f30b086738
     content: |
       target
@@ -190,10 +559,10 @@ artifacts:
     owner: cyan
     name: new
     version: local
-    integrity: e26063c78df4c71fba98667d46b60a24b28948bd9907d71912de2bdaacc2fa63
+    integrity: 287cf73c7d8db04750a4ff7847bbd6b319dd34f85f152ca10c42e2efe1bdabb3
   - kind: processor
     owner: cyan
     name: default
     version: local
-    integrity: aed94f6a0aeec2de4e7f7e609aae6d0a0a306802f7b807b042d0be4f08e03da4
+    integrity: f6fbbc0f2d2227e57a901f08c6b92d05b0ff221da9886c12f991d4c8d1b2fcdf
 conflicts: []

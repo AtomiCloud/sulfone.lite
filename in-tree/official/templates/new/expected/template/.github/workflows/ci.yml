@@ -22,4 +22,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cyanprint
       - name: Test artifact
-        run: cyanprint test . --answers answers.json
+        run: bun run test

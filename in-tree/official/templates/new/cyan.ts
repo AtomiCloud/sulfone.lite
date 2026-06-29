@@ -33,13 +33,10 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
             KIND: kind,
             TITLE: title,
             DESCRIPTION: description,
-            TEST_COMMAND: kind === 'template' ? `cyanprint test . --answers answers.json` : 'cyanprint test .',
+            TEST_COMMAND: 'bun run test',
           },
           parser: {
-            varSyntax: [
-              ['__', '__'],
-              ['{{', '}}'],
-            ],
+            varSyntax: [['__', '__']],
           },
         },
       },

@@ -26,7 +26,7 @@ tasks:
     cmds:
       - bun run build
   dev:
-    desc: 'Run local registry Worker and web UI with token minting enabled'
+    desc: 'Run local registry Worker and web UI'
     cmds:
       - printf 'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_ENABLE_REGISTRY_SEEDS=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n' > apps/worker/.dev.vars
       - bun run --filter @cyanprint/worker db:migrate:local
@@ -36,8 +36,6 @@ tasks:
         worker_pid=$!
         CYANPRINT_REGISTRY_URL=http://127.0.0.1:8787 \
         CYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev \
-        CYANPRINT_WEB_ENABLE_LOCAL_TOKEN_PROXY=1 \
-        CYANPRINT_WEB_LOCAL_TOKEN_PROXY_SECRET=web-local-secret \
           bun run web:dev --hostname 127.0.0.1 --port 3000 &
         web_pid=$!
         trap 'kill "$worker_pid" "$web_pid" 2>/dev/null || true' INT TERM EXIT

@@ -1,0 +1,15 @@
+{
+  "name": "__NAME__",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build ./cyan.ts --target bun --format esm --outfile ./dist/cyan.js",
+    "test": "bun run build && cyanprint test . --answers answers.json",
+    "push": "bun run build && cyanprint push ."
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.9.3"
+  }
+}

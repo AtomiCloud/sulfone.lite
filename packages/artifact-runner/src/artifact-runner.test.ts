@@ -83,6 +83,29 @@ describe('pin integrity cache bundled artifact', () => {
     }
   });
 
+  test('treats processor return value as the complete output map by default', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    const runtimeFile = join(dir, 'processor.ts');
+    try {
+      await writeFile(
+        runtimeFile,
+        'export function processor(input) { return { "renamed.txt": input.files["source.txt"] }; }',
+        'utf8',
+      );
+      const processed = await invokeProcessor(
+        {
+          dependency: { kind: 'processor', owner: 'cyanprint', name: 'rename', version: '1' },
+          runtimeFile,
+          integrity: sha256(await Bun.file(runtimeFile).text()),
+        },
+        [{ path: 'source.txt', content: 'kept' }],
+      );
+      expect(processed).toEqual([{ path: 'renamed.txt', content: 'kept', mode: undefined }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('rejects processor exports with hidden second parameters', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
     const runtimeFile = join(dir, 'processor.ts');

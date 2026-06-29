@@ -17,7 +17,7 @@ import {
   seedObjectPayloads,
   type TokenRecord,
 } from '@cyanprint/registry-client';
-import type { RegistryStorage, StoredUploadSession } from './types';
+import type { RegistryStorage, StoredAuthHandoff, StoredOAuthState, StoredUploadSession } from './types';
 
 type D1Statement = {
   bind(...values: unknown[]): D1Statement;
@@ -53,6 +53,11 @@ export type WorkerBindings = {
   CYANPRINT_ENABLE_REGISTRY_SEEDS?: string;
   CYANPRINT_LOCAL_DEV_SECRET?: string;
   CYANPRINT_ENABLE_LEGACY_PACKAGE_API?: string;
+  CYANPRINT_GITHUB_CLIENT_ID?: string;
+  CYANPRINT_GITHUB_CLIENT_SECRET?: string;
+  CYANPRINT_GITHUB_ADMIN_LOGINS?: string;
+  CYANPRINT_AUTH_RETURN_ORIGINS?: string;
+  CYANPRINT_WEB_URL?: string;
 };
 
 export function createCloudflareBindingStorage(env: WorkerBindings): RegistryStorage {
@@ -73,8 +78,8 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     const state = createLocalRegistryState();
     for (const user of state.users) {
       await db
-        .prepare('INSERT OR IGNORE INTO users (id, handle, admin) VALUES (?, ?, ?)')
-        .bind(user.id, user.handle, user.admin ? 1 : 0)
+        .prepare('INSERT OR IGNORE INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)')
+        .bind(user.id, user.handle, user.login ?? null, user.admin ? 1 : 0)
         .run();
     }
     for (const object of seedObjectPayloads) {
@@ -196,22 +201,118 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async getUser(id) {
       await ensureSeeded();
-      const row = await db.prepare('SELECT id, handle, admin FROM users WHERE id = ?').bind(id).first<UserRow>();
+      const row = await db.prepare('SELECT id, handle, login, admin FROM users WHERE id = ?').bind(id).first<UserRow>();
       return row ? rowToUser(row) : undefined;
+    },
+    async upsertUser(user) {
+      await ensureSeeded();
+      await db
+        .prepare(
+          `INSERT INTO users (id, handle, login, admin)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             handle = excluded.handle,
+             login = COALESCE(excluded.login, users.login),
+             admin = excluded.admin`,
+        )
+        .bind(user.id, user.handle, user.login ?? null, user.admin ? 1 : 0)
+        .run();
+    },
+    async updateUserHandle(userId, handle) {
+      await ensureSeeded();
+      try {
+        const result = (await db.prepare('UPDATE users SET handle = ? WHERE id = ?').bind(handle, userId).run()) as {
+          meta: { changes: number };
+        };
+        return result.meta.changes > 0 ? 'updated' : 'not_found';
+      } catch (error) {
+        if (isUniqueHandleError(error)) {
+          return 'duplicate';
+        }
+        throw error;
+      }
     },
     async listUsers() {
       await ensureSeeded();
-      const { results } = await db.prepare('SELECT id, handle, admin FROM users ORDER BY handle').all<UserRow>();
+      const { results } = await db.prepare('SELECT id, handle, login, admin FROM users ORDER BY handle').all<UserRow>();
       return results.map(rowToUser);
     },
     async createSession(userId, session) {
       await ensureSeeded();
-      await kv.put(sessionKey(session), userId);
+      await db
+        .prepare(
+          `INSERT INTO auth_sessions (id, user_id, expires_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             user_id = excluded.user_id,
+             expires_at = excluded.expires_at`,
+        )
+        .bind(session, userId, sessionExpiresAt())
+        .run();
     },
     async getSessionUser(session) {
       await ensureSeeded();
-      const userId = await kv.get(sessionKey(session));
-      return userId ? this.getUser(userId) : undefined;
+      const row = await db
+        .prepare('SELECT id, user_id, expires_at FROM auth_sessions WHERE id = ?')
+        .bind(session)
+        .first<AuthSessionRow>();
+      if (!row || Date.parse(row.expires_at) <= Date.now()) {
+        if (row) {
+          await db.prepare('DELETE FROM auth_sessions WHERE id = ?').bind(session).run();
+        }
+        return undefined;
+      }
+      return this.getUser(row.user_id);
+    },
+    async deleteSession(session) {
+      await ensureSeeded();
+      await db.prepare('DELETE FROM auth_sessions WHERE id = ?').bind(session).run();
+    },
+    async saveOAuthState(state) {
+      await ensureSeeded();
+      await db.prepare('DELETE FROM oauth_states WHERE expires_at <= ?').bind(new Date().toISOString()).run();
+      await db
+        .prepare(
+          `INSERT INTO oauth_states (id, return_to, expires_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             return_to = excluded.return_to,
+             expires_at = excluded.expires_at`,
+        )
+        .bind(state.id, state.returnTo, state.expiresAt)
+        .run();
+    },
+    async consumeOAuthState(id) {
+      await ensureSeeded();
+      const state = await db
+        .prepare(
+          `DELETE FROM oauth_states
+           WHERE id = ?
+           RETURNING id, return_to, expires_at`,
+        )
+        .bind(id)
+        .first<OAuthStateRow>();
+      return state && Date.parse(state.expires_at) > Date.now() ? rowToOAuthState(state) : undefined;
+    },
+    async saveAuthHandoff(handoff) {
+      await ensureSeeded();
+      await db.prepare('DELETE FROM auth_handoffs WHERE expires_at <= ?').bind(new Date().toISOString()).run();
+      await db
+        .prepare('INSERT INTO auth_handoffs (id, session, user_id, expires_at) VALUES (?, ?, ?, ?)')
+        .bind(handoff.id, handoff.session, handoff.userId, handoff.expiresAt)
+        .run();
+    },
+    async consumeAuthHandoff(id) {
+      await ensureSeeded();
+      const handoff = await db
+        .prepare(
+          `DELETE FROM auth_handoffs
+           WHERE id = ?
+           RETURNING id, session, user_id, expires_at`,
+        )
+        .bind(id)
+        .first<AuthHandoffRow>();
+      return handoff && Date.parse(handoff.expires_at) > Date.now() ? rowToAuthHandoff(handoff) : undefined;
     },
     async createToken(record) {
       await ensureSeeded();
@@ -234,6 +335,18 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         .prepare('SELECT id, user_id, name, secret_hash, revoked FROM tokens ORDER BY name')
         .all<TokenRow>();
       return results.map(rowToToken);
+    },
+    async listTokensForUser(userId) {
+      await ensureSeeded();
+      const { results } = await db
+        .prepare('SELECT id, user_id, name, secret_hash, revoked FROM tokens WHERE user_id = ? ORDER BY name')
+        .bind(userId)
+        .all<TokenRow>();
+      return results.map(rowToToken);
+    },
+    async revokeTokenForUser(userId, tokenId) {
+      await ensureSeeded();
+      await db.prepare('UPDATE tokens SET revoked = 1 WHERE id = ? AND user_id = ?').bind(tokenId, userId).run();
     },
     async findTokenByHash(secretHash) {
       await ensureSeeded();
@@ -572,11 +685,19 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   }
 }
 
-type UserRow = { id: string; handle: string; admin: number };
+type UserRow = { id: string; handle: string; login?: string | null; admin: number };
 type TokenRow = { id: string; user_id: string; name: string; secret_hash: string; revoked: number };
+type AuthSessionRow = { id: string; user_id: string; expires_at: string };
+type OAuthStateRow = { id: string; return_to: string; expires_at: string };
+type AuthHandoffRow = { id: string; session: string; user_id: string; expires_at: string };
 
-function rowToUser(row: UserRow): { id: string; handle: string; admin: boolean } {
-  return { id: row.id, handle: row.handle, admin: Boolean(row.admin) };
+function rowToUser(row: UserRow): { id: string; handle: string; login?: string; admin: boolean } {
+  return { id: row.id, handle: row.handle, login: row.login ?? undefined, admin: Boolean(row.admin) };
+}
+
+function isUniqueHandleError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('UNIQUE') && message.includes('users.handle');
 }
 
 function rowToToken(row: TokenRow): TokenRecord {
@@ -589,6 +710,18 @@ function rowToToken(row: TokenRow): TokenRecord {
   };
 }
 
+function rowToAuthHandoff(row: AuthHandoffRow): StoredAuthHandoff {
+  return { id: row.id, session: row.session, userId: row.user_id, expiresAt: row.expires_at };
+}
+
+function rowToOAuthState(row: OAuthStateRow): StoredOAuthState {
+  return { id: row.id, returnTo: row.return_to, expiresAt: row.expires_at };
+}
+
+function sessionExpiresAt(): string {
+  return new Date(Date.now() + 60 * 60 * 24 * 30 * 1000).toISOString();
+}
+
 function requireBinding<T>(binding: T | undefined, name: string): T {
   if (!binding) {
     throw new Error(`Missing Cloudflare ${name} binding`);
@@ -598,10 +731,6 @@ function requireBinding<T>(binding: T | undefined, name: string): T {
 
 function artifactKey(id: string): string {
   return `artifact:${id}`;
-}
-
-function sessionKey(session: string): string {
-  return `session:${session}`;
 }
 
 function objectMetaKey(ref: ObjectRef): string {
