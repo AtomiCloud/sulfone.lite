@@ -6,6 +6,7 @@ import { artifactIntegrity, type ArtifactPublish, type ResolvedDependencyPin } f
 import { buildBundle } from '@cyanprint/artifact-bundler';
 import { parseFlags, flagBool, flagString } from '../args';
 import { createArtifactTextObject, createTemplateArchivePayload } from '../local-object-package';
+import { defaultRegistryUrl } from '../registry-defaults';
 import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
 
 export async function pushCommand(argv: string[]): Promise<void> {
@@ -24,7 +25,7 @@ export async function pushCommand(argv: string[]): Promise<void> {
     ...ref,
     owner: ref.owner ?? manifest.owner,
   }));
-  const registry = flagString(flags, 'registry');
+  const registry = flagString(flags, 'registry') ?? (flagBool(flags, 'dry-run') ? undefined : defaultRegistryUrl());
   const bootstrapClient = registry ? new RegistryClient(registry) : undefined;
   const resolvedPins: ResolvedDependencyPin[] = bootstrapClient
     ? (await bootstrapClient.batchResolve({ refs })).resolved.map(artifact => ({

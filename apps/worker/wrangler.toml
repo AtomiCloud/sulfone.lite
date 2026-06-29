@@ -14,3 +14,19 @@ bucket_name = "cyanprint-local-r2"
 [[kv_namespaces]]
 binding = "KV"
 id = "local"
+
+[env.release]
+name = "cyanprint-registry"
+
+[[env.release.d1_databases]]
+binding = "DB"
+database_name = "cyanprint-registry"
+database_id = "configured-by-scripts/cloudflare/render-release-configs.ts"
+
+[[env.release.r2_buckets]]
+binding = "R2"
+bucket_name = "cyanprint-registry-artifacts"
+
+[[env.release.kv_namespaces]]
+binding = "KV"
+id = "configured-by-scripts/cloudflare/render-release-configs.ts"

@@ -1,6 +1,7 @@
 import { updateProject } from '@cyanprint/core';
 import type { PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString } from '../args';
+import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
 import { failure, info, pathLabel, printJson, printSection, ReportedCliError, success } from '../ui';
 
@@ -27,7 +28,7 @@ export async function updateCommand(argv: string[], runtime: CliRuntime = {}): P
   }
   const resolvedTemplate = await resolveTemplateInput({
     template,
-    registry: flagString(flags, 'registry'),
+    registry: flagString(flags, 'registry') ?? defaultRegistryUrl(),
     cacheDir: flagString(flags, 'cache-dir'),
     bypassCache: flagBool(flags, 'bypass-cache'),
     trusted: flagBool(flags, 'trust'),

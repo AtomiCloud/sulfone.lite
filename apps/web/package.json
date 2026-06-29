@@ -5,6 +5,7 @@
   "scripts": {
     "build": "next build",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "deploy:release": "opennextjs-cloudflare build && opennextjs-cloudflare deploy --env release",
     "dev": "next dev",
     "preview:cloudflare": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "start": "next start",

@@ -1,5 +1,6 @@
 import { artifactKinds, RegistryClient } from '@cyanprint/registry-client';
 import { parseFlags, flagBool, flagString } from '../args';
+import { defaultRegistryUrl } from '../registry-defaults';
 import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
 
 const VALID_KINDS = new Set<string>(artifactKinds.filter(kind => kind !== 'all'));
@@ -7,7 +8,7 @@ const VALID_KINDS = new Set<string>(artifactKinds.filter(kind => kind !== 'all')
 export async function searchCommand(argv: string[]): Promise<void> {
   const { positional, flags } = parseFlags(argv);
   const query = positional[0] ?? flagString(flags, 'query') ?? '';
-  const registry = flagString(flags, 'registry', 'http://127.0.0.1:8787') ?? 'http://127.0.0.1:8787';
+  const registry = flagString(flags, 'registry', defaultRegistryUrl()) ?? defaultRegistryUrl();
   const kind = flagString(flags, 'kind');
   const limit = Number(flagString(flags, 'limit', '20'));
   const json = flagBool(flags, 'json');

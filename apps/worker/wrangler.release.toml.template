@@ -1,0 +1,17 @@
+name = "${CYANPRINT_REGISTRY_WORKER_NAME}"
+main = "../../apps/worker/src/index.ts"
+compatibility_date = "2026-06-27"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "${CYANPRINT_D1_DATABASE_NAME}"
+database_id = "${CYANPRINT_D1_DATABASE_ID}"
+migrations_dir = "../../apps/worker/migrations"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "${CYANPRINT_R2_BUCKET_NAME}"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "${CYANPRINT_KV_NAMESPACE_ID}"

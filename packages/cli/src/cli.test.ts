@@ -50,7 +50,7 @@ describe('commander cli shell', () => {
         logs.push(String(message));
       };
       globalThis.fetch = (async input => {
-        expect(String(input)).toBe('http://127.0.0.1:8787/artifacts?kind=resolver&q=keep&limit=20');
+        expect(String(input)).toBe('https://registry.cyanprint.dev/artifacts?kind=resolver&q=keep&limit=20');
         return new Response(
           JSON.stringify({
             artifacts: [

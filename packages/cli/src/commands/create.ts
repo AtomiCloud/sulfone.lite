@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createProject } from '@cyanprint/core';
 import type { PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString } from '../args';
+import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
 import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
 
@@ -29,7 +30,7 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
   }
   const resolvedTemplate = await resolveTemplateInput({
     template,
-    registry: flagString(flags, 'registry'),
+    registry: flagString(flags, 'registry') ?? defaultRegistryUrl(),
     cacheDir: flagString(flags, 'cache-dir'),
     bypassCache: flagBool(flags, 'bypass-cache'),
     trusted: flagBool(flags, 'trust'),

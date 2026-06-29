@@ -47,6 +47,10 @@ tasks:
     cmds:
       - task: deploy:worker
       - task: deploy:web
+  deploy:release:
+    desc: 'Deploy release Worker and web UI with local Wrangler credentials'
+    cmds:
+      - bun run deploy:release
   deploy:worker:
     desc: 'Deploy registry Worker with local Wrangler credentials'
     cmds:

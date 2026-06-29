@@ -1,0 +1,39 @@
+main = ".open-next/worker.js"
+name = "cyanprint-web-local"
+compatibility_date = "2026-06-27"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "cyanprint-web-local"
+
+[[r2_buckets]]
+binding = "NEXT_INC_CACHE_R2_BUCKET"
+bucket_name = "cyanprint-web-local-opennext-cache"
+
+[vars]
+CYANPRINT_REGISTRY_URL = "http://127.0.0.1:8787"
+
+[env.release]
+name = "cyanprint-web"
+compatibility_date = "2026-06-27"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+[env.release.assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[[env.release.services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "cyanprint-web"
+
+[[env.release.r2_buckets]]
+binding = "NEXT_INC_CACHE_R2_BUCKET"
+bucket_name = "cyanprint-web-opennext-cache"
+
+[env.release.vars]
+CYANPRINT_REGISTRY_URL = "https://registry.cyanprint.dev"

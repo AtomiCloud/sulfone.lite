@@ -1,0 +1,33 @@
+name: cloudflare-deploy
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-atomi-nix-store-cache
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CYANPRINT_D1_DATABASE_ID: ${{ vars.CYANPRINT_D1_DATABASE_ID }}
+      CYANPRINT_KV_NAMESPACE_ID: ${{ vars.CYANPRINT_KV_NAMESPACE_ID }}
+      CYANPRINT_REGISTRY_WORKER_NAME: ${{ vars.CYANPRINT_REGISTRY_WORKER_NAME }}
+      CYANPRINT_D1_DATABASE_NAME: ${{ vars.CYANPRINT_D1_DATABASE_NAME }}
+      CYANPRINT_R2_BUCKET_NAME: ${{ vars.CYANPRINT_R2_BUCKET_NAME }}
+      CYANPRINT_WEB_WORKER_NAME: ${{ vars.CYANPRINT_WEB_WORKER_NAME }}
+      CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: ${{ vars.CYANPRINT_WEB_CACHE_R2_BUCKET_NAME }}
+      CYANPRINT_RELEASE_REGISTRY_URL: ${{ vars.CYANPRINT_RELEASE_REGISTRY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: AtomiCloud/actions.setup-nix@v3
+      - run: nix develop .#ci -c bun install --frozen-lockfile
+      - run: nix develop .#ci -c bun run deploy:release

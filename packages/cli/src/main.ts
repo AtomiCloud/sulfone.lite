@@ -10,6 +10,7 @@ import { tryCommand } from './commands/try';
 import { trustCommand } from './commands/trust';
 import { updateCommand } from './commands/update';
 import { inquirerPromptAdapter } from './inquirer-prompt-adapter';
+import { RELEASE_REGISTRY_URL } from './registry-defaults';
 import { brand, failure, ReportedCliError } from './ui';
 import { VERSION } from './version';
 
@@ -51,7 +52,7 @@ export function createProgram(runtime: ProgramRuntime = {}): Command {
 Examples:
   cyanprint create cyanprint/nextjs-app --out ./app
   cyanprint create ./examples/templates/hello --out ./app --headless --answers answers.json
-  cyanprint search nextjs --kind template --registry http://127.0.0.1:8787
+  cyanprint search nextjs --kind template
   cyanprint test ./examples/templates/hello
   cyanprint push ./examples/artifacts/processor-default --dry-run
 `,
@@ -298,7 +299,7 @@ const PUSH_OPTIONS: CliOptionSpec[] = [
 ];
 
 const SEARCH_OPTIONS: CliOptionSpec[] = [
-  { flag: 'registry', value: '<url>', description: 'registry base URL', defaultValue: 'http://127.0.0.1:8787' },
+  { flag: 'registry', value: '<url>', description: 'registry base URL', defaultValue: RELEASE_REGISTRY_URL },
   { flag: 'kind', value: '<kind>', description: 'template, template-group, processor, plugin, or resolver' },
   { flag: 'query', value: '<text>', description: 'query text; overrides empty positional query' },
   { flag: 'limit', value: '<number>', description: 'maximum results', defaultValue: '20' },
