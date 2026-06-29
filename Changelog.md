@@ -1,3 +1,10 @@
+## [1.1.0](https://github.com/AtomiCloud/sulfone.lite/compare/v1.0.0...v1.1.0) (2026-06-29)
+
+
+### ✨ Features ✨
+
+* wire cloudflare deploy and package publishing ([eed8b6a](https://github.com/AtomiCloud/sulfone.lite/commit/eed8b6aa8bc27fc922bdb0795c6d50f101a29d46))
+
 ## 1.0.0 (2026-06-29)
 
 
