@@ -8,7 +8,11 @@ import { createCloudflareBindingStorage, type WorkerBindings } from './storage/c
 import { createCloudflareLocalStorage } from './storage/cloudflare-local-storage';
 
 let app: ReturnType<typeof createApp>;
-const testEnv = { CYANPRINT_ENABLE_LOCAL_AUTH: '1', CYANPRINT_LOCAL_DEV_SECRET: 'cyanprint-local-dev' };
+const testEnv = {
+  CYANPRINT_ENABLE_LOCAL_AUTH: '1',
+  CYANPRINT_ENABLE_REGISTRY_SEEDS: '1',
+  CYANPRINT_LOCAL_DEV_SECRET: 'cyanprint-local-dev',
+};
 
 beforeEach(() => {
   app = createApp(createCloudflareLocalStorage(seedArtifacts, seedObjectPayloads));
@@ -96,7 +100,22 @@ function uploadUrl(urls: Record<string, string>, part: string): string {
   return url;
 }
 
-async function createTestCloudflareBindings(): Promise<WorkerBindings & { close(): void }> {
+async function putUploadPart(
+  urls: Record<string, string>,
+  part: string,
+  token: string,
+  body: BodyInit,
+): Promise<Response> {
+  return await app.request(uploadUrl(urls, part), {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}` },
+    body,
+  });
+}
+
+async function createTestCloudflareBindings(
+  options: { seed?: boolean } = {},
+): Promise<WorkerBindings & { close(): void }> {
   const db = new Database(':memory:');
   for (const statement of (await Bun.file('apps/worker/migrations/0001_initial_registry.sql').text()).split(';')) {
     if (statement.trim()) {
@@ -105,7 +124,7 @@ async function createTestCloudflareBindings(): Promise<WorkerBindings & { close(
   }
   const kv = new Map<string, string>();
   const r2 = new Map<string, Uint8Array>();
-  return {
+  const bindings: WorkerBindings & { close(): void } = {
     DB: {
       prepare(sql: string) {
         return createD1Statement(db, sql);
@@ -141,6 +160,10 @@ async function createTestCloudflareBindings(): Promise<WorkerBindings & { close(
       db.close();
     },
   };
+  if (options.seed ?? true) {
+    bindings.CYANPRINT_ENABLE_REGISTRY_SEEDS = '1';
+  }
+  return bindings;
 }
 
 function createD1Statement(db: Database, sql: string) {
@@ -263,8 +286,8 @@ describe('tokens user profile session admin permission artifact registry batch r
       }),
     });
     const missingArchive = (await missingArchiveStart.json()) as { uploadId: string; urls: Record<string, string> };
-    await app.request(uploadUrl(missingArchive.urls, 'manifest'), { method: 'PUT', body: manifest });
-    await app.request(uploadUrl(missingArchive.urls, 'bundle'), { method: 'PUT', body: bundle });
+    await putUploadPart(missingArchive.urls, 'manifest', token, manifest);
+    await putUploadPart(missingArchive.urls, 'bundle', token, bundle);
     const missingArchiveFinalize = await app.request('/uploads/finalize', {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
@@ -314,12 +337,9 @@ describe('tokens user profile session admin permission artifact registry batch r
     };
     const invalidArchiveManifest =
       'cyanprint: 4\nkind: template\nowner: cyanprint\nname: invalid-archive\nbundledEntry: cyan.ts\n';
-    await app.request(uploadUrl(invalidArchiveUpload.urls, 'manifest'), {
-      method: 'PUT',
-      body: invalidArchiveManifest,
-    });
-    await app.request(uploadUrl(invalidArchiveUpload.urls, 'bundle'), { method: 'PUT', body: bundle });
-    await app.request(uploadUrl(invalidArchiveUpload.urls, 'archive'), { method: 'PUT', body: invalidArchive });
+    await putUploadPart(invalidArchiveUpload.urls, 'manifest', token, invalidArchiveManifest);
+    await putUploadPart(invalidArchiveUpload.urls, 'bundle', token, bundle);
+    await putUploadPart(invalidArchiveUpload.urls, 'archive', token, invalidArchive);
     const invalidArchiveFinalize = await app.request('/uploads/finalize', {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
@@ -366,12 +386,9 @@ describe('tokens user profile session admin permission artifact registry batch r
     };
     const corruptZstdManifest =
       'cyanprint: 4\nkind: template\nowner: cyanprint\nname: corrupt-zstd\nbundledEntry: cyan.ts\n';
-    await app.request(uploadUrl(corruptZstdUpload.urls, 'manifest'), {
-      method: 'PUT',
-      body: corruptZstdManifest,
-    });
-    await app.request(uploadUrl(corruptZstdUpload.urls, 'bundle'), { method: 'PUT', body: bundle });
-    await app.request(uploadUrl(corruptZstdUpload.urls, 'archive'), { method: 'PUT', body: corruptZstd });
+    await putUploadPart(corruptZstdUpload.urls, 'manifest', token, corruptZstdManifest);
+    await putUploadPart(corruptZstdUpload.urls, 'bundle', token, bundle);
+    await putUploadPart(corruptZstdUpload.urls, 'archive', token, corruptZstd);
     const corruptZstdFinalize = await app.request('/uploads/finalize', {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
@@ -405,11 +422,13 @@ describe('tokens user profile session admin permission artifact registry batch r
       }),
     });
     const upload = (await start.json()) as { uploadId: string; urls: Record<string, string> };
-    const badBundle = await app.request(uploadUrl(upload.urls, 'bundle'), { method: 'PUT', body: 'wrong' });
+    const unauthenticatedBundle = await app.request(uploadUrl(upload.urls, 'bundle'), { method: 'PUT', body: bundle });
+    expect(unauthenticatedBundle.status).toBe(401);
+    const badBundle = await putUploadPart(upload.urls, 'bundle', token, 'wrong');
     expect(badBundle.status).toBe(400);
-    await app.request(uploadUrl(upload.urls, 'manifest'), { method: 'PUT', body: manifest });
-    await app.request(uploadUrl(upload.urls, 'bundle'), { method: 'PUT', body: bundle });
-    await app.request(uploadUrl(upload.urls, 'archive'), { method: 'PUT', body: archive });
+    await putUploadPart(upload.urls, 'manifest', token, manifest);
+    await putUploadPart(upload.urls, 'bundle', token, bundle);
+    await putUploadPart(upload.urls, 'archive', token, archive);
 
     const identityMismatch = await app.request('/uploads/finalize', {
       method: 'POST',
@@ -474,10 +493,10 @@ describe('tokens user profile session admin permission artifact registry batch r
       }),
     });
     const emptyReadmeUpload = (await emptyReadmeStart.json()) as { uploadId: string; urls: Record<string, string> };
-    await app.request(uploadUrl(emptyReadmeUpload.urls, 'manifest'), { method: 'PUT', body: emptyReadmeManifest });
-    await app.request(uploadUrl(emptyReadmeUpload.urls, 'readme'), { method: 'PUT', body: '' });
-    await app.request(uploadUrl(emptyReadmeUpload.urls, 'bundle'), { method: 'PUT', body: bundle });
-    await app.request(uploadUrl(emptyReadmeUpload.urls, 'archive'), { method: 'PUT', body: emptyReadmeArchive });
+    await putUploadPart(emptyReadmeUpload.urls, 'manifest', token, emptyReadmeManifest);
+    await putUploadPart(emptyReadmeUpload.urls, 'readme', token, '');
+    await putUploadPart(emptyReadmeUpload.urls, 'bundle', token, bundle);
+    await putUploadPart(emptyReadmeUpload.urls, 'archive', token, emptyReadmeArchive);
 
     const emptyReadmeFinalized = await app.request('/uploads/finalize', {
       method: 'POST',
@@ -526,9 +545,9 @@ describe('tokens user profile session admin permission artifact registry batch r
       }),
     });
     const upload = (await start.json()) as { uploadId: string; urls: Record<string, string> };
-    await app.request(uploadUrl(upload.urls, 'manifest'), { method: 'PUT', body: manifest });
-    await app.request(uploadUrl(upload.urls, 'bundle'), { method: 'PUT', body: bundle });
-    await app.request(uploadUrl(upload.urls, 'archive'), { method: 'PUT', body: archive });
+    await putUploadPart(upload.urls, 'manifest', token, manifest);
+    await putUploadPart(upload.urls, 'bundle', token, bundle);
+    await putUploadPart(upload.urls, 'archive', token, archive);
 
     const finalized = await app.request('/uploads/finalize', {
       method: 'POST',
@@ -1027,6 +1046,24 @@ describe('tokens user profile session admin permission artifact registry batch r
       expect(adminList.status).toBe(200);
       const adminBody = (await adminList.json()) as { artifacts: Array<{ moderationState: string; version: string }> };
       expect(adminBody.artifacts).toEqual([expect.objectContaining({ moderationState: 'disabled', version: '5' })]);
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('D1-backed production storage does not seed local users or fixture artifacts by default', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const storage = createCloudflareBindingStorage(bindings);
+      const productionApp = createApp(storage);
+
+      const health = await productionApp.request('/health', {}, bindings);
+      expect(health.status).toBe(200);
+
+      const artifacts = await productionApp.request('/artifacts', {}, bindings);
+      expect(artifacts.status).toBe(200);
+      expect(await artifacts.json()).toMatchObject({ artifacts: [] });
+      expect(await storage.getUser('user_local')).toBeUndefined();
     } finally {
       bindings.close();
     }

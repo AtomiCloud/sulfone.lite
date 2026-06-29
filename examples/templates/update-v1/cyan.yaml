@@ -4,4 +4,4 @@ owner: cyanprint
 name: update-example
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default

@@ -50,6 +50,7 @@ export type WorkerBindings = {
   R2?: R2BucketBinding;
   KV?: KVNamespaceBinding;
   CYANPRINT_ENABLE_LOCAL_AUTH?: string;
+  CYANPRINT_ENABLE_REGISTRY_SEEDS?: string;
   CYANPRINT_LOCAL_DEV_SECRET?: string;
   CYANPRINT_ENABLE_LEGACY_PACKAGE_API?: string;
 };
@@ -66,6 +67,9 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   }
 
   async function seed(): Promise<void> {
+    if (env.CYANPRINT_ENABLE_REGISTRY_SEEDS !== '1') {
+      return;
+    }
     const state = createLocalRegistryState();
     for (const user of state.users) {
       await db

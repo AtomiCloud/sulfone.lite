@@ -1,0 +1,25 @@
+cases:
+  - name: template
+    answers: answers-template.json
+    expected: expected/template
+    snapshot: expected/template/README.md
+    commands:
+      - command: bun
+        args:
+          - --eval
+          - |
+            for (const path of ["cyan.yaml", "cyan.ts", "cyan.test.yaml", ".github/workflows/ci.yml", ".cyan/skills/cyanprint-authoring.md"]) {
+              if (!(await Bun.file(path).exists())) process.exit(1);
+            }
+  - name: processor
+    answers: answers-processor.json
+    expected: expected/processor
+    snapshot: expected/processor/README.md
+  - name: plugin
+    answers: answers-plugin.json
+    expected: expected/plugin
+    snapshot: expected/plugin/README.md
+  - name: resolver
+    answers: answers-resolver.json
+    expected: expected/resolver
+    snapshot: expected/resolver/README.md

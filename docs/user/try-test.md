@@ -75,7 +75,7 @@ Validation fields:
 Run local artifact tests:
 
 ```bash
-cyanprint test examples/artifacts/processor-default
+cyanprint test in-tree/official/processors/default
 cyanprint test examples/artifacts/plugin-footer --report .tmp/plugin-report.json
 cyanprint test examples/artifacts/resolver-keep-user --json
 ```

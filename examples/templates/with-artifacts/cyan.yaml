@@ -4,7 +4,7 @@ owner: cyanprint
 name: with-artifacts
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default
   - cyanprint/uppercase
 plugins:
   - cyanprint/footer

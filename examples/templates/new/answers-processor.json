@@ -1,0 +1,7 @@
+{
+  "owner": "acme",
+  "name": "trim-lines",
+  "kind": "processor",
+  "title": "Trim Lines Processor",
+  "description": "A CyanPrint v4 processor."
+}

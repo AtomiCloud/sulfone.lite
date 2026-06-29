@@ -5,4 +5,4 @@ name: workspace
 description: Scaffold a Bun monorepo workspace.
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default

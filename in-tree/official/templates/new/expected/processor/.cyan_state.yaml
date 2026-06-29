@@ -1,0 +1,196 @@
+cyanprint: 4
+template:
+  owner: cyan
+  name: new
+  version: local
+  source: examples/templates/new
+answers:
+  owner: acme
+  name: trim-lines
+  kind: processor
+  title: Trim Lines Processor
+  description: A CyanPrint v4 processor.
+deterministicState: {}
+files:
+  - path: .cyan/skills/cyanprint-authoring.md
+    sha256: e56ebc0181dc507cf1484107f6d0570be12137a3a706f36a5a7ec8b02239b001
+    content: >
+      # CyanPrint Authoring Skill
+
+
+      Use this when creating or editing this artifact.
+
+
+      - Keep `cyan.yaml`, `README.md`, and the bundled entry aligned.
+
+      - Keep runtime code local-first and deterministic.
+
+      - Runtime artifacts export one named function: `processor`, `plugin`, or
+      `resolver`.
+
+      - Declare every dependency in `cyan.yaml`; returned refs must be declared.
+  - path: .cyan/skills/cyanprint-documenting.md
+    sha256: fbfbe04b7def19be0cafc8bc310cd219ecffd68f47c7bfc27769b4179c52d590
+    content: |
+      # CyanPrint Documenting Skill
+
+      Use this when updating README or examples.
+
+      - Explain what the artifact does.
+      - List expected input, output, and config.
+      - Show one test command and one push command.
+  - path: .cyan/skills/cyanprint-pushing.md
+    sha256: 55c6a5d0eb01ca1ab0ccd24b47289494037993bbdb4b12a4bf573d707c6af63d
+    content: |
+      # CyanPrint Pushing Skill
+
+      Use this before publishing.
+
+      - Run tests locally first.
+      - Use `cyanprint push . --token "$CYANPRINT_TOKEN"`.
+      - Let the registry assign the next integer version.
+  - path: .cyan/skills/cyanprint-searching.md
+    sha256: 3c562af96f4a918724f612c7953c1e3f6fa39082ce31760c60d7581e6f616c2e
+    content: |
+      # CyanPrint Searching Skill
+
+      Use this before adding a dependency.
+
+      - Search processors: `cyanprint search --kind processor <query>`.
+      - Search plugins: `cyanprint search --kind plugin <query>`.
+      - Search resolvers: `cyanprint search --kind resolver <query>`.
+  - path: .cyan/skills/cyanprint-updating.md
+    sha256: 4edf0cf72fee4c8e0110016501375b65f4fa362be8fd7ab9bac6fa7cc3e572ad
+    content: >
+      # CyanPrint Updating Skill
+
+
+      Use this when changing behavior.
+
+
+      - Update fixtures and expected output together.
+
+      - Run `cyanprint test .` before publishing.
+
+      - For processors and plugins, keep input and expected folders small and
+      readable.
+  - path: .github/workflows/ci.yml
+    sha256: 80d3b8f3c1632b93cb7fb10112137e2c81bd7186074f833a7beaeb946a01938a
+    content: >
+      name: cyanprint
+
+
+      on:
+        push:
+        pull_request:
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          env:
+            GEMFURY_READ_TOKEN: ${{ secrets.GEMFURY_READ_TOKEN }}
+          steps:
+            - uses: actions/checkout@v4
+            - name: Install CyanPrint from Gemfury
+              run: |
+                set -euo pipefail
+                repo_url="https://apt.fury.io/atomicloud/"
+                if [ -n "${GEMFURY_READ_TOKEN:-}" ]; then
+                  repo_url="https://${GEMFURY_READ_TOKEN}@apt.fury.io/atomicloud/"
+                fi
+                printf 'deb [trusted=yes] %s /\n' "$repo_url" | sudo tee /etc/apt/sources.list.d/atomicloud-gemfury.list >/dev/null
+                sudo apt-get update
+                sudo apt-get install -y cyanprint
+            - name: Test artifact
+              run: cyanprint test .
+  - path: cyan.test.yaml
+    sha256: e113db6672a4bad8e39a8c7ab5899e85fe0e4a1c8d6db36b36405312ea8227a2
+    content: |
+      cases:
+        - name: basic
+          input: tests/basic/input
+          expected: tests/basic/expected
+          validations:
+            - path: README.md
+              notContains: "   "
+          commands:
+            - command: bun
+              args:
+                - --eval
+                - |
+                  const text = await Bun.file("README.md").text();
+                  if (text.includes("   ")) process.exit(1);
+  - path: cyan.yaml
+    sha256: e8612d0deb4393799342e58d6c32781a9d1cbeeff533acd575666710a586cbc7
+    content: |
+      cyanprint: 4
+      kind: processor
+      owner: acme
+      name: trim-lines
+      description: A CyanPrint v4 processor.
+      entry: src/index.ts
+      bundledEntry: dist/index.js
+  - path: README.md
+    sha256: 1f338dd66f5ad88af0ecbd11c25e9c9445abe06bf2149862fd7414dce77db4ca
+    content: >
+      # Trim Lines Processor
+
+
+      A CyanPrint v4 processor.
+
+
+      This processor receives `{ files, config }` and returns a file map. Use
+      processors for deterministic file transformations after template files are
+      loaded.
+
+
+      ## Test
+
+
+      ```bash
+
+      cyanprint test .
+
+      ```
+
+
+      ## Push
+
+
+      ```bash
+
+      cyanprint push . --token "$CYANPRINT_TOKEN"
+
+      ```
+  - path: src/index.ts
+    sha256: 2dec89d38a4521103e28dfbcc5ccdd1989cf6ff82adcabbd3dfc2c77447217ca
+    content: >
+      export function processor(input: { files: Record<string, string> }) {
+        return Object.fromEntries(
+          Object.entries(input.files).map(([path, content]) => [path, String(content).replace(/[ \t]+$/gm, '')]),
+        );
+      }
+  - path: tests/basic/expected/README.md
+    sha256: efb00cf85debfdefdc4a42d8e24e253e8356256f5f37ccb49ded38f4e9f98f88
+    content: |
+      # Example
+
+      Trim this line
+  - path: tests/basic/input/README.md
+    sha256: efb00cf85debfdefdc4a42d8e24e253e8356256f5f37ccb49ded38f4e9f98f88
+    content: |
+      # Example
+
+      Trim this line
+artifacts:
+  - kind: template
+    owner: cyan
+    name: new
+    version: local
+    integrity: e26063c78df4c71fba98667d46b60a24b28948bd9907d71912de2bdaacc2fa63
+  - kind: processor
+    owner: cyan
+    name: default
+    version: local
+    integrity: aed94f6a0aeec2de4e7f7e609aae6d0a0a306802f7b807b042d0be4f08e03da4
+conflicts: []

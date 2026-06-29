@@ -5,4 +5,4 @@ name: nix
 description: Add a Bun-friendly Nix development shell.
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default

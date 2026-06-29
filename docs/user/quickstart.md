@@ -37,7 +37,7 @@ Dependencies live in `cyan.yaml` as friendly refs:
 
 ```yaml
 processors:
-  - cyanprint/prettier
+  - cyan/default
 resolvers:
   - cyanprint/keep-user@7
 ```

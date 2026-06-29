@@ -5,4 +5,4 @@ name: hello
 description: Minimal CyanPrint v4 template.
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default

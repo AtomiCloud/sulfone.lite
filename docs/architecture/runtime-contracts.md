@@ -16,11 +16,11 @@ name: nextjs-app
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/base
+  - cyan/new
   - cyanprint/auth@7
 
 processors:
-  - cyanprint/prettier
+  - cyan/default
   - cyanprint/eslint-fix@3
 
 plugins:
@@ -41,7 +41,7 @@ export default async function cyan(prompt, ctx) {
   return {
     processors: [
       {
-        name: 'cyanprint/default',
+        name: 'cyan/default',
         files: [{ root: 'template', glob: '**/*', type: 'Template' }],
         config: { vars: { name } },
       },

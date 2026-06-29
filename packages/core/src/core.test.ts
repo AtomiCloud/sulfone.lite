@@ -675,7 +675,7 @@ describe('artifact output layering', () => {
           'templates:',
           '  - cyanprint/child',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           'presets:',
           '  templates:',
           '    cyanprint/child:',
@@ -689,7 +689,7 @@ describe('artifact output layering', () => {
         join(parent, 'cyan.ts'),
         [
           'export default function cyan(prompt, ctx) {',
-          '  return { processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
+          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
           '}',
           '',
         ].join('\n'),
@@ -704,7 +704,7 @@ describe('artifact output layering', () => {
           'name: child',
           'bundledEntry: cyan.ts',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
         'utf8',
@@ -716,7 +716,7 @@ describe('artifact output layering', () => {
           '  const childName = await prompt.text("childName", "Child name");',
           '  return {',
           '    processors: [{',
-          '      name: "cyanprint/default",',
+          '      name: "cyan/default",',
           '      files: [{ root: "template", glob: "**/*", type: "Template" }],',
           '      config: { vars: { CHILD_NAME: childName } },',
           '    }],',
@@ -758,7 +758,7 @@ describe('artifact output layering', () => {
           'templates:',
           '  - cyanprint/child',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
         'utf8',
@@ -768,7 +768,7 @@ describe('artifact output layering', () => {
         [
           'export default function cyan(prompt, ctx) {',
           '  return {',
-          '    processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
+          '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
           '    templates: [{ kind: "template", owner: "cyanprint", name: "child" }]',
           '  };',
           '}',
@@ -785,7 +785,7 @@ describe('artifact output layering', () => {
           'name: child',
           'bundledEntry: cyan.ts',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
         'utf8',
@@ -794,7 +794,7 @@ describe('artifact output layering', () => {
         join(child, 'cyan.ts'),
         [
           'export default function cyan(prompt, ctx) {',
-          '  return { processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
+          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
           '}',
           '',
         ].join('\n'),
@@ -918,7 +918,7 @@ describe('artifact output layering', () => {
           'name: all-inputs',
           'bundledEntry: cyan.ts',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
       );
@@ -933,7 +933,7 @@ describe('artifact output layering', () => {
           "  const count = await prompt.number('count', 'Count');",
           '  return {',
           '    processors: [{',
-          "      name: 'cyanprint/default',",
+          "      name: 'cyan/default',",
           "      files: [{ root: 'template', glob: '**/*', type: 'Template' }],",
           '      config: { vars: { NAME: name, ENABLED: enabled, COLOR: color, FEATURES: features.join(","), COUNT: count } },',
           '    }],',
@@ -1158,7 +1158,7 @@ async function createSamePathFixture(layers: SamePathLayer[], resolverNames: str
         `name: ${layer.name}`,
         'bundledEntry: cyan.ts',
         'processors:',
-        '  - cyanprint/default',
+        '  - cyan/default',
         ...(layer.resolvers?.length
           ? ['resolvers:', ...[...new Set(layer.resolvers.map(resolver => resolver.name))].map(ref => `  - ${ref}`)]
           : []),
@@ -1171,7 +1171,7 @@ async function createSamePathFixture(layers: SamePathLayer[], resolverNames: str
       [
         'export default function cyan(prompt, ctx) {',
         '  return {',
-        "    processors: [{ name: 'cyanprint/default', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+        "    processors: [{ name: 'cyan/default', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
         `    resolvers: ${JSON.stringify(layer.resolvers ?? [])},`,
         '  };',
         '}',
@@ -1244,7 +1244,7 @@ async function createSamePathResolverBundles(tempRoot: string, names: string[], 
 describe('standard artifact tests', () => {
   test('runs processor, plugin, and resolver test fixtures', async () => {
     const defaultProcessor = await runArtifactTests({
-      artifactDir: join(root, 'examples/artifacts/processor-default'),
+      artifactDir: join(root, 'in-tree/official/processors/default'),
     });
     expect(defaultProcessor).toMatchObject({ kind: 'processor', passed: 1, failed: 0 });
 
@@ -1286,7 +1286,7 @@ describe('standard artifact tests', () => {
       );
       await writeFile(
         join(artifactDir, 'src/index.ts'),
-        await Bun.file(join(root, 'examples/artifacts/processor-default/src/index.ts')).text(),
+        await Bun.file(join(root, 'in-tree/official/processors/default/src/index.ts')).text(),
         'utf8',
       );
       await writeFile(
@@ -1468,14 +1468,14 @@ describe('standard artifact tests', () => {
           'name: failing-command',
           'bundledEntry: cyan.ts',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
         'utf8',
       );
       await writeFile(
         join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
+        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
         'utf8',
       );
       await writeFile(
@@ -1532,7 +1532,22 @@ describe('standard artifact tests', () => {
 });
 
 describe('main template parity fixtures', () => {
-  for (const name of ['new', 'workspace', 'nix']) {
+  test('new template scaffolds all artifact kinds', async () => {
+    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-new-'));
+    try {
+      const template = join(root, 'in-tree/official/templates/new');
+      const report = await runTemplateTest({
+        template,
+        answers: join(template, 'answers.json'),
+        outDir: out,
+      });
+      expect(report).toMatchObject({ passed: 4, failed: 0 });
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  for (const name of ['workspace', 'nix']) {
     test(`${name} template matches its README snapshot`, async () => {
       const out = await mkdtemp(join(tmpdir(), `cyanprint-test-template-${name}-`));
       try {
@@ -1594,7 +1609,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: resolver-output-state',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             'resolvers:',
             '  - cyanprint/keep-user',
             '',
@@ -1606,7 +1621,7 @@ describe('update three state resolver merge trust safety post generation command
           [
             'export default async function cyan() {',
             '  return {',
-            '    processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
+            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
             '    resolvers: [{ name: "cyanprint/keep-user", config: { paths: ["README.md"] } }],',
             '  };',
             '}',
@@ -1651,7 +1666,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: binary-current-conflict',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             'resolvers:',
             '  - cyanprint/keep-user',
             '',
@@ -1663,7 +1678,7 @@ describe('update three state resolver merge trust safety post generation command
           [
             'export default async function cyan(prompt, ctx) {',
             '  return {',
-            '    processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
+            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
             '    resolvers: [{ name: "cyanprint/keep-user", config: { paths: ["README.md"] } }],',
             '  };',
             '}',
@@ -1711,7 +1726,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: ambiguous-resolver-update',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             'resolvers:',
             '  - cyanprint/resolver1',
             '  - cyanprint/resolver2',
@@ -1724,7 +1739,7 @@ describe('update three state resolver merge trust safety post generation command
           [
             'export default async function cyan() {',
             '  return {',
-            '    processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
+            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
             '    resolvers: [',
             '      { name: "cyanprint/resolver1", config: { paths: ["README.md"] } },',
             '      { name: "cyanprint/resolver2", config: { paths: ["README.md"] } },',
@@ -1769,7 +1784,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: binary-update',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             '',
           ].join('\n'),
           'utf8',
@@ -1782,7 +1797,7 @@ describe('update three state resolver merge trust safety post generation command
           join(dir, 'cyan.ts'),
           [
             'export default async () => ({',
-            '  processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Copy" }] }],',
+            '  processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Copy" }] }],',
             '});',
             '',
           ].join('\n'),
@@ -1817,7 +1832,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: deleted-update',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             '',
           ].join('\n'),
           'utf8',
@@ -1828,7 +1843,7 @@ describe('update three state resolver merge trust safety post generation command
       for (const dir of [v1, v2]) {
         await writeFile(
           join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
+          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
           'utf8',
         );
       }
@@ -1865,7 +1880,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: atomic-update',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             '',
           ].join('\n'),
           'utf8',
@@ -1878,7 +1893,7 @@ describe('update three state resolver merge trust safety post generation command
       for (const dir of [v1, v2]) {
         await writeFile(
           join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
+          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
           'utf8',
         );
       }
@@ -1913,7 +1928,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: directory-conflict',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             '',
           ].join('\n'),
           'utf8',
@@ -1924,7 +1939,7 @@ describe('update three state resolver merge trust safety post generation command
       for (const dir of [v1, v2]) {
         await writeFile(
           join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
+          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
           'utf8',
         );
       }
@@ -1962,7 +1977,7 @@ describe('update three state resolver merge trust safety post generation command
             'name: unchanged-target',
             'bundledEntry: cyan.ts',
             'processors:',
-            '  - cyanprint/default',
+            '  - cyan/default',
             '',
           ].join('\n'),
           'utf8',
@@ -1977,7 +1992,7 @@ describe('update three state resolver merge trust safety post generation command
       for (const dir of [v1, v2, v3]) {
         await writeFile(
           join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyanprint/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
+          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
           'utf8',
         );
       }
@@ -2023,7 +2038,7 @@ describe('update three state resolver merge trust safety post generation command
           'name: cached-default',
           'bundledEntry: cyan.ts',
           'processors:',
-          '  - cyanprint/default',
+          '  - cyan/default',
           '',
         ].join('\n'),
         'utf8',
@@ -2032,7 +2047,7 @@ describe('update three state resolver merge trust safety post generation command
         join(template, 'cyan.ts'),
         [
           'export default async () => ({',
-          '  processors: [{ kind: "processor", owner: "cyanprint", name: "default" }],',
+          '  processors: [{ kind: "processor", owner: "cyan", name: "default" }],',
           '});',
           '',
         ].join('\n'),
@@ -2048,8 +2063,8 @@ describe('update three state resolver merge trust safety post generation command
         JSON.stringify({
           bundles: [
             {
-              key: 'processor:cyanprint:default:4',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'default', version: '4' },
+              key: 'processor:cyan:default:4',
+              dependency: { kind: 'processor', owner: 'cyan', name: 'default', version: '4' },
               runtimeFile: join(runtime, 'processor.js'),
               integrity: sha256(await Bun.file(join(runtime, 'processor.js')).text()),
             },

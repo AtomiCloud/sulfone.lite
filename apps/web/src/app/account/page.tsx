@@ -5,7 +5,7 @@ export default function AccountPage() {
     <section className="page-grid">
       <div>
         <p className="eyebrow">Account</p>
-        <h1>Local publishing identity</h1>
+        <h1>Publishing identity</h1>
         <p className="lede">
           Mint API tokens for `cyanprint push`, inspect token metadata, and revoke stale credentials.
         </p>
@@ -14,9 +14,9 @@ export default function AccountPage() {
         <h2>Session</h2>
         <dl className="facts">
           <dt>User</dt>
-          <dd>local</dd>
+          <dd>Registry account</dd>
           <dt>Role</dt>
-          <dd>admin owner</dd>
+          <dd>Publisher</dd>
         </dl>
         <ButtonLink href="/account/tokens">Manage tokens</ButtonLink>
       </div>

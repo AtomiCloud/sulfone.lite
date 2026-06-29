@@ -10,16 +10,22 @@ CyanPrint v4 has five artifact kinds:
 
 ## Create
 
-Create a template from the built-in example:
+Create a new artifact from the default registry scaffold:
 
 ```bash
-cyanprint create examples/templates/new my-template
+cyanprint create cyan/new my-artifact
 ```
 
-Create a runtime artifact by copying one of the examples:
+For local development, the same scaffold is available in the repo:
 
 ```bash
-cp -R examples/artifacts/processor-default my-processor
+cyanprint create in-tree/official/templates/new my-artifact
+```
+
+Create a runtime artifact by copying one of the examples when you want a minimal fixture:
+
+```bash
+cp -R in-tree/official/processors/default my-processor
 cp -R examples/artifacts/plugin-footer my-plugin
 cp -R examples/artifacts/resolver-keep-user my-resolver
 ```
@@ -29,7 +35,7 @@ Every artifact needs `cyan.yaml`, `README.md`, and a bundled entry:
 ```yaml
 cyanprint: 4
 kind: processor
-owner: cyanprint
+owner: cyan
 name: prettier
 bundledEntry: dist/index.js
 ```
@@ -63,9 +69,9 @@ Declare dependencies with user-friendly string refs. The section gives the kind:
 
 ```yaml
 templates:
-  - cyanprint/base
+  - cyan/new
 processors:
-  - cyanprint/prettier
+  - cyan/default
 plugins:
   - cyanprint/footer
 resolvers:

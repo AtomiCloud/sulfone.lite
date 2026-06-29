@@ -88,7 +88,7 @@ async function writeTriChild(root: string, name: string, files: Record<string, s
       'bundledEntry: cyan.ts',
       '',
       'processors:',
-      '  - cyanprint/default',
+      '  - cyan/default',
       '',
       'resolvers:',
       '  - cyanprint/tri-merge',
@@ -101,7 +101,7 @@ async function writeTriChild(root: string, name: string, files: Record<string, s
     'cyan.ts',
     `export default async function cyan(prompt, ctx) {
   return {
-    processors: [{ name: 'cyanprint/default', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],
+    processors: [{ name: 'cyan/default', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],
     resolvers: [{ name: 'cyanprint/tri-merge', config: { paths: ['shared.txt'] } }],
   };
 }

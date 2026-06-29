@@ -28,7 +28,7 @@ tasks:
   dev:
     desc: 'Run local registry Worker and web UI with token minting enabled'
     cmds:
-      - printf 'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n' > apps/worker/.dev.vars
+      - printf 'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_ENABLE_REGISTRY_SEEDS=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n' > apps/worker/.dev.vars
       - bun run --filter @cyanprint/worker db:migrate:local
       - |
         set -e

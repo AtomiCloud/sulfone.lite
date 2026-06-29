@@ -687,11 +687,18 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
 
   app.put('/uploads/:uploadId/:part', async c => {
     const storage = resolveStorage(source, c);
+    const token = await requireToken(storage, c);
+    if (!token) {
+      return problemResponse(c, 401, 'auth', 'missing_token', 'A valid API token is required to upload objects.');
+    }
     const upload = await storage.getUploadSession(c.req.param('uploadId'));
     const part = c.req.param('part') as UploadPartName;
     const ref = upload?.objects[part];
     if (!upload || !ref) {
       return problemResponse(c, 404, 'not_found', 'upload_not_found', 'Upload part not found.');
+    }
+    if (upload.userId !== token.userId) {
+      return problemResponse(c, 403, 'permission', 'upload_owner_required', 'Token cannot write this upload session.');
     }
     const payload = new Uint8Array(await c.req.arrayBuffer());
     if (ref.size !== payload.byteLength || ref.sha256 !== (await sha256Bytes(payload))) {

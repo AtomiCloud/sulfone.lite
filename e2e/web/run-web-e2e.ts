@@ -68,7 +68,7 @@ await assertRendered(
   DocsPage({ params: Promise.resolve({ slug: ['user', 'quickstart'] }) }),
   'Quickstart',
 );
-await assertRendered('account page', AccountPage(), 'Local publishing identity');
+await assertRendered('account page', AccountPage(), 'Publishing identity');
 const tokenPageHtml = await renderHtml(TokensPage());
 for (const expected of ['Mint token', 'Proxy secret', 'Token name', 'Create token', 'Refresh']) {
   if (!tokenPageHtml.includes(expected)) {

@@ -57,7 +57,7 @@ try {
   const bumpTargets = [
     { path: 'examples/templates/with-artifacts', kind: 'template', owner: 'cyanprint', name: 'with-artifacts' },
     { path: 'examples/artifacts/plugin-footer', kind: 'plugin', owner: 'cyanprint', name: 'footer' },
-    { path: 'examples/artifacts/processor-default', kind: 'processor', owner: 'cyanprint', name: 'default' },
+    { path: 'examples/artifacts/processor-default', kind: 'processor', owner: 'cyan', name: 'default' },
     { path: 'examples/artifacts/resolver-keep-user', kind: 'resolver', owner: 'cyanprint', name: 'keep-user' },
   ];
   for (const target of bumpTargets) {

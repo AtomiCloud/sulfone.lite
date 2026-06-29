@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: acme
+name: service-template
+description: A CyanPrint v4 template.
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

@@ -4,7 +4,7 @@ owner: cyanprint
 name: basic-group
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default
 templates:
   - cyanprint/hello
   - cyanprint/with-artifacts

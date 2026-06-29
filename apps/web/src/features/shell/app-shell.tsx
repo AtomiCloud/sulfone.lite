@@ -280,8 +280,8 @@ function AccountDropdown() {
       <DropdownMenu.Trigger aria-label="Open account menu" className="profile-trigger">
         <span className="avatar">CP</span>
         <span className="profile-copy">
-          <strong>Local Owner</strong>
-          <small>publisher workspace</small>
+          <strong>CyanPrint</strong>
+          <small>publisher portal</small>
         </span>
         <ChevronDown aria-hidden="true" size={16} />
       </DropdownMenu.Trigger>
@@ -290,8 +290,8 @@ function AccountDropdown() {
           <DropdownMenu.Label className="profile-menu-label">
             <CircleUserRound aria-hidden="true" size={18} />
             <span>
-              <strong>local</strong>
-              <small>admin owner</small>
+              <strong>Registry</strong>
+              <small>account tools</small>
             </span>
           </DropdownMenu.Label>
           <DropdownMenu.Separator className="menu-separator" />

@@ -54,7 +54,7 @@ Examples:
   cyanprint create ./examples/templates/hello --out ./app --headless --answers answers.json
   cyanprint search nextjs --kind template
   cyanprint test ./examples/templates/hello
-  cyanprint push ./examples/artifacts/processor-default --dry-run
+  cyanprint push ./in-tree/official/processors/default --dry-run
 `,
     );
   if (!runtime.jsonErrors) {

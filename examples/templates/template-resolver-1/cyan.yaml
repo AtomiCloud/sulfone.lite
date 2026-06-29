@@ -4,7 +4,7 @@ owner: cyanprint
 name: template-resolver-1
 bundledEntry: cyan.ts
 processors:
-  - cyanprint/default
+  - cyan/default
 resolvers:
   - cyanprint/resolver1
   - cyanprint/resolver2

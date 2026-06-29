@@ -39,6 +39,7 @@ apps/worker/.dev.vars
 apps/worker/.wrangler/
 apps/web/.next/
 apps/web/.next-e2e/
+apps/web/.open-next/
 apps/web/next-env.d.ts
 dist/
 !examples/artifacts/*/dist/

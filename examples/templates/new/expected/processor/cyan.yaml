@@ -1,0 +1,7 @@
+cyanprint: 4
+kind: processor
+owner: acme
+name: trim-lines
+description: A CyanPrint v4 processor.
+entry: src/index.ts
+bundledEntry: dist/index.js

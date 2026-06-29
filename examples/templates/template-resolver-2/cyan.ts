@@ -4,7 +4,7 @@ export default function cyan(prompt: CyanPrompter, ctx: CyanPromptContext) {
   return {
     processors: [
       {
-        name: 'cyanprint/default',
+        name: 'cyan/default',
         files: [{ root: 'template', glob: '**/*', type: 'Template' }],
       },
     ],

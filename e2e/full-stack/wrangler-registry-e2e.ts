@@ -6,7 +6,7 @@ const textEncoder = new TextEncoder();
 await rm('apps/worker/.wrangler/state', { recursive: true, force: true });
 await writeFile(
   'apps/worker/.dev.vars',
-  'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n',
+  'CYANPRINT_ENABLE_LOCAL_AUTH=1\nCYANPRINT_ENABLE_REGISTRY_SEEDS=1\nCYANPRINT_LOCAL_DEV_SECRET=cyanprint-local-dev\n',
   'utf8',
 );
 const migrate = Bun.spawnSync(['bun', 'run', '--filter', '@cyanprint/worker', 'db:migrate:local']);
@@ -104,6 +104,7 @@ async function publishTemplate(args: {
   for (const [part, payload] of Object.entries({ manifest, bundle: args.bundle, archive })) {
     const put = await fetch(`${args.registry}${uploadUrl(upload.urls, part)}`, {
       method: 'PUT',
+      headers: { authorization: `Bearer ${args.token}` },
       body: payload,
     });
     if (!put.ok) {

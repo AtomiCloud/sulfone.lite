@@ -1,0 +1,7 @@
+{
+  "owner": "acme",
+  "name": "footer",
+  "kind": "plugin",
+  "title": "Footer Plugin",
+  "description": "A CyanPrint v4 plugin."
+}

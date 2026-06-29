@@ -1,0 +1,7 @@
+cyanprint: 4
+kind: plugin
+owner: __OWNER__
+name: __NAME__
+description: __DESCRIPTION__
+entry: src/index.ts
+bundledEntry: dist/index.js

@@ -5,13 +5,13 @@ import { createTemplateArchivePayload } from '../../packages/cli/src/local-objec
 const fixtureDirs: Record<string, string> = {
   'template:cyanprint:hello': 'examples/templates/hello',
   'template:cyanprint:with-artifacts': 'examples/templates/with-artifacts',
-  'template:cyanprint:new': 'examples/templates/new',
+  'template:cyan:new': 'in-tree/official/templates/new',
   'template:cyanprint:workspace': 'examples/templates/workspace',
   'template:cyanprint:nix': 'examples/templates/nix',
   'template:cyanprint:template-resolver-1': 'examples/templates/template-resolver-1',
   'template:cyanprint:template-resolver-2': 'examples/templates/template-resolver-2',
   'template-group:cyanprint:basic-group': 'examples/template-groups/basic',
-  'processor:cyanprint:default': 'examples/artifacts/processor-default',
+  'processor:cyan:default': 'in-tree/official/processors/default',
   'processor:cyanprint:uppercase': 'examples/artifacts/processor-uppercase',
   'plugin:cyanprint:footer': 'examples/artifacts/plugin-footer',
   'resolver:cyanprint:keep-user': 'examples/artifacts/resolver-keep-user',
@@ -47,11 +47,6 @@ async function replaceSeedPart(key: string, payload: string | Uint8Array, binary
   const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
   const hash = sha256(payload);
   const base64 = Buffer.from(bytes).toString('base64');
-  const keyPattern = quotePattern(key);
-  const seedPartPattern = new RegExp(
-    `seedPart\\(\\n\\s*${keyPattern}\\s*,\\n\\s*['"][^'"]+['"]\\s*,\\n\\s*\\d+\\s*,\\n\\s*['"][A-Za-z0-9+/=]*['"](\\s*,\\n\\s*true)?\\s*,?\\n\\s*\\)`,
-    'm',
-  );
   const replacement = [
     'seedPart(',
     `        ${JSON.stringify(key)},`,
@@ -60,19 +55,45 @@ async function replaceSeedPart(key: string, payload: string | Uint8Array, binary
     `        ${JSON.stringify(base64)},${binary ? '\n        true,' : ''}`,
     '      )',
   ].join('\n');
-  const next = source.replace(seedPartPattern, replacement);
-  if (next !== source) {
-    source = next;
-    updates += 1;
+  const next = replaceSeedPartCall(key, replacement);
+  if (next !== undefined) {
+    if (next !== source) {
+      source = next;
+      updates += 1;
+    }
     return;
   }
   if (replaceRuntimeSeedFields(key, hash, bytes.byteLength, base64)) {
     updates += 1;
     return;
   }
-  if (next === source) {
-    throw new Error(`Could not update seedPart ${key}`);
+  throw new Error(`Could not update seedPart ${key}`);
+}
+
+function replaceSeedPartCall(key: string, replacement: string): string | undefined {
+  const keyIndex = findSeedKeyIndex(key);
+  if (keyIndex === -1) {
+    return undefined;
   }
+  const start = source.lastIndexOf('seedPart(', keyIndex);
+  if (start === -1) {
+    return undefined;
+  }
+  const close = source.slice(start).match(/\n\s*\)\s*,?/);
+  if (!close || close.index === undefined) {
+    return undefined;
+  }
+  const end = start + close.index + close[0].length;
+  const trailingComma = close[0].trimEnd().endsWith(',');
+  return `${source.slice(0, start)}${replacement}${trailingComma ? ',' : ''}${source.slice(end)}`;
+}
+
+function findSeedKeyIndex(key: string): number {
+  const doubleQuoted = source.indexOf(JSON.stringify(key));
+  if (doubleQuoted !== -1) {
+    return doubleQuoted;
+  }
+  return source.indexOf(`'${key.replaceAll("'", "\\'")}'`);
 }
 
 function replaceRuntimeSeedFields(key: string, hash: string, size: number, base64: string): boolean {
@@ -102,24 +123,19 @@ function replaceRuntimeSeedFields(key: string, hash: string, size: number, base6
   const before = source.slice(0, callStart);
   const block = source.slice(callStart, callEnd);
   const after = source.slice(callEnd);
-  const updated = block
-    .replace(new RegExp(`${fieldPrefix}Sha: ['"][^'"]+['"]`), `${fieldPrefix}Sha: ${JSON.stringify(hash)}`)
-    .replace(new RegExp(`${fieldPrefix}Size: \\d+`), `${fieldPrefix}Size: ${size}`)
-    .replace(
-      new RegExp(`${fieldPrefix}Base64:\\s*['"][A-Za-z0-9+/=]*['"]`),
-      `${fieldPrefix}Base64: ${JSON.stringify(base64)}`,
-    );
-  if (updated === block) {
+  const shaPattern = new RegExp(`${fieldPrefix}Sha: ['"][^'"]+['"]`);
+  const sizePattern = new RegExp(`${fieldPrefix}Size: \\d+`);
+  const base64Pattern = new RegExp(`${fieldPrefix}Base64:\\s*['"][A-Za-z0-9+/=]*['"]`);
+  if (!shaPattern.test(block) || !sizePattern.test(block) || !base64Pattern.test(block)) {
     return false;
+  }
+  const updated = block
+    .replace(shaPattern, `${fieldPrefix}Sha: ${JSON.stringify(hash)}`)
+    .replace(sizePattern, `${fieldPrefix}Size: ${size}`)
+    .replace(base64Pattern, `${fieldPrefix}Base64: ${JSON.stringify(base64)}`);
+  if (updated === block) {
+    return true;
   }
   source = `${before}${updated}${after}`;
   return true;
-}
-
-function quotePattern(value: string): string {
-  return `['"]${escapeRegExp(value)}['"]`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

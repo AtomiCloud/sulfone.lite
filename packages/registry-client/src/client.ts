@@ -137,7 +137,7 @@ export class RegistryClient {
       typeof payload === 'string'
         ? payload
         : (payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer);
-    const response = await fetch(url, { method: 'PUT', body });
+    const response = await fetch(url, { method: 'PUT', headers: this.headers(), body });
     if (!response.ok) {
       throw new Error(await response.text());
     }
