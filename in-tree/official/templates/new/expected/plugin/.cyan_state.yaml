@@ -3,7 +3,7 @@ template:
   owner: cyan
   name: new
   version: local
-  source: in-tree/official/templates/new
+  source: /Users/erng/Workspace/atomi/runbook/platforms/sulfone/lite/in-tree/official/templates/new
 answers:
   owner: acme
   name: footer
@@ -13,14 +13,14 @@ answers:
 deterministicState: {}
 files:
   - path: .cyan/skills/cyanprint-authoring.md
-    sha256: 10ddde79b9342aa1dedf32971aab9ff7c73e6e3d106da3c959dce78f0f8fbcba
+    sha256: 63e83d18759d374100142e5a50af0ee6eb0ae3bd711be12eae65481825e85c27
     content: >
       # CyanPrint Authoring Skill
 
 
       Use this when creating or editing this artifact. The goal is to leave the
-      artifact deterministic, folder-first, easy to test, and easy for another
-      agent to continue.
+      artifact deterministic, folder-first, easy to test, resolver-friendly, and
+      easy for another agent to continue.
 
 
       ## Artifact Contract
@@ -39,6 +39,9 @@ files:
       pinning an older version. Push resolves omitted versions and pins them.
 
       - Run generated code through Bun and TypeScript-compatible APIs only.
+
+      - Keep runtime returns pure data. `cyan.ts`, processors, plugins, and
+      resolvers should not smuggle functions in returned objects.
 
 
       ## Templates
@@ -65,6 +68,7 @@ files:
               config: { vars: { PROJECT: project, TITLE: 'Footer Plugin' } },
             },
           ],
+          resolvers: [{ name: 'cyan/keep-user', config: { paths: ['README.md'] } }],
         };
       }
 
@@ -88,32 +92,116 @@ files:
       template needs an answer, pass it explicitly through presets or returned
       template data.
 
-      - Include resolvers when multiple templates may touch the same path. Same
-      resolver + same config should merge commutatively; no resolver should be
-      an intentional last-writer-wins choice.
+      - Think about processors before adding files. Markdown, JSON, YAML,
+      package manifests, Nix files, and generated code should have a
+      deterministic processor or formatter path.
+
+      - Think about resolvers before writing common paths. Common overlap paths
+      include `README.md`, `.gitignore`, `.dockerignore`, `.env.example`,
+      `flake.nix`, `package.json`, `tsconfig.json`, `.github/workflows/*`,
+      `.claude/*`, `.codex/*`, `AGENTS.md`, and other agent or IDE files.
+
+      - If a file may be touched by more than one template, either add a
+      resolver dependency and config, or document that last-writer-wins is
+      intentional.
+
+      - Prefer resolver-friendly structure. For lists, keep one item per line.
+      For generated sections, use stable headings or markers. For config files,
+      preserve sorted keys where that is the ecosystem norm.
+
+      - Keep dependency templates explicit. If this template invokes `cyan/nix`,
+      `cyan/workspace`, `cyan/readme`, or another base template, pass
+      deterministic answers to it and test the combined output.
 
 
-      ## Processors and Plugins
+      ## Processors
 
 
-      Processors and plugins receive `{ files, config }` and return a complete
-      file map.
+      Processors receive `{ files, config }` and return a complete file map.
+      They should behave like pure deterministic functions:
 
 
-      - Processors should be deterministic transforms: render, format,
-      normalize, sort, or validate output.
+      ```txt
 
-      - Plugins should add or make final edits after processors. Keep plugin
-      behavior explicit and narrow.
+      same input files + same config + same processor version => same output
+      files
 
-      - Never mutate hidden global state. Never read the target project
-      directly.
+      ```
 
-      - Preserve unrelated files unless the artifact is intentionally replacing
-      them.
 
-      - If importing packages, add them to `package.json` and run `bun run
-      build` before test or push.
+      Processor rules:
+
+
+      - Do not read wall-clock time, random values, host-specific paths,
+      environment variables, network resources, or the target project unless
+      those values are explicit config inputs.
+
+      - Sort file paths, object keys, imports, and generated arrays when order
+      is not semantically meaningful.
+
+      - Preserve binary files and unknown files unless the processor explicitly
+      owns them.
+
+      - Treat config as part of the input contract. Validate config up front and
+      fail with clear messages.
+
+      - Make output stable across platforms. Normalize newlines, path
+      separators, and trailing whitespace intentionally.
+
+      - Add fixtures that prove input to output determinism. Run the same test
+      twice and make sure the second run has no diff.
+
+
+      Good processor examples:
+
+
+      - Render Eta templates with a fixed `vars` object.
+
+      - Format Markdown, JSON, TypeScript, YAML, or Nix files with pinned
+      dependencies.
+
+      - Normalize package manifests by sorting scripts and dependencies.
+
+
+      Bad processor examples:
+
+
+      - Adding `generatedAt: new Date()`.
+
+      - Reading local Git author info without config.
+
+      - Reordering file sections based on filesystem traversal order.
+
+
+      ## Plugins
+
+
+      Plugins receive `{ files, config }` and return a complete file map after
+      processors run. Use plugins for project-level finalization that is still
+      deterministic and idempotent.
+
+
+      Plugin rules:
+
+
+      - A plugin must be safe to run twice. The second run should not duplicate
+      lines, sections, hooks, or files.
+
+      - Prefer file-map edits over shell commands. If a command is needed,
+      document it and make it optional or validated.
+
+      - Use plugins for narrow final steps such as adding pre-commit config,
+      initializing Git metadata idempotently, adding CI helper files, or running
+      a declared formatting command.
+
+      - For pre-commit behavior, prefer generating `.pre-commit-config.yaml`
+      plus a validation command such as `pre-commit run --all-files`. Do not
+      assume the host already has hooks installed.
+
+      - For Git initialization, only create missing files or config. Never
+      overwrite user remotes, branches, ignored files, or identity.
+
+      - Record every plugin side effect in README and tests.
 
 
       ## Resolvers
@@ -123,16 +211,49 @@ files:
       and return one folded result.
 
 
-      - Treat resolver input order as meaningful only through explicit metadata
-      such as `origin.layer`.
+      Resolver rules:
+
+
+      - Design the resolver as a fold over an array of candidates, not as a
+      special two-file merge.
 
       - Make equal inputs idempotent.
+
+      - Make the merge commutative when the resolver claims order does not
+      matter. `fold([a, b, c])` should match `fold([c, a, b])` for unordered
+      config.
+
+      - If order matters, make the order source explicit through metadata such
+      as `origin.layer`, `origin.template`, or `origin.version`, then document
+      that policy.
 
       - Document when the resolver prefers user content, generated content,
       latest layer, or a structured merge.
 
-      - Add fixtures for at least: clean merge, same resolver same config,
-      different config, and no-resolver fallback when relevant.
+      - Keep resolver config small, serializable, and comparable. Same resolver
+      plus same config is what allows CyanPrint to merge instead of reporting a
+      resolver mismatch.
+
+      - Add fixtures for at least: clean merge, repeated identical input,
+      reversed input order, three or more candidates, different config, and
+      no-resolver fallback when relevant.
+
+
+      Resolver-friendly file design:
+
+
+      - Markdown: stable headings and bounded generated sections.
+
+      - Ignore files: sorted unique lines with comments preserved when possible.
+
+      - JSON/YAML/package files: parse and merge structurally, then emit stable
+      sorted output.
+
+      - Nix files: prefer isolated imports/modules over editing one large
+      expression.
+
+      - Agent docs: append or merge named sections, never rely on vague prose
+      matching.
 
 
       ## Build and Bundle
@@ -157,7 +278,7 @@ files:
       what gets uploaded for runtime artifacts, and it is what keeps imports
       from packages deterministic.
   - path: .cyan/skills/cyanprint-documenting.md
-    sha256: cb378980f9f4ca464fc70479eda28f4df86abce778e6dcd7eb4adb74a1c3a9c5
+    sha256: 52ebc70bf33a56cf4104586ea622bc6430b188e33e7b70ce656f5ffc9ea0f098
     content: >
       # CyanPrint Documenting Skill
 
@@ -175,20 +296,22 @@ files:
 
       1. Title and one-sentence purpose.
 
-      2. What the artifact generates or transforms.
+      2. What the artifact generates, transforms, folds, or finalizes.
 
       3. Inputs: prompts, config keys, expected files, and dependency refs.
 
-      4. Outputs: generated files, renamed paths, resolver behavior, or plugin
-      additions.
+      4. Outputs: generated files, renamed paths, resolver behavior, plugin
+      additions, or validation commands.
 
       5. Dependencies and why each is declared in `cyan.yaml`.
 
-      6. Build/test commands.
+      6. Processor and resolver plan for files that commonly overlap.
 
-      7. Push command and token requirement.
+      7. Build/test commands.
 
-      8. Compatibility notes and known merge behavior.
+      8. Push command and token requirement.
+
+      9. Compatibility notes and known merge behavior.
 
 
       ## Writing Good Examples
@@ -204,6 +327,9 @@ files:
       - Keep examples copy-pasteable; avoid placeholders except for secrets like
       `$CYANPRINT_TOKEN`.
 
+      - Include the exact command that proves the artifact locally, not just the
+      command that publishes it.
+
 
       ## Template Documentation
 
@@ -213,30 +339,89 @@ files:
 
       - every prompt and default
 
+      - dependency templates and any forced answers passed to them
+
       - the folder roots copied or rendered
 
-      - processors used per root
+      - processors used per root and why each processor is needed
 
       - binary asset handling with `Copy`
 
+      - files that commonly overlap, such as `README.md`, `.gitignore`,
+      `.dockerignore`, `flake.nix`, package manifests, CI, Claude/Codex/agent
+      docs, and IDE files
+
       - resolver expectations when files overlap with dependency templates
 
-
-      ## Runtime Artifact Documentation
-
-
-      For processors, plugins, and resolvers, document:
+      - what happens when no resolver is declared for an overlapping path
 
 
-      - the exact input shape
+      ## Processor Documentation
+
+
+      For processors, document:
+
+
+      - the exact `{ files, config }` input shape
 
       - all config keys and defaults
 
-      - what is preserved, modified, added, or removed
+      - deterministic behavior guarantees
+
+      - what file types are preserved, modified, added, or removed
+
+      - package dependencies used by the bundled processor
 
       - fixture names and what each fixture proves
+
+      - validation commands, especially parseability and formatting checks
+
+
+      ## Plugin Documentation
+
+
+      For plugins, document:
+
+
+      - the exact `{ files, config }` input shape
+
+      - all config keys and defaults
+
+      - when the plugin runs relative to processors
+
+      - every finalizer side effect
+
+      - idempotency guarantees
+
+      - whether shell commands are required, optional, or only used for
+      validation
+
+      - pre-commit, Git, formatter, or package-manager assumptions
+
+
+      ## Resolver Documentation
+
+
+      For resolvers, document:
+
+
+      - the candidate array shape
+
+      - all config keys and defaults
+
+      - whether the fold is commutative
+
+      - whether duplicate inputs are idempotent
+
+      - the order policy when order matters
+
+      - how user edits, generated files, dependency layers, and template
+      versions are prioritized
+
+      - fixture names for clean merge, reversed order, duplicate candidates,
+      three or more candidates, conflict, and mismatched config
   - path: .cyan/skills/cyanprint-pushing.md
-    sha256: e19c2ca0f12d533263e7f02ac7fb7d77470385e5ffc6ede7ce784b1440b69ecb
+    sha256: 4009256222b59b18f73af643e6c5409c524cc679989855720f2fd8b6b116a635
     content: >
       # CyanPrint Pushing Skill
 
@@ -253,7 +438,8 @@ files:
       - All dependencies are declared as friendly refs under the correct
       section.
 
-      - `README.md` explains behavior, config, tests, and compatibility.
+      - `README.md` explains behavior, config, tests, merge policy, and
+      compatibility.
 
       - `bun run build` succeeds and writes the bundled entry.
 
@@ -261,6 +447,18 @@ files:
 
       - No generated secrets, local cache files, or temporary output are
       included in the artifact folder.
+
+      - Processor and plugin output is deterministic for the same input and
+      config.
+
+      - Resolver fixtures prove commutativity or clearly document ordered
+      behavior.
+
+      - Template fixtures cover dependency answers, processor selection,
+      common-file overlap, and resolver behavior.
+
+      - Plugin fixtures prove idempotency for finalizers such as pre-commit
+      config and Git initialization.
 
 
       ## Publish
@@ -296,8 +494,25 @@ files:
 
       Dry run validates the manifest, bundle, dependencies, object model, and
       archive rules without committing a version.
+
+
+      ## Final Review
+
+
+      Before the real push, inspect the diff against the previous version:
+
+
+      - For templates, confirm every new common path has a resolver decision.
+
+      - For processors, confirm generated output does not depend on clock,
+      random, host, or network state.
+
+      - For plugins, confirm repeated execution is stable.
+
+      - For resolvers, confirm same resolver plus same config can safely merge
+      all intended candidates.
   - path: .cyan/skills/cyanprint-searching.md
-    sha256: 781e3dfa7c9033a748d48aec045faeb967c3dba3eb4c57e2b995f0233f0330f2
+    sha256: 5ef1f47389fcf642d18b34d773e99299c8cbb7222d3449dbcd321a246a7b7d79
     content: >
       # CyanPrint Searching Skill
 
@@ -328,8 +543,14 @@ files:
 
       - Prefer official `cyan/*` artifacts when they fit.
 
+      - Prefer a processor over local ad hoc rendering when a file type already
+      has a stable formatter or renderer.
+
       - Prefer a resolver over last-writer-wins when two templates write the
       same path intentionally.
+
+      - Prefer a plugin for deterministic finalization, such as pre-commit
+      config, package script normalization, or idempotent Git setup.
 
       - Avoid copying dependency behavior into this artifact unless the behavior
       is truly private to this artifact.
@@ -341,6 +562,30 @@ files:
       is invoked and that the returned artifact ref is declared.
 
 
+      ## Search Questions
+
+
+      Before choosing an artifact, answer these:
+
+
+      - Does this template write common files such as `README.md`, ignore files,
+      Nix, package manifests, CI, Claude/Codex/agent docs, or IDE config?
+
+      - Is there an official resolver for that path or file format?
+
+      - Is the resolver commutative for the way this template will share the
+      file?
+
+      - Does the processor produce deterministic output from only `{ files,
+      config }`?
+
+      - Is the plugin idempotent if it runs during create, try, update, and
+      dependency installation?
+
+      - Does the dependency README include fixtures for the behavior you are
+      relying on?
+
+
       ## Search in the Web UI
 
 
@@ -348,13 +593,13 @@ files:
       query when sharing a dependency candidate with another agent so they see
       the same kind filter and query.
   - path: .cyan/skills/cyanprint-updating.md
-    sha256: 1fe85e623d1b25ee280345dea345f1126a09d7346f36371d5947bcb19a13e0cd
+    sha256: fbe5576aaed6ba097670c585776810a080a5dc7fea514abbf4a3866fdba79586
     content: >
       # CyanPrint Updating Skill
 
 
-      Use this when changing behavior, fixtures, prompts, dependencies, or
-      generated output.
+      Use this when changing behavior, fixtures, prompts, dependencies,
+      generated output, or merge behavior.
 
 
       ## Update Checklist
@@ -376,6 +621,10 @@ files:
       6. Update README examples and dependency notes if the public behavior
       changed.
 
+      7. Check whether the change creates new overlap on common files such as
+      README, ignore files, Nix, package manifests, CI, or agent docs. Add
+      resolvers when overlap is intentional.
+
 
       ## Template Updates
 
@@ -388,6 +637,22 @@ files:
       - files under `template/`
 
       - expected output fixtures under `expected/`
+
+
+      Before changing generated files, decide the processor and resolver plan:
+
+
+      - Which files are rendered with `Template` and which are copied with
+      `Copy`?
+
+      - Which processor handles Markdown, JSON, YAML, Nix, TypeScript, package
+      manifests, or generated code?
+
+      - Which files are likely to overlap with dependency templates?
+
+      - Does each overlapping file have a declared resolver with stable config?
+
+      - Are dependency answers deterministic and covered by a fixture?
 
 
       Use snapshot updates only when the output change is intentional:
@@ -406,16 +671,45 @@ files:
       a substitute for review.
 
 
-      ## Processor and Plugin Updates
+      ## Processor Updates
 
 
       - Add or update `tests/<case>/input` and `tests/<case>/expected`.
 
+      - Include at least one fixture that proves deterministic input to output
+      behavior.
+
+      - Run the same processor test twice or inspect that no fixture changes
+      after a second run.
+
       - Use `config` in `cyan.test.yaml` for behavior that depends on options.
 
       - Include command validations for behavior that is easier to assert with
-      code, such as JSON parseability, package installability, or exact
-      formatting.
+      code, such as JSON parseability, package installability, exact formatting,
+      or generated lockfile absence.
+
+      - Do not add behavior that depends on time, random values, host paths,
+      network access, or environment variables unless those values are explicit
+      config inputs.
+
+
+      ## Plugin Updates
+
+
+      - Treat plugins as deterministic finalizers.
+
+      - Add a fixture proving the plugin is idempotent. Running it twice should
+      not duplicate hooks, ignore lines, package scripts, pre-commit config, or
+      Git metadata.
+
+      - For `pre-commit run --all-files`, include config generation plus a
+      validation command. Do not silently require global tools.
+
+      - For Git initialization, create missing files only and avoid overwriting
+      remotes, user identity, branches, or existing history.
+
+      - Keep shell execution optional, explicit, and documented. Prefer
+      modifying the Cyan file map.
 
 
       ## Resolver Updates
@@ -423,11 +717,19 @@ files:
 
       - Include fixtures that represent actual conflict shapes.
 
-      - Keep resolver config small and serializable.
+      - Keep resolver config small, serializable, and stable.
 
       - Verify expired assumptions: if a resolver used to receive two files, add
       a test for three or more files if multiple templates can now converge on
       the path.
+
+      - Prove commutativity when the resolver is intended to be
+      order-independent by adding reversed-order fixtures.
+
+      - Prove idempotency by including duplicate or identical candidates.
+
+      - If order matters, document the metadata field used for ordering and add
+      a fixture that proves the order policy.
   - path: .github/workflows/ci.yml
     sha256: 40dfb6ad1af58fe663c317ef70de727355f3c0df7694f22a990b06fa6dead54a
     content: >
@@ -536,11 +838,11 @@ files:
         };
       }
   - path: tests/basic/expected/PLUGIN.md
-    sha256: 2664fd1aa44fc8179c830b95b116836466f2d8d78fe7600a0fd4572c5691e0ac
+    sha256: 2261a7e2269003067fa02554827236e5609b4e3b58f1c24b663ff6760f84a434
     content: |
       # Plugin output
 
-      Generated by Footer Plugin.
+      Generated by **TITLE**.
   - path: tests/basic/expected/README.md
     sha256: 8ef0b048ad51a9d2ccaf9177716d7c83159a1d8c22fd37aa2b7d03c11b21b40d
     content: |
@@ -559,5 +861,5 @@ artifacts:
     owner: cyan
     name: default
     version: local
-    integrity: f6fbbc0f2d2227e57a901f08c6b92d05b0ff221da9886c12f991d4c8d1b2fcdf
+    integrity: 0cb93edf47e7f32cec18b68035ffcfffefcca98ccc894600afd9fc3e102e18a8
 conflicts: []
