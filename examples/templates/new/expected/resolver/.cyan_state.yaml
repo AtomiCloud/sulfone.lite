@@ -108,7 +108,7 @@ files:
             - name: Test artifact
               run: cyanprint test .
   - path: cyan.test.yaml
-    sha256: 85dc44bc4bd20ab404ea6f99f397b2e7a0022b7243128db4c2fc04769694db5c
+    sha256: eb4e8075a1c22b6743e5d35369669c011ad70ac749d9b8cf77869f94ddcd6124
     content: |
       cases:
         - name: latest-wins
@@ -123,7 +123,7 @@ files:
                 layer: 2
           expected: tests/latest-wins/expected.txt
           validations:
-            - contains: target
+            - grep -q target output.txt
   - path: cyan.yaml
     sha256: 23fdfba9005513b167cbfe8feb781e211ec5d02c178f26fdbc27274205a928e3
     content: |

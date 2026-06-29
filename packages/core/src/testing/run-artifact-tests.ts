@@ -15,22 +15,13 @@ type ArtifactTestCase = {
   message?: string;
 };
 
-type TestValidation = {
-  path?: string;
-  exists?: boolean;
-  equals?: string;
-  contains?: string;
-  notContains?: string;
-};
-
 type FileArtifactCase = {
   name: string;
   input: string;
   expected?: string;
   config?: unknown;
   configFile?: string;
-  validations: TestValidation[];
-  commands: CommandValidation[];
+  validations: CommandValidation[];
 };
 
 type ResolverArtifactCase = {
@@ -42,8 +33,7 @@ type ResolverArtifactCase = {
   expected?: string;
   config?: unknown;
   configFile?: string;
-  validations: TestValidation[];
-  commands: CommandValidation[];
+  validations: CommandValidation[];
 };
 
 type ArtifactCase = FileArtifactCase | ResolverArtifactCase;
@@ -152,7 +142,6 @@ async function loadArtifactTestCases(
           expected: join(caseDir, 'expected.txt'),
           configFile: join(caseDir, 'config.json'),
           validations: [],
-          commands: [],
         } satisfies ResolverArtifactCase)
       : ({
           name,
@@ -160,7 +149,6 @@ async function loadArtifactTestCases(
           expected: join(caseDir, 'expected'),
           configFile: join(caseDir, 'config.json'),
           validations: [],
-          commands: [],
         } satisfies FileArtifactCase);
   });
 }
@@ -202,7 +190,6 @@ function parseKetoneResolverTestManifest(artifactDir: string, input: unknown): R
         readKetoneResolverInput(artifactDir, rawInput, `tests[${index}].resolver_inputs[${inputIndex}]`),
       ),
       validations: [],
-      commands: [],
     };
   });
 }
@@ -260,8 +247,7 @@ function parseManifestCase(
   }
   const record = rawCase as Record<string, unknown>;
   const name = readRequiredString(record.name, `cases[${index}].name`);
-  const validations = readValidations(record.validations, `cases[${index}].validations`);
-  const commands = readCommandValidations(record.commands, `cases[${index}].commands`);
+  const validations = readCaseValidationCommands(record, `cases[${index}]`);
   if (kind === 'resolver') {
     const resolverInputs = Array.isArray(record.resolverInputs)
       ? record.resolverInputs.map((input, inputIndex) =>
@@ -278,7 +264,6 @@ function parseManifestCase(
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),
       validations,
-      commands,
     };
   }
   return {
@@ -288,7 +273,6 @@ function parseManifestCase(
     config: record.config,
     configFile: readOptionalPath(artifactDir, record.configFile),
     validations,
-    commands,
   };
 }
 
@@ -309,46 +293,11 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   return safeJoin(root, value);
 }
 
-function readValidations(value: unknown, label: string): TestValidation[] {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array.`);
-  }
-  return value.map((rawValidation, index) => {
-    if (!rawValidation || typeof rawValidation !== 'object') {
-      throw new Error(`${label}[${index}] must be a mapping.`);
-    }
-    const record = rawValidation as Record<string, unknown>;
-    return {
-      path: readOptionalString(record.path, `${label}[${index}].path`),
-      exists: readOptionalBoolean(record.exists, `${label}[${index}].exists`),
-      equals: readOptionalString(record.equals, `${label}[${index}].equals`),
-      contains: readOptionalString(record.contains, `${label}[${index}].contains`),
-      notContains: readOptionalString(record.notContains, `${label}[${index}].notContains`),
-    };
-  });
-}
-
-function readOptionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new Error(`${label} must be a string.`);
-  }
-  return value;
-}
-
-function readOptionalBoolean(value: unknown, label: string): boolean | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'boolean') {
-    throw new Error(`${label} must be a boolean.`);
-  }
-  return value;
+function readCaseValidationCommands(record: Record<string, unknown>, label: string): CommandValidation[] {
+  return [
+    ...readCommandValidations(record.validations, `${label}.validations`),
+    ...readCommandValidations(record.commands, `${label}.commands`),
+  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -389,33 +338,30 @@ async function runFileArtifactCase(
     const input = await readFileTree(testCase.input);
     const actual =
       kind === 'processor' ? await invokeProcessor(bundle, input, config) : await invokePlugin(bundle, input, config);
-    const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-    if (commandFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-    }
-    const validationFailure = validateFileOutput(actual, testCase.validations);
-    if (validationFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-    }
 
     if (updateSnapshots && testCase.expected) {
       await writeFileTree(testCase.expected, actual);
-      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-    }
-
-    if (testCase.expected) {
+    } else if (testCase.expected) {
       const expected = await readFileTree(testCase.expected);
       const diff = compareFileTrees(expected, actual);
       if (diff) {
         return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
       }
-    } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
+    } else {
       return {
-        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
+        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
         snapshotUpdated: false,
       };
     }
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+
+    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+    if (validationFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+    }
+    return {
+      case: { name: testCase.name, status: 'passed' },
+      snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+    };
   } catch (error) {
     return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
   }
@@ -450,35 +396,31 @@ async function runResolverCase(
       config,
     };
     const actual = await invokeResolver(bundle, input);
-    const commandFailure = await runCommandsAgainstText(actual, testCase.commands);
-    if (commandFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-    }
-    const validationFailure = validateTextOutput(actual, testCase.validations);
-    if (validationFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-    }
 
     if (updateSnapshots && testCase.expected) {
       await writeText(testCase.expected, actual);
-      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-    }
-
-    if (testCase.expected) {
+    } else if (testCase.expected) {
       const expected = await readText(testCase.expected);
-      if (!fileContentsEqual(path, expected, actual)) {
+      if (!fileContentsEqual(expected, actual)) {
         return {
           case: { name: testCase.name, status: 'failed', message: `Resolver output mismatch for ${testCase.name}` },
           snapshotUpdated: false,
         };
       }
-    } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
+    } else {
       return {
-        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
+        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
         snapshotUpdated: false,
       };
     }
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+    const validationFailure = await runCommandsAgainstText(actual, testCase.validations);
+    if (validationFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+    }
+    return {
+      case: { name: testCase.name, status: 'passed' },
+      snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+    };
   } catch (error) {
     return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
   }
@@ -512,31 +454,28 @@ async function runResolverFoldCase(
       }),
     });
   }
-  const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-  if (commandFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-  }
-  const validationFailure = validateFileOutput(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
   if (updateSnapshots && testCase.expected) {
     await writeFileTree(testCase.expected, actual);
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-  }
-  if (testCase.expected) {
+  } else if (testCase.expected) {
     const expected = await readFileTree(testCase.expected);
     const diff = compareFileTrees(expected, actual);
     if (diff) {
       return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
     }
-  } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
+  } else {
     return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
+      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
       snapshotUpdated: false,
     };
   }
-  return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+  if (validationFailure) {
+    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+  }
+  return {
+    case: { name: testCase.name, status: 'passed' },
+    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+  };
 }
 
 async function readResolverInputFiles(path: string): Promise<VfsFile[]> {
@@ -580,31 +519,28 @@ async function runResolverFolderCase(
       }),
     });
   }
-  const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-  if (commandFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-  }
-  const validationFailure = validateFileOutput(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
   if (updateSnapshots && testCase.expected) {
     await writeFileTree(testCase.expected, actual);
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-  }
-  if (testCase.expected) {
+  } else if (testCase.expected) {
     const expected = await readFileTree(testCase.expected);
     const diff = compareFileTrees(expected, actual);
     if (diff) {
       return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
     }
-  } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
+  } else {
     return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
+      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
       snapshotUpdated: false,
     };
   }
-  return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+  if (validationFailure) {
+    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+  }
+  return {
+    case: { name: testCase.name, status: 'passed' },
+    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+  };
 }
 
 async function isFolderResolverCase(testCase: ResolverArtifactCase): Promise<boolean> {
@@ -663,60 +599,6 @@ async function runCommandsAgainstText(output: string, commands: CommandValidatio
   }
 }
 
-function validateFileOutput(files: VfsFile[], validations: TestValidation[]): string | undefined {
-  const fileMap = new Map(files.map(file => [file.path, file.content ?? '']));
-  for (const validation of validations) {
-    if (!validation.path) {
-      return 'File output validations require path.';
-    }
-    const content = fileMap.get(validation.path);
-    const message = validateTextContent(content, validation, validation.path);
-    if (message) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function validateTextOutput(output: string, validations: TestValidation[]): string | undefined {
-  for (const validation of validations) {
-    if (validation.path) {
-      return 'Resolver validations do not support path.';
-    }
-    const message = validateTextContent(output, validation, 'resolver output');
-    if (message) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function validateTextContent(
-  content: string | undefined,
-  validation: TestValidation,
-  label: string,
-): string | undefined {
-  if (validation.exists === false && content !== undefined) {
-    return `${label} exists but should not.`;
-  }
-  if (validation.exists !== false && content === undefined) {
-    return `${label} does not exist.`;
-  }
-  if (content === undefined) {
-    return undefined;
-  }
-  if (validation.equals !== undefined && content !== validation.equals) {
-    return `${label} did not equal expected text.`;
-  }
-  if (validation.contains !== undefined && !content.includes(validation.contains)) {
-    return `${label} did not contain expected text.`;
-  }
-  if (validation.notContains !== undefined && content.includes(validation.notContains)) {
-    return `${label} contained forbidden text.`;
-  }
-  return undefined;
-}
-
 async function readFileTree(root: string): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
   await walk(root, async path => {
@@ -762,7 +644,7 @@ function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | unde
     if (!actualMap.has(path)) {
       return `Missing output file: ${path}`;
     }
-    if (!fileContentsEqual(path, expectedMap.get(path) ?? '', actualMap.get(path) ?? '')) {
+    if (!fileContentsEqual(expectedMap.get(path) ?? '', actualMap.get(path) ?? '')) {
       return `Output mismatch: ${path}`;
     }
   }
@@ -774,38 +656,6 @@ function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | unde
   return undefined;
 }
 
-function fileContentsEqual(path: string, expected: string, actual: string): boolean {
-  if (path.endsWith('.json')) {
-    const expectedJson = parseJson(expected);
-    const actualJson = parseJson(actual);
-    if (expectedJson !== undefined && actualJson !== undefined) {
-      return canonicalJson(expectedJson) === canonicalJson(actualJson);
-    }
-  }
-  return normalizeSnapshotText(expected) === normalizeSnapshotText(actual);
-}
-
-function parseJson(content: string): unknown | undefined {
-  try {
-    return JSON.parse(content);
-  } catch {
-    return undefined;
-  }
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(item => canonicalJson(item)).join(',')}]`;
-  }
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function normalizeSnapshotText(content: string): string {
-  return content.replace(/\r\n?/g, '\n').replace(/\n+$/g, '');
+function fileContentsEqual(expected: string, actual: string): boolean {
+  return expected === actual;
 }

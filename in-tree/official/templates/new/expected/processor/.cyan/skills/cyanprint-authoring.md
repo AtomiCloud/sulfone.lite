@@ -61,7 +61,8 @@ Processor rules:
 - Preserve binary files and unknown files unless the processor explicitly owns them.
 - Treat config as part of the input contract. Validate config up front and fail with clear messages.
 - Make output stable across platforms. Normalize newlines, path separators, and trailing whitespace intentionally.
-- Add fixtures that prove input to output determinism. Run the same test twice and make sure the second run has no diff.
+- Add fixtures that prove input to output determinism. `cyanprint test` compares expected output byte for byte, then runs command-only `validations`.
+- Write validations as commands that exit 0, for example `grep -q name package.json` or `{ command: bun, args: [--eval, "..."] }`.
 
 Good processor examples:
 

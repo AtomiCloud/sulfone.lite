@@ -3,7 +3,7 @@ cases:
     answers: answers.json
     expected: expected/basic
     snapshot: snapshots/basic/README.md
-    commands:
+    validations:
       - command: bun
         args:
           - --eval

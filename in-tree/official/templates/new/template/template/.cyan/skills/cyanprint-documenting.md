@@ -23,6 +23,8 @@ Include these sections in order when they apply:
 - Mention `bun run build` before `cyanprint test` if `bundledEntry` is under `dist/`.
 - Keep examples copy-pasteable; avoid placeholders except for secrets like `$CYANPRINT_TOKEN`.
 - Include the exact command that proves the artifact locally, not just the command that publishes it.
+- Document that `cyanprint test` compares expected output byte for byte before it runs `validations`.
+- Show `validations` as commands, not `contains`, `equals`, or other predicate objects.
 
 ## Template Documentation
 
@@ -47,7 +49,7 @@ For processors, document:
 - what file types are preserved, modified, added, or removed
 - package dependencies used by the bundled processor
 - fixture names and what each fixture proves
-- validation commands, especially parseability and formatting checks
+- command-only `validations`, especially parseability and formatting checks
 
 ## Plugin Documentation
 
@@ -59,6 +61,7 @@ For plugins, document:
 - every finalizer side effect
 - idempotency guarantees
 - whether shell commands are required, optional, or only used for validation
+- command-only `validations` that prove idempotency and expected side effects
 - pre-commit, Git, formatter, or package-manager assumptions
 
 ## Resolver Documentation
@@ -72,3 +75,4 @@ For resolvers, document:
 - the order policy when order matters
 - how user edits, generated files, dependency layers, and template versions are prioritized
 - fixture names for clean merge, reversed order, duplicate candidates, three or more candidates, conflict, and mismatched config
+- command-only `validations`; text resolver outputs are available as `output.txt`

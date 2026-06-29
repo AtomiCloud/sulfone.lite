@@ -56,7 +56,7 @@ type TemplateCase = {
   answers?: string;
   expected?: string;
   snapshot?: string;
-  commands: CommandValidation[];
+  validations: CommandValidation[];
 };
 
 async function runTemplateManifestTests(args: {
@@ -81,11 +81,6 @@ async function runTemplateManifestTests(args: {
         headless: true,
         answers: answersPath ? (JSON.parse(await readText(answersPath)) as Record<string, unknown>) : {},
       });
-      const commandFailure = await runCommandValidations(outDir, testCase.commands);
-      if (commandFailure) {
-        results.push({ name: testCase.name, status: 'failed', message: commandFailure });
-        continue;
-      }
       if (testCase.expected) {
         const expected = await readFileTree(testCase.expected);
         const actual = await readFileTree(outDir);
@@ -111,6 +106,14 @@ async function runTemplateManifestTests(args: {
             continue;
           }
         }
+      } else if (!testCase.snapshot && !args.snapshot) {
+        results.push({ name: testCase.name, status: 'failed', message: 'Test case needs expected output.' });
+        continue;
+      }
+      const validationFailure = await runCommandValidations(outDir, testCase.validations);
+      if (validationFailure) {
+        results.push({ name: testCase.name, status: 'failed', message: validationFailure });
+        continue;
       }
       results.push({ name: testCase.name, status: 'passed' });
     } catch (error) {
@@ -152,8 +155,15 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
     answers: readOptionalPath(template, record.answers),
     expected: readOptionalPath(template, record.expected),
     snapshot: readOptionalPath(template, record.snapshot),
-    commands: readCommandValidations(record.commands, `cases[${index}].commands`),
+    validations: readCaseValidationCommands(record, `cases[${index}]`),
   };
+}
+
+function readCaseValidationCommands(record: Record<string, unknown>, label: string): CommandValidation[] {
+  return [
+    ...readCommandValidations(record.validations, `${label}.validations`),
+    ...readCommandValidations(record.commands, `${label}.commands`),
+  ];
 }
 
 function readRequiredString(value: unknown, label: string): string {

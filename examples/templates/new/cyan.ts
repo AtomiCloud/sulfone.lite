@@ -37,6 +37,7 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
           },
           parser: {
             varSyntax: [
+              ['@@', '@@'],
               ['__', '__'],
               ['{{', '}}'],
             ],

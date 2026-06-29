@@ -11,6 +11,7 @@ Use this when changing behavior, fixtures, prompts, dependencies, generated outp
 5. Run `bun run test` or the equivalent `cyanprint test .` command.
 6. Update README examples and dependency notes if the public behavior changed.
 7. Check whether the change creates new overlap on common files such as README, ignore files, Nix, package manifests, CI, or agent docs. Add resolvers when overlap is intentional.
+8. Keep test assertions in the standard order: generate output, compare `expected` byte for byte, then run every command in `validations`.
 
 ## Template Updates
 
@@ -43,6 +44,7 @@ Then inspect the changed expected files manually. A snapshot update is not a sub
 - Include at least one fixture that proves deterministic input to output behavior.
 - Run the same processor test twice or inspect that no fixture changes after a second run.
 - Use `config` in `cyan.test.yaml` for behavior that depends on options.
+- Put command checks under `validations`. Each entry is either a shell command string or `{ command, args }`; it must exit 0.
 - Include command validations for behavior that is easier to assert with code, such as JSON parseability, package installability, exact formatting, or generated lockfile absence.
 - Do not add behavior that depends on time, random values, host paths, network access, or environment variables unless those values are explicit config inputs.
 
@@ -50,7 +52,7 @@ Then inspect the changed expected files manually. A snapshot update is not a sub
 
 - Treat plugins as deterministic finalizers.
 - Add a fixture proving the plugin is idempotent. Running it twice should not duplicate hooks, ignore lines, package scripts, pre-commit config, or Git metadata.
-- For `pre-commit run --all-files`, include config generation plus a validation command. Do not silently require global tools.
+- For `pre-commit run --all-files`, include config generation plus a `validations` command. Do not silently require global tools.
 - For Git initialization, create missing files only and avoid overwriting remotes, user identity, branches, or existing history.
 - Keep shell execution optional, explicit, and documented. Prefer modifying the Cyan file map.
 
@@ -62,3 +64,4 @@ Then inspect the changed expected files manually. A snapshot update is not a sub
 - Prove commutativity when the resolver is intended to be order-independent by adding reversed-order fixtures.
 - Prove idempotency by including duplicate or identical candidates.
 - If order matters, document the metadata field used for ordering and add a fixture that proves the order policy.
+- For text resolver cases, validation commands inspect `output.txt`. For folder/fold cases, commands inspect the generated output tree.

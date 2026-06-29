@@ -5,15 +5,13 @@ cases:
     target: tests/current-wins/target.txt
     expected: tests/current-wins/expected.txt
     validations:
-      - contains: 'user edit'
-      - notContains: 'template edit'
+      - grep -q 'user edit' output.txt
+      - "! grep -q 'template edit' output.txt"
   - name: folder-current-wins
     prior: tests/folder-current-wins/prior
     current: tests/folder-current-wins/current
     target: tests/folder-current-wins/target
     expected: tests/folder-current-wins/expected
     validations:
-      - path: README.md
-        contains: 'user folder edit'
-      - path: README.md
-        notContains: 'template folder edit'
+      - grep -q 'user folder edit' README.md
+      - "! grep -q 'template folder edit' README.md"

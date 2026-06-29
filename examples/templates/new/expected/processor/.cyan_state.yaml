@@ -104,16 +104,13 @@ files:
             - name: Test artifact
               run: cyanprint test .
   - path: cyan.test.yaml
-    sha256: e113db6672a4bad8e39a8c7ab5899e85fe0e4a1c8d6db36b36405312ea8227a2
+    sha256: 99bb45c4e8e1ff4cb729e45dd0fec0cdaaa1aea0e957e495b86d379abaa9ec2e
     content: |
       cases:
         - name: basic
           input: tests/basic/input
           expected: tests/basic/expected
           validations:
-            - path: README.md
-              notContains: "   "
-          commands:
             - command: bun
               args:
                 - --eval

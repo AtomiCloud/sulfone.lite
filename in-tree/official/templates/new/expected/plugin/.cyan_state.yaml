@@ -13,7 +13,7 @@ answers:
 deterministicState: {}
 files:
   - path: .cyan/skills/cyanprint-authoring.md
-    sha256: 63e83d18759d374100142e5a50af0ee6eb0ae3bd711be12eae65481825e85c27
+    sha256: 57b4181a9a5707663f7d1582c665e789edcc85ba36ea5bc5ac874dfbf42d8a79
     content: >
       # CyanPrint Authoring Skill
 
@@ -148,8 +148,12 @@ files:
       - Make output stable across platforms. Normalize newlines, path
       separators, and trailing whitespace intentionally.
 
-      - Add fixtures that prove input to output determinism. Run the same test
-      twice and make sure the second run has no diff.
+      - Add fixtures that prove input to output determinism. `cyanprint test`
+      compares expected output byte for byte, then runs command-only
+      `validations`.
+
+      - Write validations as commands that exit 0, for example `grep -q name
+      package.json` or `{ command: bun, args: [--eval, "..."] }`.
 
 
       Good processor examples:
@@ -278,7 +282,7 @@ files:
       what gets uploaded for runtime artifacts, and it is what keeps imports
       from packages deterministic.
   - path: .cyan/skills/cyanprint-documenting.md
-    sha256: 52ebc70bf33a56cf4104586ea622bc6430b188e33e7b70ce656f5ffc9ea0f098
+    sha256: 3e9e65ece954c72067d5482a80e6eefdc0383da3c39d9f1cb16310e030772120
     content: >
       # CyanPrint Documenting Skill
 
@@ -330,6 +334,12 @@ files:
       - Include the exact command that proves the artifact locally, not just the
       command that publishes it.
 
+      - Document that `cyanprint test` compares expected output byte for byte
+      before it runs `validations`.
+
+      - Show `validations` as commands, not `contains`, `equals`, or other
+      predicate objects.
+
 
       ## Template Documentation
 
@@ -374,7 +384,8 @@ files:
 
       - fixture names and what each fixture proves
 
-      - validation commands, especially parseability and formatting checks
+      - command-only `validations`, especially parseability and formatting
+      checks
 
 
       ## Plugin Documentation
@@ -395,6 +406,9 @@ files:
 
       - whether shell commands are required, optional, or only used for
       validation
+
+      - command-only `validations` that prove idempotency and expected side
+      effects
 
       - pre-commit, Git, formatter, or package-manager assumptions
 
@@ -420,6 +434,9 @@ files:
 
       - fixture names for clean merge, reversed order, duplicate candidates,
       three or more candidates, conflict, and mismatched config
+
+      - command-only `validations`; text resolver outputs are available as
+      `output.txt`
   - path: .cyan/skills/cyanprint-pushing.md
     sha256: 4009256222b59b18f73af643e6c5409c524cc679989855720f2fd8b6b116a635
     content: >
@@ -593,7 +610,7 @@ files:
       query when sharing a dependency candidate with another agent so they see
       the same kind filter and query.
   - path: .cyan/skills/cyanprint-updating.md
-    sha256: fbe5576aaed6ba097670c585776810a080a5dc7fea514abbf4a3866fdba79586
+    sha256: 33f13668b588fb20ef7a7bf695b5c810a431b01b89b34a5d53d4a747f9bc216c
     content: >
       # CyanPrint Updating Skill
 
@@ -624,6 +641,9 @@ files:
       7. Check whether the change creates new overlap on common files such as
       README, ignore files, Nix, package manifests, CI, or agent docs. Add
       resolvers when overlap is intentional.
+
+      8. Keep test assertions in the standard order: generate output, compare
+      `expected` byte for byte, then run every command in `validations`.
 
 
       ## Template Updates
@@ -684,6 +704,9 @@ files:
 
       - Use `config` in `cyan.test.yaml` for behavior that depends on options.
 
+      - Put command checks under `validations`. Each entry is either a shell
+      command string or `{ command, args }`; it must exit 0.
+
       - Include command validations for behavior that is easier to assert with
       code, such as JSON parseability, package installability, exact formatting,
       or generated lockfile absence.
@@ -703,7 +726,7 @@ files:
       Git metadata.
 
       - For `pre-commit run --all-files`, include config generation plus a
-      validation command. Do not silently require global tools.
+      `validations` command. Do not silently require global tools.
 
       - For Git initialization, create missing files only and avoid overwriting
       remotes, user identity, branches, or existing history.
@@ -730,6 +753,9 @@ files:
 
       - If order matters, document the metadata field used for ordering and add
       a fixture that proves the order policy.
+
+      - For text resolver cases, validation commands inspect `output.txt`. For
+      folder/fold cases, commands inspect the generated output tree.
   - path: .github/workflows/ci.yml
     sha256: 40dfb6ad1af58fe663c317ef70de727355f3c0df7694f22a990b06fa6dead54a
     content: >
@@ -760,15 +786,14 @@ files:
             - name: Test artifact
               run: bun run test
   - path: cyan.test.yaml
-    sha256: e10aaf619a6e5f89192dae68e35d5fa4ba655d4dfe04b3f5fc8a5ae39c7d7e28
+    sha256: 964b58c962205207d999951741cfcaecf6af6e1bb259ace2780233343c75a285
     content: |
       cases:
         - name: basic
           input: tests/basic/input
           expected: tests/basic/expected
           validations:
-            - path: PLUGIN.md
-              contains: Generated by Footer Plugin.
+            - grep -q 'Generated by Footer Plugin.' PLUGIN.md
   - path: cyan.yaml
     sha256: f1f06a94aad16eefdcc66070515fd9836ab623374b4cc9c351f717682ea66b5d
     content: |
@@ -838,11 +863,11 @@ files:
         };
       }
   - path: tests/basic/expected/PLUGIN.md
-    sha256: 2261a7e2269003067fa02554827236e5609b4e3b58f1c24b663ff6760f84a434
+    sha256: 2664fd1aa44fc8179c830b95b116836466f2d8d78fe7600a0fd4572c5691e0ac
     content: |
       # Plugin output
 
-      Generated by **TITLE**.
+      Generated by Footer Plugin.
   - path: tests/basic/expected/README.md
     sha256: 8ef0b048ad51a9d2ccaf9177716d7c83159a1d8c22fd37aa2b7d03c11b21b40d
     content: |
@@ -856,7 +881,7 @@ artifacts:
     owner: cyan
     name: new
     version: local
-    integrity: 287cf73c7d8db04750a4ff7847bbd6b319dd34f85f152ca10c42e2efe1bdabb3
+    integrity: acc89ec2f4c61509662481097986c1f7ffba66868ca38e17e5a59c71d1ec1dda
   - kind: processor
     owner: cyan
     name: default

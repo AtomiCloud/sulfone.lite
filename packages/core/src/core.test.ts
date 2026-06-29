@@ -1372,7 +1372,7 @@ describe('standard artifact tests', () => {
         '{\r\n  "a": 1,\r\n  "b": 2\r\n}\r\n',
         'utf8',
       );
-      await writeFile(join(artifactDir, 'snapshots/basic/data.json'), '{\n  "a": 1,\n  "b": 2\n}\n', 'utf8');
+      await writeFile(join(artifactDir, 'snapshots/basic/data.json'), '{"b":2,"a":1}', 'utf8');
 
       const report = await runArtifactTests({ artifactDir });
 
@@ -1382,7 +1382,7 @@ describe('standard artifact tests', () => {
     }
   });
 
-  test('command validation failures fail artifact and template reports', async () => {
+  test('command validations run after expected output comparison', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-command-validation-'));
     const processorDir = join(tempRoot, 'processor');
     const pluginDir = join(tempRoot, 'plugin');
@@ -1391,6 +1391,7 @@ describe('standard artifact tests', () => {
     try {
       await mkdir(join(processorDir, 'src'), { recursive: true });
       await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
+      await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
       await writeFile(
         join(processorDir, 'cyan.yaml'),
         [
@@ -1410,14 +1411,16 @@ describe('standard artifact tests', () => {
         'utf8',
       );
       await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+      await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Input\n', 'utf8');
       await writeFile(
         join(processorDir, 'cyan.test.yaml'),
         [
           'cases:',
           '  - name: basic',
           '    input: tests/basic/input',
-          '    commands:',
-          '      - process.exit(1)',
+          '    expected: tests/basic/expected',
+          '    validations:',
+          '      - exit 1',
           '',
         ].join('\n'),
         'utf8',
@@ -1425,6 +1428,7 @@ describe('standard artifact tests', () => {
 
       await mkdir(join(pluginDir, 'src'), { recursive: true });
       await mkdir(join(pluginDir, 'tests/basic/input'), { recursive: true });
+      await mkdir(join(pluginDir, 'tests/basic/expected'), { recursive: true });
       await writeFile(
         join(pluginDir, 'cyan.yaml'),
         [
@@ -1444,21 +1448,25 @@ describe('standard artifact tests', () => {
         'utf8',
       );
       await writeFile(join(pluginDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+      await writeFile(join(pluginDir, 'tests/basic/expected/README.md'), '# Input\n', 'utf8');
       await writeFile(
         join(pluginDir, 'cyan.test.yaml'),
         [
           'cases:',
           '  - name: basic',
           '    input: tests/basic/input',
-          '    commands:',
-          '      - process.exit(1)',
+          '    expected: tests/basic/expected',
+          '    validations:',
+          '      - exit 1',
           '',
         ].join('\n'),
         'utf8',
       );
 
       await mkdir(join(templateDir, 'template'), { recursive: true });
+      await mkdir(join(templateDir, 'expected'), { recursive: true });
       await writeFile(join(templateDir, 'template/README.md'), '# Template\n', 'utf8');
+      await writeFile(join(templateDir, 'expected/README.md'), '# Template\n', 'utf8');
       await writeFile(
         join(templateDir, 'cyan.yaml'),
         [
@@ -1480,7 +1488,7 @@ describe('standard artifact tests', () => {
       );
       await writeFile(
         join(templateDir, 'cyan.test.yaml'),
-        ['cases:', '  - name: basic', '    commands:', '      - process.exit(1)', ''].join('\n'),
+        ['cases:', '  - name: basic', '    expected: expected', '    validations:', '      - exit 1', ''].join('\n'),
         'utf8',
       );
 

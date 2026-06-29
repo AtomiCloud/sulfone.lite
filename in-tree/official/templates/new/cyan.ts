@@ -36,7 +36,11 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
             TEST_COMMAND: 'bun run test',
           },
           parser: {
-            varSyntax: [['__', '__']],
+            varSyntax: [
+              ['@@', '@@'],
+              ['var__', '__'],
+              ['__', '__'],
+            ],
           },
         },
       },

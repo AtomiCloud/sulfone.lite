@@ -133,13 +133,13 @@ files:
         "project": "Service Template App"
       }
   - path: cyan.test.yaml
-    sha256: 105687b6f25a31a6253a6b70c5b54441788e8bd8bf3aaf407dd0f6586e777efe
+    sha256: 00c87249635f8b3e605ae41d163dba7b35215391d91d3de95462828937997c06
     content: |
       cases:
         - name: basic
           answers: answers.json
           expected: expected
-          commands:
+          validations:
             - command: bun
               args:
                 - --eval

@@ -3,7 +3,7 @@ cases:
     answers: answers-template.json
     expected: expected/template
     snapshot: expected/template/README.md
-    commands:
+    validations:
       - command: bun
         args:
           - --eval

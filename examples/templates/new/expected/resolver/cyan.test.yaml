@@ -11,4 +11,4 @@ cases:
           layer: 2
     expected: tests/latest-wins/expected.txt
     validations:
-      - contains: target
+      - grep -q target output.txt
