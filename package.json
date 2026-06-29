@@ -17,6 +17,7 @@
     "ci:local": "bun run typecheck && bun run test && bun run build && bun run lint && bun run seed:check && bun run e2e && bun run e2e:cache && bun run e2e:trust && bun run e2e:wrangler && bun run web:e2e && bun run docs:check && bun run fr:check && bun run package:check && bun run release:check",
     "cyan": "bun run packages/cli/src/main.ts",
     "docs:check": "bun run scripts/ci/docs-check.ts",
+    "deploy:cloudflare:bootstrap": "bun run scripts/cloudflare/ensure-release-resources.ts",
     "deploy:release": "bash scripts/cloudflare/deploy-release.sh",
     "deploy:worker": "bun run --filter @cyanprint/worker deploy",
     "deploy:web": "bun run --filter @cyanprint/web deploy",

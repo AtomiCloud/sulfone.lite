@@ -48,9 +48,13 @@ tasks:
       - task: deploy:worker
       - task: deploy:web
   deploy:release:
-    desc: 'Deploy release Worker and web UI with local Wrangler credentials'
+    desc: 'Create/find Cloudflare release resources, then deploy Worker and web UI'
     cmds:
       - bun run deploy:release
+  deploy:cloudflare:bootstrap:
+    desc: 'Create/find Cloudflare release D1, R2, and KV resources'
+    cmds:
+      - bun run deploy:cloudflare:bootstrap
   deploy:worker:
     desc: 'Deploy registry Worker with local Wrangler credentials'
     cmds:

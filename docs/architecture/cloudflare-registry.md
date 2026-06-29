@@ -19,14 +19,31 @@ Stable release names live in Wrangler config and can be overridden by GitHub org
 - Web Worker: `cyanprint-web`
 - Web OpenNext cache R2 bucket: `cyanprint-web-opennext-cache`
 
-Cloudflare-generated IDs are not checked in. The release deploy workflow expects:
+Cloudflare-generated IDs are not checked in.
+
+For local deploys, log in once and run the release deploy task:
+
+```bash
+wrangler login
+pls deploy:release
+```
+
+The task creates or finds the release D1 database, R2 buckets, and KV namespace by name, writes `.tmp/cloudflare/release.env`, renders Wrangler configs, applies remote D1 migrations, then deploys the registry Worker and web Worker.
+
+To only create or discover the Cloudflare resources:
+
+```bash
+pls deploy:cloudflare:bootstrap
+```
+
+The GitHub release deploy workflow uses preconfigured IDs instead of bootstrapping. It expects:
 
 - Secret: `CLOUDFLARE_API_TOKEN`
 - Secret: `CLOUDFLARE_ACCOUNT_ID`
 - Variable: `CYANPRINT_D1_DATABASE_ID`
 - Variable: `CYANPRINT_KV_NAMESPACE_ID`
 
-Create the release dependencies once:
+To create the release dependencies manually instead:
 
 ```bash
 wrangler d1 create cyanprint-registry

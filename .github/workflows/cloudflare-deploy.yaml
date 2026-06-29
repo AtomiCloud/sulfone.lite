@@ -26,6 +26,7 @@ jobs:
       CYANPRINT_WEB_WORKER_NAME: ${{ vars.CYANPRINT_WEB_WORKER_NAME }}
       CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: ${{ vars.CYANPRINT_WEB_CACHE_R2_BUCKET_NAME }}
       CYANPRINT_RELEASE_REGISTRY_URL: ${{ vars.CYANPRINT_RELEASE_REGISTRY_URL }}
+      CYANPRINT_SKIP_RESOURCE_BOOTSTRAP: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: AtomiCloud/actions.setup-nix@v3
