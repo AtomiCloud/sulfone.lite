@@ -14,13 +14,14 @@ import {
   upsertArtifact,
   type SeedObjectPayload,
 } from '@cyanprint/registry-client';
-import type { RegistryStorage, StoredAuthHandoff, StoredOAuthState, StoredUploadSession } from './types';
+import type { RegistryStorage, RegistryUser, StoredAuthHandoff, StoredOAuthState, StoredUploadSession } from './types';
 
 export function createCloudflareLocalStorage(
   seed: ArtifactVersion[] = [],
   seedObjects: SeedObjectPayload[] = [],
 ): RegistryStorage {
   const state = createLocalRegistryState();
+  const users: RegistryUser[] = state.users.map(user => ({ ...user }));
   const objects = new Map<string, { ref: ObjectRef; payload: Uint8Array }>();
   const uploads = new Map<string, StoredUploadSession>();
   const sessions = new Map<string, { userId: string; expiresAt: string }>();
@@ -28,48 +29,76 @@ export function createCloudflareLocalStorage(
   const authHandoffs = new Map<string, StoredAuthHandoff>();
   const likes = new Set<string>();
   const downloads: Array<{ artifactId: string; createdAt: string }> = [];
+  const objectArtifactIndex = new Map<string, string>();
   state.artifacts.push(...seed.map(artifact => structuredClone(artifact)));
   for (const object of seedObjects) {
     const payload = typeof object.payload === 'string' ? new TextEncoder().encode(object.payload) : object.payload;
     objects.set(objectKey(object.ref), { ref: structuredClone(object.ref), payload: cloneBytes(payload) });
   }
+  for (const artifact of state.artifacts) {
+    indexArtifactObjects(artifact);
+  }
+
+  function indexArtifactObjects(artifact: ArtifactVersion): void {
+    for (const ref of artifactObjectRefs(artifact)) {
+      objectArtifactIndex.set(objectArtifactIndexKey(ref), artifact.id);
+    }
+  }
+
+  function findActiveArtifactByObjectRef(ref: ObjectRef): ArtifactVersion | undefined {
+    const indexedId = objectArtifactIndex.get(objectArtifactIndexKey(ref));
+    if (indexedId) {
+      const indexed = state.artifacts.find(artifact => artifact.id === indexedId);
+      if (indexed && isActiveArtifact(indexed) && artifactHasObjectRef(indexed, ref)) {
+        return indexed;
+      }
+    }
+    const artifact = state.artifacts.find(item => isActiveArtifact(item) && artifactHasObjectRef(item, ref));
+    if (artifact) {
+      objectArtifactIndex.set(objectArtifactIndexKey(ref), artifact.id);
+    }
+    return artifact;
+  }
+
   return {
     mode: 'in-memory',
     bindings: [],
     getCurrentUser() {
-      return state.users[0];
+      return users[0];
     },
     getUser(id) {
-      return state.users.find(user => user.id === id);
+      return users.find(user => user.id === id);
     },
     upsertUser(user) {
-      const existing = state.users.findIndex(item => item.id === user.id);
+      const existing = users.findIndex(item => item.id === user.id);
       if (existing >= 0) {
-        const current = state.users[existing]!;
-        state.users[existing] = {
+        const current = users[existing]!;
+        users[existing] = {
           ...current,
-          handle: user.handle,
+          handle: user.handle ?? current.handle,
           login: user.login ?? current.login,
           admin: Boolean(user.admin),
         };
         return;
       }
-      state.users.push({ id: user.id, handle: user.handle, login: user.login, admin: Boolean(user.admin) });
+      users.push({ id: user.id, handle: user.handle, login: user.login, admin: Boolean(user.admin) });
     },
     updateUserHandle(userId, handle) {
-      const duplicate = state.users.some(user => user.id !== userId && user.handle === handle);
-      if (duplicate) {
-        return 'duplicate';
-      }
-      const user = state.users.find(item => item.id === userId);
+      const user = users.find(item => item.id === userId);
       if (!user) {
         return 'not_found';
+      }
+      if (user.handle != null) {
+        return 'immutable';
+      }
+      if (users.some(item => item.id !== userId && item.handle === handle)) {
+        return 'duplicate';
       }
       user.handle = handle;
       return 'updated';
     },
     listUsers() {
-      return state.users;
+      return users;
     },
     createSession(userId, session) {
       sessions.set(session, { userId, expiresAt: sessionExpiresAt() });
@@ -172,10 +201,11 @@ export function createCloudflareLocalStorage(
       return state.artifacts.find(artifact => artifact.id === id);
     },
     getActiveArtifactByObjectRef(ref) {
-      return state.artifacts.find(artifact => isActiveArtifact(artifact) && artifactHasObjectRef(artifact, ref));
+      return findActiveArtifactByObjectRef(ref);
     },
     addArtifact(artifact) {
       upsertArtifact(state, artifact);
+      indexArtifactObjects(artifact);
     },
     commitArtifact(artifact) {
       const version = String(
@@ -194,6 +224,7 @@ export function createCloudflareLocalStorage(
         publishedAt: new Date().toISOString(),
       };
       upsertArtifact(state, committed);
+      indexArtifactObjects(committed);
       return committed;
     },
     likeArtifact(id, userId) {
@@ -209,7 +240,7 @@ export function createCloudflareLocalStorage(
       return artifact;
     },
     recordDownload(ref) {
-      const artifact = state.artifacts.find(item => isActiveArtifact(item) && artifactHasObjectRef(item, ref));
+      const artifact = findActiveArtifactByObjectRef(ref);
       if (!artifact) {
         return undefined;
       }
@@ -283,6 +314,20 @@ export function createCloudflareLocalStorage(
 
 function objectKey(ref: ObjectRef): string {
   return `${ref.bucket}:${ref.key}:${ref.sha256}:${ref.size}`;
+}
+
+function objectArtifactIndexKey(ref: ObjectRef): string {
+  return `object-artifact:${ref.sha256}:${ref.key}`;
+}
+
+function artifactObjectRefs(artifact: ArtifactVersion): ObjectRef[] {
+  return [
+    artifact.object,
+    artifact.artifactObjects?.manifest,
+    artifact.artifactObjects?.readme,
+    artifact.artifactObjects?.bundle,
+    artifact.artifactObjects?.archive,
+  ].filter((ref): ref is ObjectRef => Boolean(ref));
 }
 
 function cloneBytes(payload: Uint8Array): Uint8Array {

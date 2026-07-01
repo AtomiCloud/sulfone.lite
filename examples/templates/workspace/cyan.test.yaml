@@ -1,0 +1,5 @@
+cases:
+  - name: basic
+    answers:
+      name: cyanprint-v4-workspace
+    expected: expected

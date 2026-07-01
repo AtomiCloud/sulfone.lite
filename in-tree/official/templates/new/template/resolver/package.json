@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "build": "bun build ./src/index.ts --target bun --format esm --outfile ./dist/index.js",
-    "test": "bun run build && cyanprint test .",
-    "push": "bun run build && cyanprint push ."
+    "test": "cyanprint test .",
+    "push": "cyanprint push ."
   },
   "dependencies": {},
   "devDependencies": {

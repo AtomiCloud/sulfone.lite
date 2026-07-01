@@ -329,12 +329,14 @@ function AccountControl({ user }: { user?: AccountUser }) {
     );
   }
 
+  const displayName = user.handle ?? user.login ?? 'New account';
+  const initials = displayName.slice(0, 2).toUpperCase();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger aria-label="Open account menu" className="profile-trigger">
-        <span className="avatar">{user.handle.slice(0, 2).toUpperCase()}</span>
+        <span className="avatar">{initials}</span>
         <span className="profile-copy">
-          <strong>{user.handle}</strong>
+          <strong>{displayName}</strong>
           <small>{user.login ? `@${user.login}` : 'local account'}</small>
         </span>
         <ChevronDown aria-hidden="true" size={16} />
@@ -342,9 +344,9 @@ function AccountControl({ user }: { user?: AccountUser }) {
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" className="profile-menu" data-testid="account-menu" sideOffset={10}>
           <DropdownMenu.Label className="profile-menu-label">
-            <span className="avatar large">{user.handle.slice(0, 2).toUpperCase()}</span>
+            <span className="avatar large">{initials}</span>
             <span>
-              <strong>{user.handle}</strong>
+              <strong>{displayName}</strong>
               <small>{user.login ? `GitHub @${user.login}` : 'CyanPrint account'}</small>
             </span>
           </DropdownMenu.Label>

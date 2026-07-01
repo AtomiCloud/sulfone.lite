@@ -5,3 +5,4 @@ name: keep-latest
 description: A CyanPrint v4 resolver.
 entry: src/index.ts
 bundledEntry: dist/index.js
+api: 2

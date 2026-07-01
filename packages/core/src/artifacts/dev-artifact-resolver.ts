@@ -1,5 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import type { ArtifactBundleRef } from '@cyanprint/artifact-runner';
 import type { ArtifactDependency, CyanArtifactUse } from '@cyanprint/contracts';
@@ -24,7 +25,11 @@ export async function resolveDevArtifactBundle(args: {
       `Local artifact fallback is disabled and no cached bundle was found for ${args.dependency.kind}:${args.dependency.owner ?? args.defaultOwner ?? 'local'}:${args.dependency.name}`,
     );
   }
-  const artifactsRoot = await findArtifactsRoot(args.templateDir ?? args.workspaceRoot, args.workspaceRoot);
+  const artifactsRoot = await findArtifactsRoot(
+    args.templateDir ?? args.workspaceRoot,
+    args.workspaceRoot,
+    dirname(fileURLToPath(import.meta.url)),
+  );
   const entries = await readdir(artifactsRoot, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory()) {
@@ -38,12 +43,12 @@ export async function resolveDevArtifactBundle(args: {
       manifest.owner === (args.dependency.owner ?? args.defaultOwner ?? manifest.owner) &&
       (!args.dependency.version || manifest.version === args.dependency.version)
     ) {
-      const runtimeFile = resolve(artifactDir, manifest.bundledEntry);
-      await stat(runtimeFile);
+      const runtimeFile = join(artifactDir, manifest.entry);
       return {
         dependency: { kind: manifest.kind, owner: manifest.owner, name: manifest.name, version: manifest.version },
         runtimeFile,
         integrity: sha256(await readFile(runtimeFile)),
+        api: manifest.api,
       };
     }
   }
@@ -94,6 +99,7 @@ async function readCachedArtifactBundle(
       dependency: ArtifactDependency;
       runtimeFile: string;
       integrity?: string;
+      api?: 1 | 2;
     }>;
   };
   const owner = dependency.owner ?? defaultOwner;
@@ -116,5 +122,6 @@ async function readCachedArtifactBundle(
     dependency: match.dependency,
     runtimeFile: match.runtimeFile,
     integrity: match.integrity,
+    api: match.api,
   };
 }

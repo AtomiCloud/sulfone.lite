@@ -1,0 +1,10 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: tri-suite
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/tri-a
+  - cyanprint/tri-b
+  - cyanprint/tri-c

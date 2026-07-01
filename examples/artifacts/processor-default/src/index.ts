@@ -1,14 +1,20 @@
 import { Eta } from 'eta';
+import type { ProcessorFsHelper, ProcessorInput } from '@cyanprint/sdk';
 
-export function processor(input: { files: Record<string, string>; config?: unknown }): Record<string, string> {
-  const { files, config } = input;
-  const processorConfig = readConfig(config);
-  return Object.fromEntries(
-    Object.entries(files).map(([path, content]) => [
-      renderTemplate(path, processorConfig),
-      normalizeTrailingWhitespace(renderTemplate(content, processorConfig)),
-    ]),
-  );
+export async function processor(input: ProcessorInput, fs: ProcessorFsHelper): Promise<void> {
+  const processorConfig = readConfig(input.config);
+  const files = await fs.read();
+  const output = files.map(file => {
+    if (file.content === undefined) {
+      return file;
+    }
+    return {
+      ...file,
+      path: renderPath(file.path, processorConfig),
+      content: normalizeTrailingWhitespace(renderContent(file.path, file.content, processorConfig)),
+    };
+  });
+  await fs.write(output);
 }
 
 type DefaultProcessorConfig = {
@@ -45,6 +51,26 @@ function renderTemplate(content: string, config: DefaultProcessorConfig): string
     rendered = restoreMaskedPlaceholders(rendered, masked.placeholders);
   }
   return rendered;
+}
+
+function renderPath(path: string, config: DefaultProcessorConfig): string {
+  try {
+    return renderTemplate(path, config);
+  } catch (error) {
+    throw new Error(`default processor failed to render output path ${path}: ${errorMessage(error)}`);
+  }
+}
+
+function renderContent(path: string, content: string, config: DefaultProcessorConfig): string {
+  try {
+    return renderTemplate(content, config);
+  } catch (error) {
+    throw new Error(`default processor failed to render ${path}: ${errorMessage(error)}`);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function maskUnknownSimplePlaceholders(

@@ -2,10 +2,3 @@ cases:
   - name: basic
     input: tests/basic/input
     expected: tests/basic/expected
-    validations:
-      - command: bun
-        args:
-          - --eval
-          - |
-            const text = await Bun.file("README.md").text();
-            if (text.includes("   ")) process.exit(1);

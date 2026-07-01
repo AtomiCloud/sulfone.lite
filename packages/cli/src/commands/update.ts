@@ -1,6 +1,6 @@
 import { updateProject } from '@cyanprint/core';
 import type { PromptAdapter } from '@cyanprint/contracts';
-import { parseFlags, flagBool, flagString } from '../args';
+import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
 import { failure, info, pathLabel, printJson, printSection, ReportedCliError, success } from '../ui';
@@ -18,7 +18,7 @@ export async function updateCommand(argv: string[], runtime: CliRuntime = {}): P
     throw new Error('update requires <project> --template <template>');
   }
   const answersPath = flagString(flags, 'answers');
-  const answers = answersPath ? (JSON.parse(await Bun.file(answersPath).text()) as Record<string, unknown>) : {};
+  const answers = answersPath ? await readAnswersFile(answersPath) : {};
   const json = flagBool(flags, 'json');
   const headless = flagBool(flags, 'headless');
   const effectiveHeadless = headless || json;
@@ -55,10 +55,6 @@ export async function updateCommand(argv: string[], runtime: CliRuntime = {}): P
         console.error(`- ${conflict.path}: ${conflict.reason}`);
       }
       throw new ReportedCliError(`update conflicted ${projectDir}`);
-    }
-    if (result.status === 'need_input') {
-      console.error(failure(`update needs input: ${result.prompt.message}`));
-      throw new ReportedCliError(`update needs input: ${result.prompt.name}`);
     }
     console.log(success(`updated ${pathLabel(projectDir)}`));
     printSection('Summary', [

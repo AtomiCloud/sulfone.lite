@@ -81,9 +81,12 @@ try {
   process.env.CYANPRINT_REGISTRY_URL = server.url.toString().replace(/\/$/, '');
   const tokenRoute = await import('../../apps/web/src/app/api/tokens/route');
   const tokenByIdRoute = await import('../../apps/web/src/app/api/tokens/[id]/route');
+  const accountRoute = await import('../../apps/web/src/app/api/account/route');
+  const sameOriginHeaders = { origin: 'http://cyanprint.local' };
   const denied = await tokenRoute.POST(
     new Request('http://cyanprint.local/api/tokens', {
       method: 'POST',
+      headers: sameOriginHeaders,
       body: JSON.stringify({ name: 'denied' }),
     }),
   );
@@ -99,7 +102,20 @@ try {
     throw new Error('web token setup could not create a local registry session');
   }
   const session = ((await sessionResponse.json()) as { session: string }).session;
-  const authHeaders = { cookie: `cyanprint_session=${encodeURIComponent(session)}` };
+  const authHeaders = {
+    cookie: `cyanprint_session=${encodeURIComponent(session)}`,
+    ...sameOriginHeaders,
+  };
+  const crossOrigin = await tokenRoute.POST(
+    new Request('http://cyanprint.local/api/tokens', {
+      method: 'POST',
+      headers: { cookie: authHeaders.cookie, origin: 'https://evil.example' },
+      body: JSON.stringify({ name: 'csrf' }),
+    }),
+  );
+  if (crossOrigin.status !== 403) {
+    throw new Error('web token mint route did not reject a cross-origin request');
+  }
   const emptyList = (await tokenRoute.GET(new Request('http://cyanprint.local/api/tokens', { headers: authHeaders })))
     .status;
   if (emptyList !== 200) {
@@ -124,6 +140,26 @@ try {
   );
   if (revoke.status !== 200) {
     throw new Error('web token revoke route failed');
+  }
+  const crossOriginAccount = await accountRoute.PATCH(
+    new Request('http://cyanprint.local/api/account', {
+      method: 'PATCH',
+      headers: { cookie: authHeaders.cookie, origin: 'https://evil.example' },
+      body: JSON.stringify({ handle: 'csrf-rename' }),
+    }),
+  );
+  if (crossOriginAccount.status !== 403) {
+    throw new Error('web account route did not reject a cross-origin request');
+  }
+  const immutableRename = await accountRoute.PATCH(
+    new Request('http://cyanprint.local/api/account', {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({ handle: 'renamed-local' }),
+    }),
+  );
+  if (immutableRename.status !== 409) {
+    throw new Error('web account route allowed renaming an already-set username');
   }
   tokenRoutesVerified = true;
 } finally {

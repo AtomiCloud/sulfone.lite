@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireSessionCookie, tokenRouteError } from '../../../features/account/token-route-auth';
+import { requireSameOrigin, requireSessionCookie, tokenRouteError } from '../../../features/account/token-route-auth';
 import { listTokens, mintToken } from '../../../features/account/token-service';
 
 export async function GET(request: Request) {
@@ -12,6 +12,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    requireSameOrigin(request);
     const body = (await request.json().catch(() => ({}))) as { name?: string };
     return NextResponse.json(await mintToken(requireSessionCookie(request), body.name?.trim() || 'default'));
   } catch (error) {

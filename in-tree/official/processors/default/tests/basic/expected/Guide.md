@@ -1,3 +1,3 @@
-# var** NAME **
+# Guide
 
 Project: Example

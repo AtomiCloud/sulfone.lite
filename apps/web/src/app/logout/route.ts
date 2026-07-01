@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { readCookie } from '@cyanprint/registry-client';
+import { isSameOriginRequest } from '../../features/account/token-route-auth';
 import { revokeSession, sessionCookieName } from '../../features/account/token-service';
 
 export const dynamic = 'force-dynamic';
@@ -25,21 +26,4 @@ export async function POST(request: Request) {
     secure: new URL(request.url).protocol === 'https:',
   });
   return response;
-}
-
-function isSameOriginRequest(request: Request): boolean {
-  const requestOrigin = new URL(request.url).origin;
-  const origin = request.headers.get('origin');
-  if (origin) {
-    return origin === requestOrigin;
-  }
-  const referer = request.headers.get('referer');
-  if (!referer) {
-    return false;
-  }
-  try {
-    return new URL(referer).origin === requestOrigin;
-  } catch {
-    return false;
-  }
 }

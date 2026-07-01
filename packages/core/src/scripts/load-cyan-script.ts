@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import type { Answers, CyanOutput, CyanScript, PromptAdapter, PromptRequest, VfsFile } from '@cyanprint/contracts';
 import { CyanError, makePromptContext, problem } from '@cyanprint/contracts';
 import { withTempSession } from '../sessions/temp-session';
-import { safeJoin } from '../util';
+import { comparePaths, safeJoin } from '../util';
 
 export function answersPromptAdapter(answers: Answers, interactive = false): PromptAdapter {
   return {
@@ -100,6 +100,22 @@ export async function loadCyanScript(scriptPath: string): Promise<CyanScript> {
   return candidate as CyanScript;
 }
 
+// Custom adapters (e.g. the CLI's inquirer adapter) hold their own answer cache; without this
+// wrapper their prompted values never reach `answers`, so generated state persists `answers: {}`
+// and update/bubbling cannot reuse them.
+function recordingPromptAdapter(answers: Answers, adapter: PromptAdapter): PromptAdapter {
+  return {
+    async ask<T>(request: PromptRequest): Promise<T> {
+      if (request.name in answers) {
+        return answers[request.name] as T;
+      }
+      const value = await adapter.ask<T>(request);
+      answers[request.name] = value;
+      return value;
+    },
+  };
+}
+
 export async function executeCyanScript(
   scriptPath: string,
   answers: Answers,
@@ -109,7 +125,7 @@ export async function executeCyanScript(
 ): Promise<CyanOutput> {
   return await withTempSession(async session => {
     const script = await loadCyanScript(scriptPath);
-    const ctx = makePromptContext(promptAdapter, answers, deterministicState, {
+    const ctx = makePromptContext(recordingPromptAdapter(answers, promptAdapter), answers, deterministicState, {
       sessionPath: session.path,
     });
     return await script(ctx.prompt, ctx);
@@ -135,7 +151,7 @@ export async function globTemplateFiles(
   const glob = new Bun.Glob(pattern);
   const files: VfsFile[] = [];
   for (const path of await walkTemplateFiles(scanRoot)) {
-    if (!glob.match(path)) {
+    if (!matchesTemplateGlob(glob, pattern, path)) {
       continue;
     }
     if (excludes.some(exclude => exclude.match(path))) {
@@ -152,7 +168,14 @@ export async function globTemplateFiles(
       });
     }
   }
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+function matchesTemplateGlob(glob: Bun.Glob, pattern: string, path: string): boolean {
+  if (pattern === '**/*') {
+    return true;
+  }
+  return glob.match(path);
 }
 
 async function walkTemplateFiles(root: string, dir = root, prefix = ''): Promise<string[]> {

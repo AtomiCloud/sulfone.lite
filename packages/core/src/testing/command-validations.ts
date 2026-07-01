@@ -1,3 +1,9 @@
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { exists } from '../util';
+
 export type CommandValidation =
   | {
       command: string;
@@ -38,26 +44,40 @@ export function readCommandValidations(value: unknown, label: string): CommandVa
 }
 
 export async function runCommandValidations(root: string, commands: CommandValidation[]): Promise<string | undefined> {
-  for (const validation of commands) {
-    const invocation = validation.shell
-      ? [process.env.SHELL || 'sh', '-lc', validation.command]
-      : [validation.command, ...validation.args];
-    const proc = Bun.spawn(invocation, {
-      cwd: root,
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: process.env,
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (exitCode !== 0) {
-      return `Command failed (${formatCommand(validation)}): ${stderr || stdout}`;
+  if (commands.length === 0) {
+    return undefined;
+  }
+  const localBin = await createLocalCyanprintBin();
+  try {
+    for (const validation of commands) {
+      const invocation = validation.shell
+        ? [process.env.SHELL || 'sh', '-lc', validation.command]
+        : [validation.command, ...validation.args];
+      const proc = Bun.spawn(invocation, {
+        cwd: root,
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: {
+          ...process.env,
+          PATH: localBin ? `${localBin}:${process.env.PATH ?? ''}` : process.env.PATH,
+          PWD: root,
+        },
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (exitCode !== 0) {
+        return `Command failed (${formatCommand(validation)}): ${stderr || stdout}`;
+      }
+    }
+    return undefined;
+  } finally {
+    if (localBin) {
+      await rm(localBin, { recursive: true, force: true });
     }
   }
-  return undefined;
 }
 
 function formatCommand(validation: CommandValidation): string {
@@ -69,4 +89,36 @@ function readRequiredString(value: unknown, label: string): string {
     throw new Error(`${label} must be a non-empty string.`);
   }
   return value;
+}
+
+async function createLocalCyanprintBin(): Promise<string | undefined> {
+  const cliPath = await findLocalCliPath(dirname(fileURLToPath(import.meta.url)));
+  if (!(await exists(cliPath))) {
+    return undefined;
+  }
+  const binDir = join(tmpdir(), `cyanprint-validation-bin-${process.pid}-${Date.now()}`);
+  await mkdir(binDir, { recursive: true });
+  const shim = join(binDir, 'cyanprint');
+  await writeFile(shim, `#!/bin/sh\nexec bun run ${shellQuote(cliPath)} "$@"\n`, 'utf8');
+  await chmod(shim, 0o755);
+  return binDir;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function findLocalCliPath(start: string): Promise<string> {
+  let current = start;
+  while (true) {
+    const candidate = join(current, 'packages/cli/src/main.ts');
+    if (await exists(candidate)) {
+      return candidate;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return join(process.cwd(), 'packages/cli/src/main.ts');
+    }
+    current = parent;
+  }
 }

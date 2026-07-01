@@ -164,7 +164,7 @@ try {
     throw new Error(await tokenResponse.text());
   }
   const token = ((await tokenResponse.json()) as { token: string }).token;
-  const firstBundle = 'export default async () => ({ files: {} });\n';
+  const firstBundle = 'export default async () => ({});\n';
   const firstArtifact = await publishTemplate({
     registry,
     token,
@@ -194,7 +194,7 @@ try {
   if (downloaded !== firstBundle) {
     throw new Error('wrangler R2 bundle did not round trip');
   }
-  const seededBundle = 'export default async () => ({ files: {} });\n';
+  const seededBundle = 'export default async () => ({});\n';
   const seededArtifact = await publishTemplate({
     registry,
     token,

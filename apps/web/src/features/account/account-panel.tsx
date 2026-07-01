@@ -13,7 +13,7 @@ export function AccountPanel({ error, serverUser }: { error?: string; serverUser
         <h2>Session</h2>
         <dl className="facts">
           <dt>User</dt>
-          <dd>{user?.handle ?? 'Not signed in'}</dd>
+          <dd>{user ? (user.handle ?? 'No username chosen yet') : 'Not signed in'}</dd>
           <dt>GitHub</dt>
           <dd>{user?.login ? `@${user.login}` : user ? 'Local account' : 'Not connected'}</dd>
           <dt>Role</dt>

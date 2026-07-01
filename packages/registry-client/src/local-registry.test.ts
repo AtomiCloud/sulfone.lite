@@ -66,4 +66,17 @@ describe('local registry resolution', () => {
       }
     }
   });
+
+  test('seed runtime processor and plugin bundles avoid the legacy server execution contract', () => {
+    const payloads = new Map(seedObjectPayloads.map(object => [object.ref.key, object.payload]));
+    for (const artifact of seedArtifacts.filter(item => item.kind === 'processor' || item.kind === 'plugin')) {
+      const payload = payloads.get(artifact.artifactObjects?.bundle.key ?? '');
+      expect(typeof payload).toBe('string');
+      const source = String(payload);
+      // v4 artifacts export a folder-based processor/plugin (helpers may abstract the raw dirs).
+      expect(source).toContain(artifact.kind);
+      expect(source).not.toContain('const { files } = input');
+      expect(source).not.toContain('Object.entries(files)');
+    }
+  });
 });

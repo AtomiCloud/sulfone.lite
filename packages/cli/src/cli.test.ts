@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { sha256 } from '@cyanprint/core';
 import { artifactIntegrity } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
+import { bundleCommand } from './commands/bundle';
 import { createCommand } from './commands/create';
+import { traceCommand } from './commands/trace';
 import { pushCommand } from './commands/push';
 import { tryCommand } from './commands/try';
 import { updateCommand } from './commands/update';
@@ -727,7 +729,7 @@ describe('local object package safety', () => {
         'cyanprint: 4\nkind: template\nowner: cyanprint\nname: tar\nbundledEntry: cyan.ts\n',
         'utf8',
       );
-      await writeFile(join(templateDir, 'cyan.ts'), 'export default async () => ({ files: {} });\n', 'utf8');
+      await writeFile(join(templateDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
       await writeFile(join(templateDir, 'README.md'), '# Tar\n', 'utf8');
       await writeFile(join(templateDir, 'template/README.md'), '# From archive\n', 'utf8');
       await writeFile(join(templateDir, 'template/assets/pixel.bin'), bytes);
@@ -759,7 +761,7 @@ describe('registry template hydration', () => {
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: bad-pins\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const processorPayload = JSON.stringify({
@@ -772,7 +774,8 @@ describe('registry template hydration', () => {
         },
         {
           path: 'dist/index.js',
-          content: 'export function processor(input) { const { files } = input; return files; }\n',
+          content:
+            'export async function processor(input) { const glob = new Bun.Glob("**/*"); for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true })) await Bun.write(input.outputDir + "/" + path, await Bun.file(input.inputDir + "/" + path).text()); }\n',
         },
       ],
     });
@@ -878,7 +881,7 @@ describe('registry template hydration', () => {
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: escape-entry\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const processorPayload = JSON.stringify({
@@ -995,7 +998,7 @@ describe('registry template hydration', () => {
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: cached\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const templateObject = {
@@ -1069,7 +1072,7 @@ describe('registry template hydration', () => {
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: exact\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const templateObject = {
@@ -1141,7 +1144,7 @@ describe('registry template hydration', () => {
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: cafe\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
         { path: 'README.md', content: '# Café\n' },
       ],
     });
@@ -1260,7 +1263,7 @@ describe('push command', () => {
         ].join('\n'),
         'utf8',
       );
-      await writeFile(join(artifactDir, 'cyan.ts'), 'export default async () => ({ files: {} });\n', 'utf8');
+      await writeFile(join(artifactDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
       await mkdir(join(artifactDir, 'template'), { recursive: true });
       await writeFile(join(artifactDir, 'template', 'README.md'), '# Owner normalized\n', 'utf8');
       console.log = (message?: unknown) => {
@@ -1274,5 +1277,112 @@ describe('push command', () => {
       server.stop(true);
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+const PROCESSOR_SRC =
+  'export async function processor(input, fs) { const files = await fs.read(); await fs.write(files.map(file => ({ ...file, content: (file.content ?? "").toUpperCase() }))); }\n';
+
+async function writeProcessorFixture(dir: string, expectedContent: string): Promise<void> {
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await mkdir(join(dir, 'tests/basic/input'), { recursive: true });
+  await mkdir(join(dir, 'tests/basic/expected'), { recursive: true });
+  await writeFile(
+    join(dir, 'cyan.yaml'),
+    [
+      'cyanprint: 4',
+      'kind: processor',
+      'owner: cyan',
+      'name: up',
+      'entry: src/index.ts',
+      'bundledEntry: dist/index.js',
+      '',
+    ].join('\n'),
+  );
+  await writeFile(join(dir, 'README.md'), '# Up\n');
+  await writeFile(join(dir, 'src/index.ts'), PROCESSOR_SRC);
+  await writeFile(
+    join(dir, 'cyan.test.yaml'),
+    ['cases:', '  - name: basic', '    input: tests/basic/input', '    expected: tests/basic/expected', ''].join('\n'),
+  );
+  await writeFile(join(dir, 'tests/basic/input/a.txt'), 'hi');
+  await writeFile(join(dir, 'tests/basic/expected/a.txt'), expectedContent);
+}
+
+async function captureLogs(run: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const original = console.log;
+  console.log = (message?: unknown) => {
+    logs.push(String(message));
+  };
+  try {
+    await run();
+  } finally {
+    console.log = original;
+  }
+  return logs;
+}
+
+describe('bundle command', () => {
+  test('bundles a processor into its declared bundledEntry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-cli-bundle-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await writeFile(
+        join(dir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: processor',
+          'owner: cyan',
+          'name: up',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+      );
+      await writeFile(join(dir, 'README.md'), '# Up\n');
+      await writeFile(join(dir, 'src/index.ts'), PROCESSOR_SRC);
+      const logs = await captureLogs(() => bundleCommand([dir, '--no-install', '--json']));
+      expect(JSON.parse(logs[0] ?? '{}')).toMatchObject({ status: 'bundled' });
+      expect(await Bun.file(join(dir, 'dist/index.js')).exists()).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('push test gating', () => {
+  test('aborts publish when artifact tests fail by default', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-cli-push-fail-'));
+    try {
+      await writeProcessorFixture(dir, 'hi'); // processor uppercases -> "HI" != expected "hi"
+      await expect(pushCommand([dir, '--dry-run', '--json'])).rejects.toThrow('failing test');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('--no-test skips tests and validates the bundle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-cli-push-notest-'));
+    try {
+      await writeProcessorFixture(dir, 'hi');
+      const logs = await captureLogs(() => pushCommand([dir, '--dry-run', '--no-test', '--json']));
+      expect(JSON.parse(logs.at(-1) ?? '{}')).toMatchObject({ status: 'planned' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('trace command', () => {
+  test('--json emits tree, provenance, and diffs for a template group', async () => {
+    const logs = await captureLogs(() =>
+      traceCommand([join(process.cwd(), 'examples/template-groups/basic'), '--headless', '--json']),
+    );
+    const report = JSON.parse(logs.at(-1) ?? '{}');
+    expect(report.tree?.ref).toBe('cyanprint/basic-group');
+    expect(Array.isArray(report.provenance)).toBe(true);
+    expect(report.provenance.length).toBeGreaterThan(0);
+    expect(Array.isArray(report.diffs)).toBe(true);
   });
 });

@@ -2,7 +2,7 @@ export { cyanprintSessionCookieName as sessionCookieName } from '@cyanprint/regi
 
 export type AccountUser = {
   id: string;
-  handle: string;
+  handle: string | null;
   login?: string;
   admin?: boolean;
 };

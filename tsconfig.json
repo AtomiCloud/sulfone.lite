@@ -22,6 +22,7 @@
       "@cyanprint/contracts": ["packages/contracts/src/index.ts"],
       "@cyanprint/core": ["packages/core/src/index.ts"],
       "@cyanprint/registry-client": ["packages/registry-client/src/index.ts"],
+      "@cyanprint/sdk": ["packages/artifact-runner/src/sdk-types.ts"],
       "@atomicloud/cyan-sdk": ["packages/cyan-sdk-compat/src/index.ts"]
     },
     "resolveJsonModule": true,
@@ -38,5 +39,5 @@
     "packages/**/*.ts",
     "scripts/**/*.ts"
   ],
-  "exclude": ["apps/web/next-env.d.ts"]
+  "exclude": ["apps/web/next-env.d.ts", "e2e/full-stack/fixtures"]
 }

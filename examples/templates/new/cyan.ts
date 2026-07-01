@@ -1,5 +1,4 @@
 import type { CyanPromptContext, CyanPrompter } from '@cyanprint/contracts';
-
 const artifactKinds = ['template', 'processor', 'plugin', 'resolver'];
 
 function slug(value: string) {
@@ -33,13 +32,11 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
             KIND: kind,
             TITLE: title,
             DESCRIPTION: description,
-            TEST_COMMAND: kind === 'template' ? `cyanprint test . --answers answers.json` : 'cyanprint test .',
           },
           parser: {
             varSyntax: [
               ['@@', '@@'],
               ['__', '__'],
-              ['{{', '}}'],
             ],
           },
         },

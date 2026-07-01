@@ -575,13 +575,20 @@ class Eta extends Eta$1 {
 }
 
 // in-tree/official/processors/default/src/index.ts
-function processor(input) {
-  const { files, config } = input;
-  const processorConfig = readConfig(config);
-  return Object.fromEntries(Object.entries(files).map(([path2, content]) => [
-    renderTemplate(path2, processorConfig),
-    normalizeTrailingWhitespace(renderTemplate(content, processorConfig))
-  ]));
+async function processor(input, fs2) {
+  const processorConfig = readConfig(input.config);
+  const files = await fs2.read();
+  const output = files.map((file) => {
+    if (file.content === undefined) {
+      return file;
+    }
+    return {
+      ...file,
+      path: renderPath(file.path, processorConfig),
+      content: normalizeTrailingWhitespace(renderContent(file.path, file.content, processorConfig))
+    };
+  });
+  await fs2.write(output);
 }
 var defaultVarSyntax = [
   ["var__", "__"],
@@ -610,6 +617,23 @@ function renderTemplate(content, config) {
     rendered = restoreMaskedPlaceholders(rendered, masked.placeholders);
   }
   return rendered;
+}
+function renderPath(path2, config) {
+  try {
+    return renderTemplate(path2, config);
+  } catch (error) {
+    throw new Error(`default processor failed to render output path ${path2}: ${errorMessage(error)}`);
+  }
+}
+function renderContent(path2, content, config) {
+  try {
+    return renderTemplate(content, config);
+  } catch (error) {
+    throw new Error(`default processor failed to render ${path2}: ${errorMessage(error)}`);
+  }
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 function maskUnknownSimplePlaceholders(content, vars, tags) {
   const placeholders = [];

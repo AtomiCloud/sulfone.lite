@@ -78,7 +78,7 @@ export class RegistryClient {
   async createLocalSession(
     userId = 'user_local',
     devSecret = process.env.CYANPRINT_LOCAL_DEV_SECRET ?? '',
-  ): Promise<{ session: string; user: { id: string; handle: string; login?: string; admin: boolean } }> {
+  ): Promise<{ session: string; user: { id: string; handle: string | null; login?: string; admin: boolean } }> {
     return this.post('/auth/local-session', { userId }, { 'x-cyanprint-dev-secret': devSecret });
   }
 
@@ -201,9 +201,20 @@ export class RegistryClient {
   }
 
   private async parse<T>(response: Response): Promise<T> {
-    const body = (await response.json()) as T;
+    // Read text first: an HTML/plain-text error from a proxy must surface as an HTTP error
+    // with its status and body, not as a JSON parse SyntaxError.
+    const text = await response.text();
+    let body: T | undefined;
+    try {
+      body = JSON.parse(text) as T;
+    } catch {
+      body = undefined;
+    }
     if (!response.ok) {
-      throw new Error(JSON.stringify(body));
+      throw new Error(body !== undefined ? JSON.stringify(body) : `HTTP ${response.status}: ${text.slice(0, 200)}`);
+    }
+    if (body === undefined) {
+      throw new Error(`Registry returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`);
     }
     return body;
   }

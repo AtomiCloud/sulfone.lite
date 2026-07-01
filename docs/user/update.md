@@ -14,11 +14,8 @@ Run an update locally:
 cyanprint update app --template examples/templates/update-v2 --headless --answers examples/templates/update-v2/answers.json
 ```
 
-Resolvers are the deterministic part of updates. They receive:
+Resolvers are the deterministic part of updates. A v4 resolver merges two files at a time, receiving `{ path, config, current, next }` where `current` and `next` are `{ path, content, origin: { template, layer } }`. It returns `{ path, content }`.
 
-- `files`: the versions being folded for one path
-- `config`: resolver settings declared by the template
-
-Each file entry has `{ path, content, origin: { template, layer } }`. The resolver folds that array into resolved text or `{ path, content }`.
+CyanPrint folds N conflicting candidates (e.g. prior/current/target on update) by calling the resolver repeatedly in a deterministic order — the output of one step becomes `current` for the next. New resolvers declare `api: 2` in `cyan.yaml`; the legacy folder-fold API (`api: 1`, `{ inputDirs, outputDir, files, config }`) remains supported internally for older resolvers.
 
 Resolver dependencies are declared in `cyan.yaml` and pinned on push, just like processors and plugins. During install or update, CyanPrint rejects returned resolver refs that were not declared.

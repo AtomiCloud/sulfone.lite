@@ -18,20 +18,23 @@ import type {
   VfsFile,
 } from '@cyanprint/contracts';
 import { CyanError, declaredDependencyKeys, problem } from '@cyanprint/contracts';
+import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
 import { executeCyanScript, globTemplateFiles } from '../scripts/load-cyan-script';
 import { buildGeneratedState, writeGeneratedState } from '../state/generated-state';
-import { safeJoin, sha256, writeText } from '../util';
+import { comparePaths, safeJoin, sha256, writeText } from '../util';
 
 export type CreateProjectOptions = {
   template: string;
   outDir: string;
   answers?: Answers;
+  deterministicState?: Record<string, unknown>;
   headless?: boolean;
   json?: boolean;
   localFallback?: boolean;
   promptAdapter?: PromptAdapter;
+  trace?: TraceCollector;
 };
 
 export type CreateProjectResult = {
@@ -114,6 +117,13 @@ type GenerationContext = {
   warnings: CompatibilityWarning[];
   localFallback?: boolean;
   promptAdapter?: PromptAdapter;
+  // Feature 1: each ancestor's `presets.templates`, ordered root-first, for root-wins cascade.
+  presetChain: Array<Record<string, unknown>>;
+  // Feature 2: template refs (owner:name, version-ignored) seen anywhere in this composition.
+  seenTemplateRefs: Set<string>;
+  // Feature 3: provenance collector + the current template's trace node (both optional).
+  trace?: TraceCollector;
+  traceNode?: { children: TraceNode[] };
 };
 
 type GeneratedTemplate = {
@@ -127,8 +137,8 @@ type GeneratedTemplate = {
 };
 
 export async function createProject(options: CreateProjectOptions): Promise<CreateProjectResult> {
-  const answers = { ...(options.answers ?? {}) };
-  const deterministicState: Record<string, unknown> = {};
+  const answers = structuredClone(options.answers ?? {}) as Answers;
+  const deterministicState = structuredClone(options.deterministicState ?? {}) as Record<string, unknown>;
   const context: GenerationContext = {
     answers,
     deterministicState,
@@ -137,6 +147,10 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
     warnings: [],
     localFallback: options.localFallback,
     promptAdapter: options.promptAdapter,
+    presetChain: [],
+    seenTemplateRefs: new Set(),
+    trace: options.trace,
+    traceNode: options.trace?.root,
   };
   const generated = await generateTemplate(options.template, context, new Set());
   const { manifest, files } = generated;
@@ -148,15 +162,25 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
     await writeVfsFile(options.outDir, file);
   }
 
+  let commandFailure: CyanError | undefined;
   for (const command of generated.commands) {
     const { runPostGenerationCommand } = await import('../commands/post-generation-command');
     const result = await runPostGenerationCommand({ ...command, cwd: options.outDir });
-    if (result.allowed && result.exitCode !== 0) {
-      throw new CyanError(
+    if (!result.allowed) {
+      context.warnings.push({
+        code: 'post_generation_command_skipped',
+        message: `Post-generation command skipped: ${command.command} — ${result.stderr ?? 'not allowed'}`,
+      });
+      continue;
+    }
+    if (result.exitCode !== 0) {
+      // Defer the throw so generated state is still written; without it a later `update` cannot run.
+      commandFailure = new CyanError(
         problem('execution', 'post_generation_command_failed', `Post-generation command failed: ${command.command}`, {
           result,
         }),
       );
+      break;
     }
   }
 
@@ -167,7 +191,7 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
     options.outDir,
     buildGeneratedState({
       manifest,
-      source: options.template,
+      source: stableTemplateSource(manifest),
       answers,
       deterministicState,
       files: finalFiles,
@@ -188,6 +212,10 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
     }
   }
 
+  if (commandFailure) {
+    throw commandFailure;
+  }
+
   return {
     status: 'done',
     outputPath: options.outDir,
@@ -200,6 +228,10 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
   };
 }
 
+function stableTemplateSource(manifest: CyanManifest): string {
+  return `${manifest.owner}/${manifest.name}${manifest.version ? `@${manifest.version}` : ''}`;
+}
+
 async function generateTemplate(
   templateDir: string,
   context: GenerationContext,
@@ -207,11 +239,48 @@ async function generateTemplate(
 ): Promise<GeneratedTemplate> {
   const { manifest, warnings } = await loadManifest(templateDir);
   context.warnings.push(...warnings);
+
+  // Feature 2: each template (owner:name, version-ignored) may appear only once in the whole composition.
+  const templateRef = `${manifest.owner}:${manifest.name}`;
+  if (context.seenTemplateRefs.has(templateRef)) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'duplicate_template_dependency',
+        `Template ${templateRef} is included more than once; each template may appear only once.`,
+      ),
+    );
+  }
+  context.seenTemplateRefs.add(templateRef);
+
   const stackKey = `${manifest.kind}:${manifest.owner}:${manifest.name}:${resolve(templateDir)}`;
   if (stack.has(stackKey)) {
     throw new CyanError(problem('validation', 'template_cycle', `Template dependency cycle detected: ${stackKey}`));
   }
   stack.add(stackKey);
+  try {
+    return await generateTemplateLayers(templateDir, manifest, context, stack);
+  } finally {
+    stack.delete(stackKey);
+  }
+}
+
+async function generateTemplateLayers(
+  templateDir: string,
+  manifest: CyanManifest,
+  context: GenerationContext,
+  stack: Set<string>,
+): Promise<GeneratedTemplate> {
+  // Feature 3: record this template's node in the trace tree, and make children nest under it.
+  let traceNode: TraceNode | undefined;
+  if (context.trace) {
+    traceNode = { ref: `${manifest.owner}/${manifest.name}`, kind: manifest.kind, ownFiles: [], children: [] };
+    context.traceNode?.children.push(traceNode);
+    context.traceNode = traceNode;
+  }
+
+  // Feature 1: presets visible to this template's subtree (root-first; this template appended last).
+  const chain = [...context.presetChain, presetTemplatesOf(manifest)];
 
   const templateBundle = await templateBundleRef(templateDir, manifest);
   context.artifactBundles.set(artifactKey(templateBundle.dependency, manifest.owner), templateBundle);
@@ -230,13 +299,16 @@ async function generateTemplate(
   const commands: GeneratedTemplate['commands'] = [];
 
   for (const childTemplate of manifest.templates) {
+    const preset = resolveInheritedPreset(chain, childTemplate, manifest.owner);
+    seedDeterministic(context, preset.deterministic);
     const child = await executeChildTemplate(
       templateDir,
       childTemplate,
       manifest.owner,
       context,
       stack,
-      dependencyPresetAnswers(manifest, childTemplate),
+      preset.answers,
+      chain,
     );
     files = await mergeLayerFiles({
       current: files,
@@ -301,13 +373,16 @@ async function generateTemplate(
     if (staticTemplateKeys.has(artifactKey(template, manifest.owner))) {
       continue;
     }
+    const preset = resolveInheritedPreset(chain, template, manifest.owner);
+    seedDeterministic(context, preset.deterministic);
     const child = await executeChildTemplate(
       templateDir,
       template,
       manifest.owner,
       context,
       stack,
-      dependencyConfigAnswers(template.config),
+      { ...dependencyConfigAnswers(template.config), ...preset.answers },
+      chain,
     );
     files = await mergeLayerFiles({
       current: files,
@@ -327,11 +402,37 @@ async function generateTemplate(
   }
 
   let ownFiles: VfsFile[] = [];
-  const artifactPipelineState: ArtifactPipelineState = { scopes: new Map(), owners: new Map() };
+  const ownFileResolvers = new Map<string, NormalizedArtifactUse[]>();
+  const ownResolverInputs = new Map<string, ResolverFile[]>();
+  const artifactPipelineState: ArtifactPipelineState = { scopes: new Map() };
 
+  for (const resolver of cyanResolvers) {
+    await resolveArtifact(resolver);
+  }
   for (const processor of cyanProcessors) {
     const bundle = await resolveArtifact(processor);
-    ownFiles = await invokeProcessorForUse(bundle, ownFiles, processor, templateDir, artifactPipelineState);
+    const processorOutput = await invokeProcessorForUse(
+      bundle,
+      ownFiles,
+      processor,
+      templateDir,
+      artifactPipelineState,
+    );
+    const processorResolvers = new Map(processorOutput.map(file => [file.path, cyanResolvers]));
+    const processorInputs = resolverInputsForLayer(processorOutput, `${manifest.name}:${processor.name}`, 0);
+    ownFiles = await mergeLayerFiles({
+      current: ownFiles,
+      currentResolvers: ownFileResolvers,
+      currentResolverInputs: ownResolverInputs,
+      next: processorOutput,
+      nextResolvers: processorResolvers,
+      nextResolverInputs: processorInputs,
+      fallbackNextResolvers: cyanResolvers,
+      context,
+      defaultOwner: manifest.owner,
+      conflicts,
+      sourceLabel: `${manifest.owner}/${manifest.name}`,
+    });
     artifactUses.processors.push(normalizeArtifactUse(processor, manifest.owner));
   }
   for (const plugin of cyanPlugins) {
@@ -340,24 +441,20 @@ async function generateTemplate(
     artifactUses.plugins.push(normalizeArtifactUse(plugin, manifest.owner));
   }
   for (const resolver of cyanResolvers) {
-    await resolveArtifact(resolver);
     artifactUses.resolvers.push(normalizeArtifactUse(resolver, manifest.owner));
   }
-  const ownFileResolvers = new Map(ownFiles.map(file => [file.path, cyanResolvers]));
-  const ownResolverInputs = new Map(
-    ownFiles
-      .filter(file => file.bytesBase64 === undefined)
-      .map(file => [
-        file.path,
-        [
-          {
-            path: file.path,
-            content: file.content ?? '',
-            origin: { template: manifest.name, layer: 0 },
-          },
-        ],
-      ]),
-  );
+  ownFileResolvers.clear();
+  ownResolverInputs.clear();
+  for (const file of ownFiles) {
+    ownFileResolvers.set(file.path, cyanResolvers);
+  }
+  for (const [path, inputs] of resolverInputsForLayer(ownFiles, manifest.name, 0)) {
+    ownResolverInputs.set(path, inputs);
+  }
+  // Feature 3: capture this template's isolated own output before it merges into the accumulated files.
+  if (traceNode) {
+    traceNode.ownFiles = ownFiles.map(file => ({ ...file }));
+  }
   files = await mergeLayerFiles({
     current: files,
     currentResolvers: fileResolvers,
@@ -369,6 +466,7 @@ async function generateTemplate(
     context,
     defaultOwner: manifest.owner,
     conflicts,
+    sourceLabel: `${manifest.owner}/${manifest.name}`,
   });
   for (const template of cyanTemplates) {
     if (!staticTemplateKeys.has(artifactKey(template, manifest.owner))) {
@@ -379,7 +477,6 @@ async function generateTemplate(
     commands.push(command);
   }
 
-  stack.delete(stackKey);
   return { manifest, files, fileResolvers, resolverInputs, conflicts, commands, artifactUses };
 }
 
@@ -390,6 +487,7 @@ async function executeChildTemplate(
   context: GenerationContext,
   stack: Set<string>,
   dependencyAnswers: Answers = {},
+  chain: Array<Record<string, unknown>> = [],
 ): Promise<GeneratedTemplate> {
   const childDir = await resolveDevTemplateDir({
     workspaceRoot: process.cwd(),
@@ -401,6 +499,7 @@ async function executeChildTemplate(
   const childContext = {
     ...context,
     answers: { ...structuredClone(context.answers), ...structuredClone(dependencyAnswers) },
+    presetChain: chain,
   };
   const child = await generateTemplate(childDir, childContext, stack);
   for (const [key, value] of Object.entries(childContext.answers)) {
@@ -417,18 +516,62 @@ async function executeChildTemplate(
   return child;
 }
 
-function dependencyPresetAnswers(manifest: CyanManifest, dependency: ArtifactDependency | CyanArtifactUse): Answers {
-  const templates = isRecord(manifest.presets.templates) ? manifest.presets.templates : {};
-  const owner = dependency.owner ?? manifest.owner;
-  const candidates = [`${dependency.kind}:${owner}:${dependency.name}`, `${owner}/${dependency.name}`, dependency.name];
-  for (const key of candidates) {
-    const preset = templates[key];
-    const answers = isRecord(preset) && isRecord(preset.answers) ? preset.answers : preset;
-    if (isRecord(answers)) {
-      return { ...answers };
+function presetTemplatesOf(manifest: CyanManifest): Record<string, unknown> {
+  return isRecord(manifest.presets.templates) ? (manifest.presets.templates as Record<string, unknown>) : {};
+}
+
+function seedDeterministic(context: GenerationContext, deterministic: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(deterministic)) {
+    if (!(key in context.deterministicState)) {
+      context.deterministicState[key] = value;
     }
   }
-  return {};
+}
+
+// Feature 1: fold presets for `dependency` across the whole ancestor chain, root-wins.
+// Each chain entry is an ancestor's `presets.templates` (root-first); a preset value is
+// `{ answers?, deterministic? }` or a bare answers object.
+function resolveInheritedPreset(
+  chain: Array<Record<string, unknown>>,
+  dependency: ArtifactDependency | CyanArtifactUse,
+  defaultOwner: string,
+): { answers: Answers; deterministic: Record<string, unknown> } {
+  const owner = dependency.owner ?? defaultOwner;
+  const candidates = [
+    `${dependency.kind ?? 'template'}:${owner}:${dependency.name}`,
+    `${owner}/${dependency.name}`,
+    dependency.name,
+  ];
+  const answers: Answers = {};
+  const deterministic: Record<string, unknown> = {};
+  // Iterate leaf→root so chain[0] (root) is applied last and overrides (root wins).
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const level = chain[index];
+    if (!level) {
+      continue;
+    }
+    for (const key of candidates) {
+      const preset = level[key];
+      if (preset === undefined) {
+        continue;
+      }
+      const presetAnswers =
+        isRecord(preset) && isRecord(preset.answers)
+          ? preset.answers
+          : isRecord(preset) && !('answers' in preset) && !('deterministic' in preset)
+            ? preset
+            : undefined;
+      const presetDeterministic = isRecord(preset) && isRecord(preset.deterministic) ? preset.deterministic : undefined;
+      if (isRecord(presetAnswers)) {
+        Object.assign(answers, presetAnswers);
+      }
+      if (isRecord(presetDeterministic)) {
+        Object.assign(deterministic, presetDeterministic);
+      }
+      break;
+    }
+  }
+  return { answers, deterministic };
 }
 
 function dependencyConfigAnswers(config: unknown): Answers {
@@ -467,7 +610,7 @@ function overlayFiles(base: VfsFile[], overlay: VfsFile[]): VfsFile[] {
   for (const file of overlay) {
     files.set(file.path, file);
   }
-  return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return [...files.values()].sort((left, right) => comparePaths(left.path, right.path));
 }
 
 async function mergeLayerFiles(args: {
@@ -481,7 +624,22 @@ async function mergeLayerFiles(args: {
   context: GenerationContext;
   defaultOwner: string;
   conflicts: Array<{ path: string; reason: string }>;
+  // The true origin of the incoming layer. Omit for child-template layers bubbling up: their
+  // files were already attributed at the deeper merge, and re-labelling them here would blame
+  // the merging parent for a grandchild's file. Without a label, collisions only upgrade the
+  // existing record's decision while keeping its (deep) source.
+  sourceLabel?: string;
 }): Promise<VfsFile[]> {
+  const recordProvenance = (path: string, decision: 'added' | 'resolver-merged' | 'lww-override'): void => {
+    const trace = args.context.trace;
+    if (!trace) {
+      return;
+    }
+    const source = args.sourceLabel ?? trace.provenance.get(path)?.source;
+    if (source) {
+      trace.record(path, source, decision);
+    }
+  };
   const files = new Map(args.current.map(file => [file.path, file]));
   for (const file of args.next) {
     const existing = files.get(file.path);
@@ -490,6 +648,9 @@ async function mergeLayerFiles(args: {
       files.set(file.path, file);
       args.currentResolvers.set(file.path, nextResolvers);
       args.currentResolverInputs.set(file.path, resolverInputsForFile(file, args.nextResolverInputs));
+      if (args.sourceLabel) {
+        args.context.trace?.record(file.path, args.sourceLabel, 'added');
+      }
       continue;
     }
 
@@ -499,12 +660,24 @@ async function mergeLayerFiles(args: {
     const resolverInputs = renumberResolverInputs([...currentInputs, ...nextInputs]);
     const decision = createLayerMergeDecision(file.path, currentResolvers, nextResolvers);
     if (decision.status === 'merge') {
-      files.set(
-        file.path,
-        await mergeWithCreateResolver(file, resolverInputs, decision.resolver, args.context, args.defaultOwner),
+      const resolved = await mergeWithCreateResolver(
+        file,
+        resolverInputs,
+        decision.resolver,
+        args.context,
+        args.defaultOwner,
       );
+      files.set(file.path, resolved.file);
       args.currentResolvers.set(file.path, [decision.resolver]);
       args.currentResolverInputs.set(file.path, resolverInputs);
+      if (resolved.merged) {
+        recordProvenance(file.path, 'resolver-merged');
+      } else {
+        // The resolver could not run (binary file, no inputs, or missing bundle): this is a
+        // last-write-wins outcome and must be reported as one, not silently pass as merged.
+        args.conflicts.push({ path: file.path, reason: resolved.reason });
+        recordProvenance(file.path, 'lww-override');
+      }
       continue;
     }
 
@@ -512,8 +685,9 @@ async function mergeLayerFiles(args: {
     files.set(file.path, file);
     args.currentResolvers.set(file.path, nextResolvers);
     args.currentResolverInputs.set(file.path, nextInputs);
+    recordProvenance(file.path, 'lww-override');
   }
-  return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return [...files.values()].sort((left, right) => comparePaths(left.path, right.path));
 }
 
 function resolverInputsForFile(file: VfsFile, inputs: Map<string, ResolverFile[]>): ResolverFile[] {
@@ -524,7 +698,25 @@ function resolverInputsForFile(file: VfsFile, inputs: Map<string, ResolverFile[]
   if (file.bytesBase64 !== undefined) {
     return [];
   }
-  return [{ path: file.path, content: file.content ?? '', origin: { template: 'unknown', layer: 0 } }];
+  return [{ path: file.path, content: file.content ?? '', origin: { template: 'unknown', layer: 0 }, files: [file] }];
+}
+
+function resolverInputsForLayer(files: VfsFile[], template: string, layer: number): Map<string, ResolverFile[]> {
+  return new Map(
+    files
+      .filter(file => file.bytesBase64 === undefined)
+      .map(file => [
+        file.path,
+        [
+          {
+            path: file.path,
+            content: file.content ?? '',
+            origin: { template, layer },
+            files,
+          },
+        ],
+      ]),
+  );
 }
 
 function renumberResolverInputs(inputs: ResolverFile[]): ResolverFile[] {
@@ -559,25 +751,36 @@ function resolversForPath(resolvers: NormalizedArtifactUse[], path: string): Nor
   return resolvers.filter(resolver => resolverAppliesToPath(resolver.config, path));
 }
 
+type ResolverMergeOutcome =
+  | { file: VfsFile; merged: true }
+  | {
+      file: VfsFile;
+      merged: false;
+      reason: 'resolver_skipped_binary' | 'resolver_skipped_no_inputs' | 'resolver_missing_bundle';
+    };
+
 async function mergeWithCreateResolver(
   target: VfsFile,
   resolverInputs: ResolverFile[],
   resolver: NormalizedArtifactUse,
   context: GenerationContext,
   defaultOwner: string,
-): Promise<VfsFile> {
-  if (target.bytesBase64 !== undefined || resolverInputs.length === 0) {
-    return target;
+): Promise<ResolverMergeOutcome> {
+  if (target.bytesBase64 !== undefined) {
+    return { file: target, merged: false, reason: 'resolver_skipped_binary' };
+  }
+  if (resolverInputs.length === 0) {
+    return { file: target, merged: false, reason: 'resolver_skipped_no_inputs' };
   }
   const bundle = context.artifactBundles.get(artifactKey(resolver, defaultOwner));
   if (!bundle) {
-    return target;
+    return { file: target, merged: false, reason: 'resolver_missing_bundle' };
   }
   const content = await invokeResolver(bundle, {
     files: resolverInputs,
-    config: { path: target.path, ...(isRecord(resolver.config) ? resolver.config : {}) },
+    config: { ...(isRecord(resolver.config) ? resolver.config : {}), path: target.path },
   });
-  return { path: target.path, content };
+  return { file: { path: target.path, content }, merged: true };
 }
 
 function artifactIdentity(use: NormalizedArtifactUse): string {
@@ -626,17 +829,12 @@ async function invokePluginForUse(
   templateDir: string,
   artifactPipelineState: ArtifactPipelineState,
 ): Promise<VfsFile[]> {
-  if (artifactFileScopes(plugin).length === 0) {
-    return invokePlugin(bundle, files, plugin.config);
-  }
-  return applyArtifactFileScopes(templateDir, files, plugin, artifactPipelineState, selected =>
-    invokePlugin(bundle, selected, plugin.config, { preservePrevious: false }),
-  );
+  const scopedFiles = await loadArtifactScopeFiles(templateDir, plugin, artifactPipelineState);
+  return invokePlugin(bundle, overlayFiles(files, scopedFiles), plugin.config);
 }
 
 type ArtifactPipelineState = {
   scopes: Map<string, { mode: 'template' | 'copy'; files: VfsFile[] }>;
-  owners: Map<string, string>;
 };
 
 async function applyArtifactFileScopes(
@@ -651,7 +849,7 @@ async function applyArtifactFileScopes(
     return await invoke(files);
   }
 
-  let current = files;
+  let output: VfsFile[] = [];
   for (const scope of scopes) {
     const scopeKey = artifactFileScopeKey(scope);
     let scopeState = artifactPipelineState.scopes.get(scopeKey);
@@ -659,9 +857,9 @@ async function applyArtifactFileScopes(
       const loaded = await loadScopeFiles(templateDir, scope);
       scopeState = { mode: loaded.mode, files: loaded.files };
       artifactPipelineState.scopes.set(scopeKey, scopeState);
-      current = overlayScopedFiles(current, [], scopeState.files, scopeKey, artifactPipelineState.owners);
     }
     if (scopeState.mode === 'copy') {
+      output = overlayFiles(output, scopeState.files);
       continue;
     }
     if (scopeState.files.length > 0) {
@@ -673,34 +871,30 @@ async function applyArtifactFileScopes(
         ...file,
         path: normalizeScopedOutputPath(file.path),
       }));
-      const previous = scopeState.files;
-      scopeState.files = transformed;
-      current = overlayScopedFiles(current, previous, transformed, scopeKey, artifactPipelineState.owners);
+      output = overlayFiles(output, transformed);
       continue;
     }
   }
-  return current;
+  return output;
 }
 
-function overlayScopedFiles(
-  base: VfsFile[],
-  previous: VfsFile[],
-  overlay: VfsFile[],
-  scopeKey: string,
-  owners: Map<string, string>,
-): VfsFile[] {
-  const files = new Map(base.map(file => [file.path, file]));
-  for (const file of previous) {
-    if (owners.get(file.path) === scopeKey) {
-      files.delete(file.path);
-      owners.delete(file.path);
+async function loadArtifactScopeFiles(
+  templateDir: string,
+  use: NormalizedArtifactUse,
+  artifactPipelineState: ArtifactPipelineState,
+): Promise<VfsFile[]> {
+  let output: VfsFile[] = [];
+  for (const scope of artifactFileScopes(use)) {
+    const scopeKey = artifactFileScopeKey(scope);
+    let scopeState = artifactPipelineState.scopes.get(scopeKey);
+    if (!scopeState) {
+      const loaded = await loadScopeFiles(templateDir, scope);
+      scopeState = { mode: loaded.mode, files: loaded.files };
+      artifactPipelineState.scopes.set(scopeKey, scopeState);
     }
+    output = overlayFiles(output, scopeState.files);
   }
-  for (const file of overlay) {
-    files.set(file.path, file);
-    owners.set(file.path, scopeKey);
-  }
-  return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return output;
 }
 
 function artifactFileScopeKey(scope: CyanFileGlob): string {
@@ -793,7 +987,7 @@ async function readOutputFiles(outDir: string): Promise<VfsFile[]> {
         : { path: relativePath, content: text },
     );
   });
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => comparePaths(left.path, right.path));
 }
 
 async function readOutputFilePathsIfExists(outDir: string): Promise<Set<string>> {

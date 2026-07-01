@@ -1,11 +1,5 @@
 cases:
   - name: basic
-    answers: answers.json
+    answers:
+      project: __TITLE__ App
     expected: expected
-    validations:
-      - command: bun
-        args:
-          - --eval
-          - |
-            const text = await Bun.file("README.md").text();
-            if (!text.includes("# __TITLE__ App")) process.exit(1);

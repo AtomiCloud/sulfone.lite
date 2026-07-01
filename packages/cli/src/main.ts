@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
 import type { PromptAdapter } from '@cyanprint/contracts';
 import { Command, CommanderError } from 'commander';
+import { bundleCommand } from './commands/bundle';
 import { cacheCommand } from './commands/cache';
 import { createCommand } from './commands/create';
 import { pushCommand } from './commands/push';
 import { searchCommand } from './commands/search';
 import { testCommand } from './commands/test';
+import { traceCommand } from './commands/trace';
 import { tryCommand } from './commands/try';
 import { trustCommand } from './commands/trust';
 import { updateCommand } from './commands/update';
@@ -104,7 +106,7 @@ Examples:
     program
       .command('test')
       .argument('<target>', 'template, processor, plugin, or resolver directory')
-      .description('run standard artifact tests and snapshots'),
+      .description('run standard artifact tests and expected output fixtures'),
     TEST_OPTIONS,
   ).action(async (target: string, options: OptionValues) => {
     await testCommand([target, ...optionArgv(options, TEST_OPTIONS)]);
@@ -112,12 +114,44 @@ Examples:
 
   withOptions(
     program
+      .command('trace')
+      .argument('<template>', 'template path or registry reference')
+      .description('trace which template/dependency contributed each file (provenance + diffs)'),
+    TRACE_OPTIONS,
+  ).action(async (template: string, options: OptionValues) => {
+    await traceCommand([template, ...optionArgv(options, TRACE_OPTIONS)], { promptAdapterFactory });
+  });
+
+  withOptions(
+    program
+      .command('bundle')
+      .argument('<artifact>', 'processor, plugin, or resolver directory')
+      .description('bundle an artifact runtime into its declared bundledEntry')
+      .option('--no-install', 'skip installing dependencies before bundling'),
+    BUNDLE_OPTIONS,
+  ).action(async (artifact: string, options: OptionValues) => {
+    await bundleCommand([
+      artifact,
+      ...optionArgv(options, BUNDLE_OPTIONS),
+      ...(options.install === false ? ['--no-install'] : []),
+    ]);
+  });
+
+  withOptions(
+    program
       .command('push')
       .argument('<artifact>', 'artifact directory')
-      .description('validate, bundle, and publish an artifact'),
+      .description('test, bundle, and publish an artifact')
+      .option('--no-bundle', 'skip bundling before publish')
+      .option('--no-test', 'skip tests before publish'),
     PUSH_OPTIONS,
   ).action(async (artifact: string, options: OptionValues) => {
-    await pushCommand([artifact, ...optionArgv(options, PUSH_OPTIONS)]);
+    await pushCommand([
+      artifact,
+      ...optionArgv(options, PUSH_OPTIONS),
+      ...(options.bundle === false ? ['--no-bundle'] : []),
+      ...(options.test === false ? ['--no-test'] : []),
+    ]);
   });
 
   withOptions(
@@ -206,7 +240,8 @@ function optionArgv(options: OptionValues, specs: CliOptionSpec[]): string[] {
     if (value === true) {
       argv.push(`--${spec.flag}`);
     } else if (typeof value === 'string') {
-      argv.push(`--${spec.flag}`, value);
+      // `=` form survives the re-parse even when the value is empty or starts with `--`.
+      argv.push(`--${spec.flag}=${value}`);
     }
   }
   return argv;
@@ -263,6 +298,9 @@ const TRY_OPTIONS: CliOptionSpec[] = [
   ...CREATE_OPTIONS.slice(1),
 ];
 
+// Same as create, minus --out (trace generates into a throwaway temp dir and reports).
+const TRACE_OPTIONS: CliOptionSpec[] = CREATE_OPTIONS.slice(1);
+
 const UPDATE_OPTIONS: CliOptionSpec[] = [
   {
     flag: 'template',
@@ -284,9 +322,10 @@ const UPDATE_OPTIONS: CliOptionSpec[] = [
 const TEST_OPTIONS: CliOptionSpec[] = [
   { flag: 'answers', value: '<file>', description: 'JSON answers file for template tests' },
   { flag: 'out', value: '<dir>', description: 'template test output directory' },
-  { flag: 'snapshot', value: '<file>', description: 'snapshot file for template output' },
-  { flag: 'update-snapshots', description: 'rewrite expected snapshots' },
+  { flag: 'snapshot', value: '<file>', description: 'legacy snapshot file for template output' },
+  { flag: 'update-snapshots', description: 'rewrite expected output fixtures' },
   { flag: 'tests', value: '<dir>', description: 'artifact-specific tests directory' },
+  { flag: 'parallel', value: '<n>', description: 'run up to N test cases concurrently' },
   { flag: 'report', value: '<file>', description: 'write JSON report to a file' },
   { flag: 'json', description: 'print machine-readable JSON' },
 ];
@@ -298,8 +337,15 @@ const PUSH_OPTIONS: CliOptionSpec[] = [
   { flag: 'json', description: 'print machine-readable JSON' },
 ];
 
+const BUNDLE_OPTIONS: CliOptionSpec[] = [
+  { flag: 'dry-run', description: 'bundle to a temp directory without writing bundledEntry' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
 const SEARCH_OPTIONS: CliOptionSpec[] = [
-  { flag: 'registry', value: '<url>', description: 'registry base URL', defaultValue: RELEASE_REGISTRY_URL },
+  // No commander defaultValue: searchCommand falls back to defaultRegistryUrl(), which honors
+  // CYANPRINT_REGISTRY_URL/CYANPRINT_REGISTRY like every other command.
+  { flag: 'registry', value: '<url>', description: `registry base URL (default: ${RELEASE_REGISTRY_URL})` },
   { flag: 'kind', value: '<kind>', description: 'template, template-group, processor, plugin, or resolver' },
   { flag: 'query', value: '<text>', description: 'query text; overrides empty positional query' },
   { flag: 'limit', value: '<number>', description: 'maximum results', defaultValue: '20' },

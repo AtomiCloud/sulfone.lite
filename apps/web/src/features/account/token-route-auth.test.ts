@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { requireSessionCookie, tokenRouteError } from './token-route-auth';
+import { isSameOriginRequest, requireSameOrigin, requireSessionCookie, tokenRouteError } from './token-route-auth';
 
 describe('token route session auth', () => {
   test('reads the httpOnly registry session cookie', () => {
@@ -25,5 +25,45 @@ describe('token route session auth', () => {
     const response = tokenRouteError(error);
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: 'Sign in with GitHub to manage API tokens.' });
+  });
+
+  test('accepts mutations from the same origin or referer', () => {
+    const withOrigin = new Request('https://cyanprint.dev/api/tokens', {
+      method: 'POST',
+      headers: { origin: 'https://cyanprint.dev' },
+    });
+    expect(isSameOriginRequest(withOrigin)).toBe(true);
+    expect(() => requireSameOrigin(withOrigin)).not.toThrow();
+
+    const withReferer = new Request('https://cyanprint.dev/api/tokens', {
+      method: 'POST',
+      headers: { referer: 'https://cyanprint.dev/account/tokens' },
+    });
+    expect(isSameOriginRequest(withReferer)).toBe(true);
+  });
+
+  test('rejects cross-origin and origin-less mutations with 403', () => {
+    const crossOrigin = new Request('https://cyanprint.dev/api/tokens', {
+      method: 'POST',
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(isSameOriginRequest(crossOrigin)).toBe(false);
+    let error: unknown;
+    try {
+      requireSameOrigin(crossOrigin);
+    } catch (caught) {
+      error = caught;
+    }
+    const response = tokenRouteError(error);
+    expect(response.status).toBe(403);
+
+    const bare = new Request('https://cyanprint.dev/api/tokens', { method: 'POST' });
+    expect(isSameOriginRequest(bare)).toBe(false);
+
+    const badReferer = new Request('https://cyanprint.dev/api/tokens', {
+      method: 'POST',
+      headers: { referer: 'not-a-url' },
+    });
+    expect(isSameOriginRequest(badReferer)).toBe(false);
   });
 });

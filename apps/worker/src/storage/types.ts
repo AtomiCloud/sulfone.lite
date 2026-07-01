@@ -8,16 +8,16 @@ import type {
 } from '@cyanprint/contracts';
 import type { TokenRecord } from '@cyanprint/registry-client';
 
-export type MaybePromise<T> = T | Promise<T>;
+type MaybePromise<T> = T | Promise<T>;
 
-export type ArtifactSearchArgs = {
+type ArtifactSearchArgs = {
   cursor?: string;
   kind?: string;
   limit?: number;
   query?: string;
 };
 
-export type ArtifactSearchPage = {
+type ArtifactSearchPage = {
   artifacts: ArtifactVersion[];
   nextCursor?: string;
 };
@@ -28,7 +28,7 @@ export type RegistryStorage = {
   getCurrentUser(): MaybePromise<RegistryUser | undefined>;
   getUser(id: string): MaybePromise<RegistryUser | undefined>;
   upsertUser(user: RegistryUser): MaybePromise<void>;
-  updateUserHandle(userId: string, handle: string): MaybePromise<'updated' | 'duplicate' | 'not_found'>;
+  updateUserHandle(userId: string, handle: string): MaybePromise<'updated' | 'duplicate' | 'immutable' | 'not_found'>;
   listUsers(): MaybePromise<RegistryUser[]>;
   createSession(userId: string, session: string): MaybePromise<void>;
   getSessionUser(session: string): MaybePromise<RegistryUser | undefined>;
@@ -69,7 +69,7 @@ export type RegistryStorage = {
 
 export type RegistryUser = {
   id: string;
-  handle: string;
+  handle: string | null;
   login?: string;
   admin?: boolean;
 };

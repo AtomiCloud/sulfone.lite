@@ -1,8 +1,10 @@
 import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import type { Answers } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { createProject } from '../create/create-project';
-import { exists, readText, safeJoin, writeText } from '../util';
+import { STATE_FILE } from '../state/generated-state';
+import { comparePaths, exists, mapWithConcurrency, readText, safeJoin, writeText } from '../util';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
 export type TemplateTestReport = {
@@ -19,6 +21,7 @@ export async function runTemplateTest(args: {
   outDir: string;
   snapshot?: string;
   updateSnapshots?: boolean;
+  concurrency?: number;
 }): Promise<TemplateTestReport> {
   const manifestCases = await loadTemplateTestCases(args.template);
   if (manifestCases.length > 0) {
@@ -29,7 +32,7 @@ export async function runTemplateTest(args: {
     template: args.template,
     outDir: args.outDir,
     headless: true,
-    answers: args.answers ? (JSON.parse(await readText(args.answers)) as Record<string, unknown>) : {},
+    answers: args.answers ? await readAnswersRecord(args.answers) : {},
   });
   if (args.snapshot) {
     const actual = await readText(join(args.outDir, 'README.md'));
@@ -47,15 +50,28 @@ export async function runTemplateTest(args: {
         cases: [{ name: 'basic', status: 'failed', message: 'Snapshot mismatch' }],
       };
     }
+    return { passed: 1, failed: 0, skipped: 0, snapshotUpdated: 0, cases: [{ name: 'basic', status: 'passed' }] };
   }
-  return { passed: 1, failed: 0, skipped: 0, snapshotUpdated: 0, cases: [{ name: 'basic', status: 'passed' }] };
+  return {
+    passed: 0,
+    failed: 1,
+    skipped: 0,
+    snapshotUpdated: 0,
+    cases: [
+      {
+        name: 'basic',
+        status: 'failed',
+        message: 'Template tests need cyan.test.yaml with expected output, or a legacy --snapshot path.',
+      },
+    ],
+  };
 }
 
 type TemplateCase = {
   name: string;
-  answers?: string;
+  answers?: string | Answers;
+  deterministicState?: string | Record<string, unknown>;
   expected?: string;
-  snapshot?: string;
   validations: CommandValidation[];
 };
 
@@ -63,70 +79,80 @@ async function runTemplateManifestTests(args: {
   template: string;
   answers?: string;
   outDir: string;
-  snapshot?: string;
   updateSnapshots?: boolean;
+  concurrency?: number;
   cases: TemplateCase[];
 }): Promise<TemplateTestReport> {
-  const results: TemplateTestReport['cases'] = [];
-  let snapshotUpdated = 0;
+  // Duplicate names would share one output directory and race under concurrency.
+  const seenNames = new Set<string>();
   for (const testCase of args.cases) {
-    const outDir = args.cases.length === 1 ? args.outDir : join(args.outDir, testCase.name);
-    try {
-      await rm(outDir, { recursive: true, force: true });
-      await mkdir(outDir, { recursive: true });
-      const answersPath = testCase.answers ?? args.answers;
-      await createProject({
-        template: args.template,
-        outDir,
-        headless: true,
-        answers: answersPath ? (JSON.parse(await readText(answersPath)) as Record<string, unknown>) : {},
-      });
-      if (testCase.expected) {
-        const expected = await readFileTree(testCase.expected);
-        const actual = await readFileTree(outDir);
-        const diff = compareFileTrees(
-          expected.filter(file => file.path !== '.cyan_state.yaml'),
-          actual.filter(file => file.path !== '.cyan_state.yaml'),
-        );
-        if (diff) {
-          results.push({ name: testCase.name, status: 'failed', message: diff });
-          continue;
-        }
-      }
-      const snapshot = testCase.snapshot ?? args.snapshot;
-      if (snapshot) {
-        const actual = await readText(join(outDir, 'README.md'));
-        if (args.updateSnapshots) {
-          await writeText(snapshot, actual);
-          snapshotUpdated += 1;
-        } else {
-          const expected = await readText(snapshot);
-          if (actual !== expected) {
-            results.push({ name: testCase.name, status: 'failed', message: 'Snapshot mismatch' });
-            continue;
-          }
-        }
-      } else if (!testCase.snapshot && !args.snapshot) {
-        results.push({ name: testCase.name, status: 'failed', message: 'Test case needs expected output.' });
-        continue;
-      }
-      const validationFailure = await runCommandValidations(outDir, testCase.validations);
-      if (validationFailure) {
-        results.push({ name: testCase.name, status: 'failed', message: validationFailure });
-        continue;
-      }
-      results.push({ name: testCase.name, status: 'passed' });
-    } catch (error) {
-      results.push({ name: testCase.name, status: 'failed', message: String(error) });
+    if (seenNames.has(testCase.name)) {
+      throw new Error(`cyan.test.yaml has duplicate case name: ${testCase.name}`);
     }
+    seenNames.add(testCase.name);
   }
+  const perCase = await mapWithConcurrency(args.cases, args.concurrency ?? 1, testCase =>
+    runTemplateCase(args, testCase),
+  );
+  const results = perCase.map(entry => entry.case);
   return {
     passed: results.filter(testCase => testCase.status === 'passed').length,
     failed: results.filter(testCase => testCase.status === 'failed').length,
     skipped: 0,
-    snapshotUpdated,
+    snapshotUpdated: perCase.filter(entry => entry.snapshotUpdated).length,
     cases: results,
   };
+}
+
+async function runTemplateCase(
+  args: { template: string; answers?: string; outDir: string; updateSnapshots?: boolean; cases: TemplateCase[] },
+  testCase: TemplateCase,
+): Promise<{ case: TemplateTestReport['cases'][number]; snapshotUpdated: boolean }> {
+  // safeJoin: the case name comes from cyan.test.yaml and is immediately rm -rf'd — a name
+  // like "../../x" must never resolve outside the test output directory.
+  const outDir = args.cases.length === 1 ? args.outDir : safeJoin(args.outDir, testCase.name);
+  try {
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+    const answers = await readCaseRecord<Answers>(testCase.answers ?? args.answers, 'answers');
+    const deterministicState = await readCaseRecord<Record<string, unknown>>(
+      testCase.deterministicState,
+      'deterministicState',
+    );
+    await createProject({ template: args.template, outDir, headless: true, answers, deterministicState });
+    if (!testCase.expected) {
+      return {
+        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
+        snapshotUpdated: false,
+      };
+    }
+    const actual = await readFileTree(outDir);
+    if (!args.updateSnapshots) {
+      const diff = compareFileTrees(await readFileTree(testCase.expected), actual);
+      if (diff) {
+        return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
+      }
+    }
+    const validationFailure = await runCommandValidations(outDir, testCase.validations);
+    if (validationFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+    }
+    if (args.updateSnapshots) {
+      await writeFileTree(testCase.expected, actual);
+      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
+    }
+    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+  } catch (error) {
+    return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
+  }
+}
+
+async function readAnswersRecord(path: string): Promise<Record<string, unknown>> {
+  const parsed = JSON.parse(await readText(path)) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Answers file must contain a JSON object of answers: ${path}`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 async function loadTemplateTestCases(template: string): Promise<TemplateCase[]> {
@@ -150,20 +176,25 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
     throw new Error(`cyan.test.yaml case ${index + 1} must be a mapping.`);
   }
   const record = rawCase as Record<string, unknown>;
+  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`);
+  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`);
   return {
     name: readRequiredString(record.name, `cases[${index}].name`),
-    answers: readOptionalPath(template, record.answers),
+    answers: readOptionalPathOrRecord(template, record.answers, `cases[${index}].answers`),
+    deterministicState: readOptionalPathOrRecord(
+      template,
+      record.deterministicState,
+      `cases[${index}].deterministicState`,
+    ),
     expected: readOptionalPath(template, record.expected),
-    snapshot: readOptionalPath(template, record.snapshot),
-    validations: readCaseValidationCommands(record, `cases[${index}]`),
+    validations: readCommandValidations(record.validations, `cases[${index}].validations`),
   };
 }
 
-function readCaseValidationCommands(record: Record<string, unknown>, label: string): CommandValidation[] {
-  return [
-    ...readCommandValidations(record.validations, `${label}.validations`),
-    ...readCommandValidations(record.commands, `${label}.commands`),
-  ];
+function rejectRemovedTestField(record: Record<string, unknown>, field: string, label: string): void {
+  if (record[field] !== undefined) {
+    throw new Error(`${label} is no longer supported. Use validations with an expected output directory.`);
+  }
 }
 
 function readRequiredString(value: unknown, label: string): string {
@@ -183,12 +214,69 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   return safeJoin(root, value);
 }
 
-async function readFileTree(root: string): Promise<Array<{ path: string; content: string }>> {
-  const files: Array<{ path: string; content: string }> = [];
+function readOptionalPathOrRecord(
+  root: string,
+  value: unknown,
+  label: string,
+): string | Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    return readOptionalPath(root, value);
+  }
+  if (isRecord(value)) {
+    return structuredClone(value);
+  }
+  throw new Error(`${label} must be a path string or mapping.`);
+}
+
+async function readCaseRecord<T extends Record<string, unknown>>(
+  value: string | Record<string, unknown> | undefined,
+  label: string,
+): Promise<T> {
+  if (value === undefined) {
+    return {} as T;
+  }
+  if (typeof value === 'string') {
+    const parsed = JSON.parse(await readText(value)) as unknown;
+    if (!isRecord(parsed)) {
+      throw new Error(`${label} file must contain a JSON object.`);
+    }
+    return parsed as T;
+  }
+  return structuredClone(value) as T;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+type TemplateTestFile = {
+  path: string;
+  bytes: Uint8Array;
+};
+
+async function readFileTree(root: string): Promise<TemplateTestFile[]> {
+  const files: TemplateTestFile[] = [];
   await walk(root, async path => {
-    files.push({ path: path.slice(root.length + 1), content: await readText(path) });
+    const relativePath = path.slice(root.length + 1);
+    if (relativePath === STATE_FILE) {
+      return;
+    }
+    files.push({ path: relativePath, bytes: new Uint8Array(await Bun.file(path).arrayBuffer()) });
   });
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+async function writeFileTree(root: string, files: TemplateTestFile[]): Promise<void> {
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  for (const file of files) {
+    const target = safeJoin(root, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    await Bun.write(target, file.bytes);
+  }
 }
 
 async function walk(root: string, visit: (path: string) => Promise<void>): Promise<void> {
@@ -200,17 +288,16 @@ async function walk(root: string, visit: (path: string) => Promise<void>): Promi
   }
 }
 
-function compareFileTrees(
-  expected: Array<{ path: string; content: string }>,
-  actual: Array<{ path: string; content: string }>,
-): string | undefined {
-  const expectedMap = new Map(expected.map(file => [file.path, file.content]));
-  const actualMap = new Map(actual.map(file => [file.path, file.content]));
+function compareFileTrees(expected: TemplateTestFile[], actual: TemplateTestFile[]): string | undefined {
+  const expectedMap = new Map(expected.map(file => [file.path, file.bytes]));
+  const actualMap = new Map(actual.map(file => [file.path, file.bytes]));
   for (const path of [...expectedMap.keys()].sort()) {
     if (!actualMap.has(path)) {
       return `Missing output file: ${path}`;
     }
-    if (actualMap.get(path) !== expectedMap.get(path)) {
+    const expectedBytes = expectedMap.get(path) ?? new Uint8Array();
+    const actualBytes = actualMap.get(path) ?? new Uint8Array();
+    if (!bytesEqual(actualBytes, expectedBytes)) {
       return `Output mismatch: ${path}`;
     }
   }
@@ -220,4 +307,11 @@ function compareFileTrees(
     }
   }
   return undefined;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
+  }
+  return left.every((byte, index) => byte === right[index]);
 }

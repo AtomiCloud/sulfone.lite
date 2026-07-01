@@ -32,15 +32,30 @@ export async function trustCommand(argv: string[]): Promise<void> {
   if (action !== 'approve') {
     throw new Error('trust requires inspect or approve');
   }
+  if (!isTrustScope(scope)) {
+    throw new Error(`trust scope must be organization, template, or version; got ${String(scope)}`);
+  }
 
   const parsed = parseTrustRef(ref, scope);
+  const owner = flagString(flags, 'owner', parsed.owner);
+  const name = flagString(flags, 'name', parsed.name);
+  const version = flagString(flags, 'version', parsed.version);
+  if (!owner) {
+    throw new Error(`trust approve ${scope} requires an owner (pass a ref or --owner)`);
+  }
+  if (scope !== 'organization' && !name) {
+    throw new Error(`trust approve ${scope} requires a name (pass owner/name or --name)`);
+  }
+  if (scope === 'version' && !version) {
+    throw new Error('trust approve version requires a version (pass owner/name@version or --version)');
+  }
   const store = await approveTrust(
     {
       scope,
       kind,
-      owner: flagString(flags, 'owner', parsed.owner)!,
-      name: flagString(flags, 'name', parsed.name),
-      version: flagString(flags, 'version', parsed.version),
+      owner,
+      name,
+      version,
       integrity: flagString(flags, 'integrity', parsed.integrity),
       pinsFingerprint: flagString(flags, 'pins-fingerprint', pinsFingerprint([])),
     },
@@ -61,6 +76,10 @@ export async function trustCommand(argv: string[]): Promise<void> {
     console.log(success(`approved ${scope} trust`));
     printSection('Trust', [kv('path', trustPath), kv('owner', parsed.owner), kv('name', parsed.name)]);
   }
+}
+
+function isTrustScope(value: string): value is TrustScope {
+  return value === 'organization' || value === 'template' || value === 'version';
 }
 
 function printTrustStore(trustPath: string, store: TrustStore): void {

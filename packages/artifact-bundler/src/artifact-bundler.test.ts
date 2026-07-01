@@ -39,7 +39,7 @@ describe('bundled artifact', () => {
       await writeFile(join(artifactDir, 'README.md'), '# Non Index Output\n', 'utf8');
       await writeFile(
         join(artifactDir, 'src/main.ts'),
-        'export function plugin(input) { const { files } = input; return { ...files, "MARKER.txt": "ok" }; }',
+        'export async function plugin(input) { await Bun.write(input.outputDir + "/MARKER.txt", "ok"); }',
         'utf8',
       );
 
@@ -48,6 +48,117 @@ describe('bundled artifact', () => {
       expect(result.runtimeFile).toBe(join(artifactDir, 'dist/plugin.js'));
       expect(await Bun.file(result.runtimeFile).text()).toContain('plugin');
       expect(result.sha256).toHaveLength(64);
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves source-map-like text inside bundled runtime strings', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-source-map-text-test-'));
+    try {
+      await mkdir(join(artifactDir, 'src'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: plugin',
+          'owner: cyanprint',
+          'name: source-map-text',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Source Map Text\n', 'utf8');
+      await writeFile(
+        join(artifactDir, 'src/index.ts'),
+        [
+          'const marker = `before',
+          '//# sourceMappingURL=literal.map',
+          'after`;',
+          'export async function plugin(input) { await Bun.write(input.outputDir + "/MARKER.txt", marker); }',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const result = await buildBundle({ artifactDir });
+      const bundled = await Bun.file(result.runtimeFile).text();
+
+      expect(bundled).toContain('sourceMappingURL=literal.map');
+      expect(/^\/\/# sourceMappingURL=.*$/m.test(bundled.trimEnd().split('\n').at(-1) ?? '')).toBe(false);
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not strip source-map-like text on a final code line', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-final-source-map-text-test-'));
+    try {
+      await mkdir(join(artifactDir, 'src'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: plugin',
+          'owner: cyanprint',
+          'name: final-source-map-text',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Final Source Map Text\n', 'utf8');
+      await writeFile(
+        join(artifactDir, 'src/index.ts'),
+        'export function plugin(input) { return "keep //# sourceMappingURL=literal.map"; }',
+        'utf8',
+      );
+
+      const result = await buildBundle({ artifactDir });
+      const bundled = await Bun.file(result.runtimeFile).text();
+
+      expect(bundled).toContain('keep //# sourceMappingURL=literal.map');
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not strip source-map-like text at the start of a final template line', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-final-template-source-map-test-'));
+    try {
+      await mkdir(join(artifactDir, 'src'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: plugin',
+          'owner: cyanprint',
+          'name: final-template-source-map-text',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Final Template Source Map Text\n', 'utf8');
+      await writeFile(
+        join(artifactDir, 'src/index.ts'),
+        [
+          'const marker = `keep',
+          '//# sourceMappingURL=literal.map`;',
+          'export function plugin(input) { return marker; }',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const result = await buildBundle({ artifactDir });
+      const bundled = await Bun.file(result.runtimeFile).text();
+
+      expect(bundled).toContain('sourceMappingURL=literal.map');
     } finally {
       await rm(artifactDir, { recursive: true, force: true });
     }
@@ -125,7 +236,7 @@ describe('bundled artifact', () => {
     }
   });
 
-  test('rejects old two-argument processor bundles', async () => {
+  test('accepts two-argument (input, helper) processor bundles', async () => {
     const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
     try {
       await mkdir(join(artifactDir, 'src'), { recursive: true });
@@ -145,88 +256,65 @@ describe('bundled artifact', () => {
       await writeFile(join(artifactDir, 'README.md'), '# Two Arg\n', 'utf8');
       await writeFile(
         join(artifactDir, 'src/index.ts'),
-        'export function processor(files, config) { return files; }',
+        'export async function processor(input, fs) { await fs.write(await fs.read()); }',
         'utf8',
       );
 
-      await expect(buildBundle({ artifactDir, dryRun: true })).rejects.toThrow('one input object');
+      await expect(buildBundle({ artifactDir, dryRun: true })).resolves.toMatchObject({ dryRun: true });
     } finally {
       await rm(artifactDir, { recursive: true, force: true });
     }
   });
 
-  test('rejects two-argument processor bundles with default or rest parameters', async () => {
-    for (const [name, source] of [
-      ['default-param', 'export function processor(input, config = {}) { return input.files; }'],
-      ['rest-param', 'export function processor(input, ...rest) { return input.files; }'],
-    ] as const) {
-      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
-      try {
-        await mkdir(join(artifactDir, 'src'), { recursive: true });
-        await writeFile(
-          join(artifactDir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: processor',
-            'owner: cyanprint',
-            `name: ${name}`,
-            'entry: src/index.ts',
-            'bundledEntry: dist/index.js',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-        await writeFile(join(artifactDir, 'README.md'), `# ${name}\n`, 'utf8');
-        await writeFile(join(artifactDir, 'src/index.ts'), source, 'utf8');
+  test('rejects processor bundles with three or more parameters', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
+    try {
+      await mkdir(join(artifactDir, 'src'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: processor',
+          'owner: cyanprint',
+          'name: three-arg',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Three Arg\n', 'utf8');
+      await writeFile(
+        join(artifactDir, 'src/index.ts'),
+        'export function processor(input, helper, extra) { return input.outputDir; }',
+        'utf8',
+      );
 
-        await expect(buildBundle({ artifactDir, dryRun: true })).rejects.toThrow('one input object');
-      } finally {
-        await rm(artifactDir, { recursive: true, force: true });
-      }
+      await expect(buildBundle({ artifactDir, dryRun: true })).rejects.toThrow(
+        'an input object and an optional helper',
+      );
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
     }
   });
 
-  test('rejects exported const/function-expression processor bundles', async () => {
-    for (const [name, source, message] of [
+  // Validation is runtime-based (imported function + Function.length), never source parsing:
+  // any valid JS export form works — function declarations, const arrows, function expressions,
+  // re-exports — including sources with division, ASI, or TypeScript generics.
+  test('accepts any valid export form for processor bundles', async () => {
+    for (const [name, source] of [
+      ['arrow-default-param', 'export const processor = (input, config = {}) => input.outputDir;'],
+      ['function-expression', 'export const processor = function (input) { return input.outputDir; };'],
+      ['named-function-expression', 'export const processor = function processor(input) { return input.outputDir; };'],
+      ['aliased-export', 'const real = (input, config = {}) => input.outputDir;\nexport { real as processor };'],
       [
-        'arrow-default-param',
-        'export const processor = (input, config = {}) => input.files;',
-        'export function processor(input)',
+        'division-and-string',
+        'const half = 4 / 2; const s = "a/b";\nexport function processor(input) { return input.outputDir; }',
       ],
+      ['asi-before-export', "console.log('hi')\nexport function processor(input) { return input.outputDir; }"],
       [
-        'function-expression',
-        'export const processor = function (input) { return input.files; };',
-        'export function processor(input)',
-      ],
-      [
-        'named-function-expression',
-        'export const processor = function processor(input) { return input.files; };',
-        'export function processor(input)',
-      ],
-      [
-        'decoy-comment',
-        '// function processor(input) {}\nexport const processor = (input, config = {}) => input.files;',
-        'export function processor(input)',
-      ],
-      [
-        'decoy-string',
-        'const decoy = "function processor(input) {}";\nexport const processor = (input, config = {}) => input.files;',
-        'export function processor(input)',
-      ],
-      [
-        'decoy-nested-function',
-        'export const processor = (input, config = {}) => { function processor(input) {} return input.files; };',
-        'export function processor(input)',
-      ],
-      [
-        'aliased-export-decoy',
-        'const real = (input, config = {}) => input.files;\nfunction processor(input) {}\nexport { real as processor };',
-        'export function processor(input)',
-      ],
-      [
-        'regex-decoy',
-        'const processor = (input, config = {}) => { /}/.test("}"); function processor(input) {} return input.files; };\nexport { processor };',
-        'export function processor(input)',
+        'typescript-generics',
+        'export function processor(input: Record<string, unknown>, helper?: unknown) { return (input as { outputDir: string }).outputDir; }',
       ],
     ] as const) {
       const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
@@ -248,7 +336,7 @@ describe('bundled artifact', () => {
         await writeFile(join(artifactDir, 'README.md'), `# ${name}\n`, 'utf8');
         await writeFile(join(artifactDir, 'src/index.ts'), source, 'utf8');
 
-        await expect(buildBundle({ artifactDir, dryRun: true })).rejects.toThrow(message);
+        await expect(buildBundle({ artifactDir, dryRun: true })).resolves.toMatchObject({ dryRun: true });
       } finally {
         await rm(artifactDir, { recursive: true, force: true });
       }

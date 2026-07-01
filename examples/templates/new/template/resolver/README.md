@@ -2,7 +2,7 @@
 
 __DESCRIPTION__
 
-This resolver receives all versions of the same path and folds them into one output. Use resolvers when multiple templates may touch the same file.
+This resolver merges two files at a time. It receives `{ path, config, current, next }` and returns `{ path, content }`. CyanPrint folds N conflicting candidates by calling it repeatedly in a deterministic order. Set `api: 2` in `cyan.yaml`; if your merge is order-independent, set `commutative: true`.
 
 ## Test
 
@@ -13,5 +13,5 @@ cyanprint test .
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push .
 ```

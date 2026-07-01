@@ -11,7 +11,7 @@ export function TokensPanel({ serverUser }: { serverUser?: AccountUser }) {
   return user ? (
     <>
       <div className="panel">
-        <h2>{user.handle}</h2>
+        <h2>{user.handle ?? user.login ?? 'Your account'}</h2>
         <p className="lede">Mint scoped publishing credentials for `cyanprint push`.</p>
       </div>
       <TokenForm />

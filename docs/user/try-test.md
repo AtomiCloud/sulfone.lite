@@ -2,20 +2,33 @@
 
 `cyanprint try` runs a template into a scratch output folder.
 
-`cyanprint test` runs local snapshots and writes machine-readable reports for agents and CI.
+`cyanprint test` runs local template/artifact tests and writes machine-readable reports for agents and CI.
 
 ## Template Tests
 
-Templates use answers plus snapshots:
+Templates use answers plus expected output folders:
 
 ```bash
 cyanprint test examples/templates/hello
-cyanprint test examples/templates/hello --answers examples/templates/hello/answers.json
 cyanprint test examples/templates/hello --update-snapshots
 ```
 
-By default, CyanPrint looks for `expected/README.md`, then falls back to `snapshots/basic/README.md`.
-It also auto-loads `answers.json` from the template folder when present.
+Template manifest example:
+
+```yaml
+cases:
+  - name: basic
+    answers:
+      name: Example
+    deterministicState:
+      slug: example
+    expected: expected/basic
+```
+
+`answers` and `deterministicState` may also be path strings, such as `answers: answers.json`.
+Use `deterministicState` for seeded IDs, timestamps, slugs, or other reproducible values that a template reads through `ctx.deterministic`.
+`.cyan_state.yaml` is written to real generated projects, but it is excluded from template expected-output comparisons and expected fixture updates.
+Use `validations` only for checks the expected folder cannot prove, such as running a tool, checking `.cyan_state.yaml`, or executing project commands.
 
 ## Artifact Tests
 
@@ -39,15 +52,18 @@ cases:
     config:
       parser: markdown
     validations:
-      - grep -q '# Example' README.md
-      - "! grep -q 'trailing spaces   ' README.md"
       - bun --eval 'JSON.parse(await Bun.file("package.json").text())'
 ```
 
-Resolver example:
+Resolver example (v4 two-file API). Prefer `resolverInputs` to name the layers explicitly, or use `prior`/`current`/`target` text files:
 
 ```yaml
 cases:
+  - name: merge
+    resolverInputs:
+      - { path: tests/merge/current, origin: { template: current, layer: 1 } }
+      - { path: tests/merge/target, origin: { template: target, layer: 2 } }
+    expected: tests/merge/expected
   - name: current-wins
     prior: tests/current-wins/prior.txt
     current: tests/current-wins/current.txt
@@ -57,7 +73,7 @@ cases:
       - grep -q 'user edit' output.txt
 ```
 
-Resolver folder example:
+Resolver folder example (legacy `api: 1` folder-fold, supported for compatibility):
 
 ```yaml
 cases:

@@ -190,6 +190,35 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     }
     await advanceCounter(artifact.kind, artifact.owner, artifact.name, artifact.version);
     await kv.put(artifactKey(artifact.id), JSON.stringify(artifact));
+    for (const [, ref] of artifactObjectEntries(artifact)) {
+      await kv.put(objectArtifactIndexKey(ref), artifact.id);
+    }
+  }
+
+  async function loadArtifact(id: string): Promise<ArtifactVersion | undefined> {
+    const raw = await kv.get(artifactKey(id));
+    return raw ? (JSON.parse(raw) as ArtifactVersion) : undefined;
+  }
+
+  async function findActiveArtifactByObjectRef(ref: ObjectRef): Promise<ArtifactVersion | undefined> {
+    const indexedId = await kv.get(objectArtifactIndexKey(ref));
+    if (indexedId) {
+      const indexed = await loadArtifact(indexedId);
+      if (indexed && isActiveArtifact(indexed) && artifactHasObjectRef(indexed, ref)) {
+        return indexed;
+      }
+    }
+    const { results } = await db
+      .prepare("SELECT id FROM artifacts WHERE disabled = 0 AND moderation_state = 'active' ORDER BY kind, owner, name")
+      .all<{ id: string }>();
+    for (const row of results) {
+      const artifact = await loadArtifact(row.id);
+      if (artifact && isActiveArtifact(artifact) && artifactHasObjectRef(artifact, ref)) {
+        await kv.put(objectArtifactIndexKey(ref), artifact.id);
+        return artifact;
+      }
+    }
+    return undefined;
   }
 
   return {
@@ -211,20 +240,29 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
           `INSERT INTO users (id, handle, login, admin)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
-             handle = excluded.handle,
+             handle = COALESCE(excluded.handle, users.handle),
              login = COALESCE(excluded.login, users.login),
              admin = excluded.admin`,
         )
-        .bind(user.id, user.handle, user.login ?? null, user.admin ? 1 : 0)
+        .bind(user.id, user.handle ?? null, user.login ?? null, user.admin ? 1 : 0)
         .run();
     },
     async updateUserHandle(userId, handle) {
       await ensureSeeded();
       try {
-        const result = (await db.prepare('UPDATE users SET handle = ? WHERE id = ?').bind(handle, userId).run()) as {
+        const result = (await db
+          .prepare('UPDATE users SET handle = ? WHERE id = ? AND handle IS NULL')
+          .bind(handle, userId)
+          .run()) as {
           meta: { changes: number };
         };
-        return result.meta.changes > 0 ? 'updated' : 'not_found';
+        if (result.meta.changes > 0) {
+          return 'updated';
+        }
+        const row = await db.prepare('SELECT handle FROM users WHERE id = ?').bind(userId).first<{
+          handle: string | null;
+        }>();
+        return row?.handle != null ? 'immutable' : 'not_found';
       } catch (error) {
         if (isUniqueHandleError(error)) {
           return 'duplicate';
@@ -416,10 +454,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async getActiveArtifactByObjectRef(ref) {
       await ensureSeeded();
-      const artifacts = await this.listArtifacts();
-      return artifacts.find(
-        artifact => artifact.moderationState === 'active' && !artifact.disabled && artifactHasObjectRef(artifact, ref),
-      );
+      return findActiveArtifactByObjectRef(ref);
     },
     async addArtifact(artifact) {
       await ensureSeeded();
@@ -459,8 +494,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async recordDownload(ref) {
       await ensureSeeded();
-      const artifacts = await this.listArtifacts();
-      const artifact = artifacts.find(item => isActiveArtifact(item) && artifactHasObjectRef(item, ref));
+      const artifact = await findActiveArtifactByObjectRef(ref);
       if (!artifact) {
         return undefined;
       }
@@ -685,13 +719,13 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   }
 }
 
-type UserRow = { id: string; handle: string; login?: string | null; admin: number };
+type UserRow = { id: string; handle: string | null; login?: string | null; admin: number };
 type TokenRow = { id: string; user_id: string; name: string; secret_hash: string; revoked: number };
 type AuthSessionRow = { id: string; user_id: string; expires_at: string };
 type OAuthStateRow = { id: string; return_to: string; expires_at: string };
 type AuthHandoffRow = { id: string; session: string; user_id: string; expires_at: string };
 
-function rowToUser(row: UserRow): { id: string; handle: string; login?: string; admin: boolean } {
+function rowToUser(row: UserRow): { id: string; handle: string | null; login?: string; admin: boolean } {
   return { id: row.id, handle: row.handle, login: row.login ?? undefined, admin: Boolean(row.admin) };
 }
 
@@ -735,6 +769,10 @@ function artifactKey(id: string): string {
 
 function objectMetaKey(ref: ObjectRef): string {
   return `object:${objectKey(ref)}`;
+}
+
+function objectArtifactIndexKey(ref: ObjectRef): string {
+  return `object-artifact:${ref.sha256}:${ref.key}`;
 }
 
 function uploadSessionKey(uploadId: string): string {

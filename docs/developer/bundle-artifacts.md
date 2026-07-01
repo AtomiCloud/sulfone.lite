@@ -8,29 +8,37 @@ Each artifact must include:
 - `README.md`
 - one Bun-compatible bundled runtime file named by `bundledEntry`
 
-The bundle exposes one named function based on artifact kind:
+The bundle exposes one named function based on artifact kind. Author-facing types come from `@cyanprint/sdk`; the runtime injects a helper as the second argument:
 
 ```ts
-export function processor(input) {
-  const { files } = input;
-  return files;
-}
+import type {
+  ProcessorInput,
+  ProcessorFsHelper,
+  PluginInput,
+  PluginHelper,
+  ResolverInput,
+  ResolverOutput,
+} from '@cyanprint/sdk';
 
-export function plugin(input) {
-  const { files } = input;
-  return files;
-}
-
-export function resolver(input) {
-  const sorted = [...input.files].sort(
-    (left, right) =>
-      left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
+export async function processor(input: ProcessorInput, fs: ProcessorFsHelper) {
+  const files = await fs.read();
+  await fs.write(
+    files.map(file => (file.content === undefined ? file : { ...file, content: file.content.toUpperCase() })),
   );
-  return sorted.map(file => file.content.trimEnd()).join('\n') + '\n';
+}
+
+export async function plugin(input: PluginInput, helper: PluginHelper) {
+  await helper.exec('git init');
+  const files = await helper.read();
+  await helper.write([...files, { path: 'PLUGIN.md', content: 'Generated\n' }]);
+}
+
+export async function resolver(input: ResolverInput): Promise<ResolverOutput> {
+  return { path: input.next.path, content: `${input.current.content}\n${input.next.content}` };
 }
 ```
 
-Processors and plugins receive `{ files, config }`, then return the next file map. Resolvers receive `{ files, config }`, where `files` is an array of `{ path, content, origin: { template, layer } }` entries for one output path. Resolvers fold that array and return resolved text or `{ path, content }`.
+Processors receive `(input, fs)`: `fs.read()` returns the input folder as a VFS, `fs.write(files)` writes the transformed tree to `outputDir`. Plugins receive `(input, helper)` after processor outputs have been merged, with `read()`/`write()`/`exec()`. Resolvers receive `{ path, config, current, next }` and merge two files at a time; the CLI folds N candidates by repeated calls (declare `api: 2` in `cyan.yaml`). Raw `input.inputDir`/`input.outputDir` stay available as an escape hatch.
 
 ```yaml
 cyanprint: 4

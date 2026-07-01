@@ -5,7 +5,28 @@ import { Button } from '../../components/ui/button';
 import type { AccountUser } from './token-service';
 
 export function ProfileForm({ user }: { user: AccountUser }) {
-  const [handle, setHandle] = useState(user.handle);
+  if (user.handle) {
+    return (
+      <div className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Public username</p>
+            <h2>Publishing handle</h2>
+          </div>
+        </div>
+        <dl className="facts">
+          <dt>CyanPrint username</dt>
+          <dd>{user.handle}</dd>
+        </dl>
+        <p className="field-help">Usernames are permanent and cannot be changed.</p>
+      </div>
+    );
+  }
+  return <ChooseUsernameForm />;
+}
+
+function ChooseUsernameForm() {
+  const [handle, setHandle] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
@@ -26,13 +47,12 @@ export function ProfileForm({ user }: { user: AccountUser }) {
           });
           const body = (await response.json().catch(() => ({}))) as { user?: AccountUser; error?: string };
           if (!response.ok || !body.user) {
-            throw new Error(body.error ?? 'Unable to update username.');
+            throw new Error(body.error ?? 'Unable to set username.');
           }
-          setHandle(body.user.handle);
-          setMessage('Username updated. Refreshing session...');
+          setMessage('Username set. Refreshing session...');
           window.location.reload();
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : 'Unable to update username.');
+          setError(caught instanceof Error ? caught.message : 'Unable to set username.');
         } finally {
           setPending(false);
         }
@@ -41,7 +61,7 @@ export function ProfileForm({ user }: { user: AccountUser }) {
       <div className="panel-heading">
         <div>
           <p className="eyebrow">Public username</p>
-          <h2>Publishing handle</h2>
+          <h2>Choose your username</h2>
         </div>
       </div>
       <label className="field">
@@ -57,10 +77,13 @@ export function ProfileForm({ user }: { user: AccountUser }) {
           value={handle}
         />
       </label>
-      <p className="field-help">Used as your artifact owner namespace. GitHub still handles sign-in.</p>
+      <p className="field-help">
+        Used as your artifact owner namespace. Choose carefully &mdash; this cannot be changed later. You must set a
+        username before you can publish.
+      </p>
       <div className="inline-actions">
-        <Button disabled={pending || handle === user.handle} type="submit">
-          {pending ? 'Saving...' : 'Save username'}
+        <Button disabled={pending || !handle} type="submit">
+          {pending ? 'Saving...' : 'Set username'}
         </Button>
       </div>
       {message ? <p className="form-success">{message}</p> : null}

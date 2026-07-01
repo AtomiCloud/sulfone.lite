@@ -43,6 +43,10 @@ const RawCyanManifestSchema = z
     processors: z.array(DependencyRefSchema).default([]),
     plugins: z.array(DependencyRefSchema).default([]),
     resolvers: z.array(DependencyRefSchema).default([]),
+    // Resolver runtime API version: 1 = legacy folder-fold, 2 = two-file merge.
+    api: z.union([z.literal(1), z.literal(2)]).optional(),
+    // Resolver declares its merge is commutative; enforced by `cyanprint test`.
+    commutative: z.boolean().optional(),
     presets: z.record(z.string(), z.unknown()).default({}),
     legacy: z
       .object({
@@ -65,7 +69,11 @@ export const CyanManifestSchema = RawCyanManifestSchema.transform(manifest => ({
 export type CyanManifest = z.infer<typeof CyanManifestSchema>;
 
 export type CompatibilityWarning = {
-  code: 'legacy_docker_ignored' | 'legacy_coordinator_ignored' | 'legacy_server_execution_ignored';
+  code:
+    | 'legacy_docker_ignored'
+    | 'legacy_coordinator_ignored'
+    | 'legacy_server_execution_ignored'
+    | 'post_generation_command_skipped';
   message: string;
 };
 

@@ -5,21 +5,12 @@ on:
   pull_request:
 
 jobs:
-  test:
+  build-test-push:
     runs-on: ubuntu-latest
-    env:
-      GEMFURY_READ_TOKEN: ${{ secrets.GEMFURY_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install CyanPrint from Gemfury
-        run: |
-          set -euo pipefail
-          repo_url="https://apt.fury.io/atomicloud/"
-          if [ -n "${GEMFURY_READ_TOKEN:-}" ]; then
-            repo_url="https://${GEMFURY_READ_TOKEN}@apt.fury.io/atomicloud/"
-          fi
-          printf 'deb [trusted=yes] %s /\n' "$repo_url" | sudo tee /etc/apt/sources.list.d/atomicloud-gemfury.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y cyanprint
-      - name: Test artifact
-        run: cyanprint test . --answers answers.json
+
+      - name: Build, test, and publish
+        env:
+          CYANPRINT_TOKEN: ${{ secrets.CYANPRINT_TOKEN }}
+        run: bash scripts/cyanprint-ci.sh

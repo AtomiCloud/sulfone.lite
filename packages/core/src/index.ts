@@ -9,6 +9,7 @@ export * from './sessions/temp-session';
 export * from './state/generated-state';
 export * from './testing/run-template-tests';
 export * from './testing/run-artifact-tests';
+export * from './trace/trace-project';
 export * from './trust/trust-policy';
 export * from './update/plan-update';
 export * from './util';

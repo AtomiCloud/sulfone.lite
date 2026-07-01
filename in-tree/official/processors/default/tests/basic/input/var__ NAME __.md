@@ -1,3 +1,3 @@
-# var** NAME **
+# @@ NAME @@
 
 Project: {{ PROJECT }}

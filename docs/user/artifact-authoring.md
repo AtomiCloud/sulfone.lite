@@ -46,45 +46,58 @@ resolvers:
 The `cyan.ts` script asks questions and returns pure data:
 
 ```ts
-export default async function cyan({ prompt }) {
-  const name = await prompt.text('Project name');
+export default async function cyan(prompt, ctx) {
+  const name = await prompt.text('project', 'Project name', { default: 'my-app' });
 
   return {
-    files: [
+    processors: [
       {
-        mode: 'template',
-        base: 'template',
-        glob: ['**/*'],
-        data: { name },
-        processors: [{ ref: 'cyan/default' }],
+        name: 'cyan/default',
+        files: [{ root: 'template', glob: '**/*', type: 'Template' }],
+        config: { vars: { NAME: name } },
       },
     ],
+    resolvers: [{ name: 'cyanprint/keep-user', config: { paths: ['README.md'] } }],
   };
 }
 ```
 
-Use `mode: 'copy'` for binary assets or files that should not be rendered as text. Use `mode: 'template'` when files need prompt data.
+Use `type: 'Copy'` for binary assets or files that should not be rendered as text. Use `type: 'Template'` when files need prompt data.
 
 ## Write Runtime Artifacts
 
-Processors, plugins, and resolvers use the same plain-function style:
+Each artifact imports the types it uses from `@cyanprint/sdk` (type-only — erased at bundle; the runtime injects the helper) and annotates its parameters:
 
 ```ts
-export function processor(input) {
-  return input.files;
+import type {
+  ProcessorInput,
+  ProcessorFsHelper,
+  PluginInput,
+  PluginHelper,
+  ResolverInput,
+  ResolverOutput,
+} from '@cyanprint/sdk';
+
+export async function processor(input: ProcessorInput, fs: ProcessorFsHelper) {
+  const files = await fs.read(); // VfsFile[] from inputDir
+  await fs.write(
+    files.map(file => (file.content === undefined ? file : { ...file, content: file.content.toUpperCase() })),
+  );
 }
 
-export function plugin(input) {
-  return input.files;
+export async function plugin(input: PluginInput, helper: PluginHelper) {
+  await helper.exec('git init'); // runs in outputDir; throws on non-zero exit
+  const files = await helper.read();
+  await helper.write([...files, { path: 'PLUGIN.md', content: 'Generated\n' }]);
 }
 
-export function resolver(input) {
-  const latest = input.files.at(-1);
-  return latest?.content ?? '';
+export async function resolver(input: ResolverInput): Promise<ResolverOutput> {
+  // two files at a time: input is { path, config, current, next }
+  return { path: input.next.path, content: `${input.current.content}\n${input.next.content}` };
 }
 ```
 
-Processors and plugins receive `{ files, config }` and return a file map. Resolvers receive `{ files, config }`, where `files` is every version of the same path, then return the folded result.
+Processors receive `(input, fs)` — `fs.read()` returns a VFS, `fs.write(files)` emits it (binary is preserved via `bytesBase64`). Plugins receive `(input, helper)` with `read()`/`write()`/`exec()`. Resolvers receive `{ path, config, current, next }` and merge two files at a time; CyanPrint folds N candidates by repeated calls (set `api: 2` in `cyan.yaml`). The raw `input.inputDir`/`input.outputDir` remain available as an escape hatch.
 
 ## Test
 
@@ -96,7 +109,7 @@ cyanprint test my-processor
 cyanprint test my-resolver
 ```
 
-Update snapshots only when the expected output intentionally changes:
+Update expected output fixtures only when the expected output intentionally changes. The command still uses the `--update-snapshots` flag:
 
 ```bash
 cyanprint test my-template --update-snapshots
@@ -107,7 +120,7 @@ cyanprint test my-template --update-snapshots
 Run tests before publishing. Push validates the manifest, bundle, dependencies, object hashes, and upload refs:
 
 ```bash
-cyanprint push my-template --registry https://registry.cyanprint.dev --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push my-template --registry https://registry.cyanprint.dev
 ```
 
 The client uploads `cyan.yaml`, `README.md`, bundled script, and optional template archive as separate R2 objects. The registry finalizes the upload and assigns the next integer version in D1.

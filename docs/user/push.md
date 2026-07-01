@@ -21,10 +21,10 @@ Templates and template groups are folder-first. Their archive is extracted into 
 ## Publish Flow
 
 ```bash
-cyanprint push in-tree/official/processors/default --registry http://127.0.0.1:8787 --token "$CYANPRINT_TOKEN"
-cyanprint push examples/artifacts/plugin-footer --registry http://127.0.0.1:8787 --token "$CYANPRINT_TOKEN"
-cyanprint push examples/artifacts/resolver-keep-user --registry http://127.0.0.1:8787 --token "$CYANPRINT_TOKEN"
-cyanprint push in-tree/official/templates/new --registry http://127.0.0.1:8787 --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push in-tree/official/processors/default --registry http://127.0.0.1:8787
+CYANPRINT_TOKEN="<token>" cyanprint push examples/artifacts/plugin-footer --registry http://127.0.0.1:8787
+CYANPRINT_TOKEN="<token>" cyanprint push examples/artifacts/resolver-keep-user --registry http://127.0.0.1:8787
+CYANPRINT_TOKEN="<token>" cyanprint push in-tree/official/templates/new --registry http://127.0.0.1:8787
 ```
 
 Use the same command for create, update, and republish. The server assigns the next integer version during finalize, so authors never edit a version field.
@@ -36,6 +36,6 @@ Every artifact should include:
 - `cyan.yaml` for identity, kind, bundled entry, and dependency refs.
 - `README.md` for what it does, inputs, outputs, and examples.
 - `cyan.test.yaml` for artifact tests when the artifact is a processor, plugin, or resolver.
-- Snapshot folders for templates and template groups.
+- Expected output fixtures for templates and template groups.
 
 Dependencies should explain why they exist. A template that declares `processors: [cyan/default]` should say that generated files are rendered and normalized after generation. A template that declares a resolver should say which update conflicts it handles.

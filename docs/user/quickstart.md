@@ -40,7 +40,7 @@ cyanprint update my-project --template cyan/new
 Publishers sign in through the web portal, mint an API token, then publish with:
 
 ```bash
-cyanprint push my-template --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push my-template
 ```
 
 ## Artifact Roles

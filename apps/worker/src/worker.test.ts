@@ -239,7 +239,8 @@ function createD1Statement(db: Database, sql: string) {
       return { results: db.query(sql).all(...bindings) as T[] };
     },
     async run(): Promise<unknown> {
-      return db.query(sql).run(...bindings);
+      const result = db.query(sql).run(...bindings);
+      return { meta: { changes: result.changes } };
     },
   };
 }
@@ -306,7 +307,7 @@ describe('tokens user profile session admin permission artifact registry batch r
       const session = ((await consumed.json()) as { session: string }).session;
       const me = await app.request('/me', { headers: { 'x-cyanprint-session': session } }, env);
       expect(await me.json()).toEqual({
-        user: { id: 'github:12345', handle: 'octouser', login: 'octouser', admin: true },
+        user: { id: 'github:12345', handle: null, login: 'octouser', admin: true },
       });
       const tokenResponse = await app.request('/tokens', {
         method: 'POST',
@@ -330,10 +331,10 @@ describe('tokens user profile session admin permission artifact registry batch r
     });
   });
 
-  test('GitHub users can choose a CyanPrint handle that survives re-login', async () => {
+  test('GitHub users choose a CyanPrint handle once and it survives re-login', async () => {
     await withMockGitHubOAuth(async env => {
       const firstSession = await githubSession(env);
-      const renamed = await app.request(
+      const chosen = await app.request(
         '/me',
         {
           method: 'PATCH',
@@ -342,10 +343,22 @@ describe('tokens user profile session admin permission artifact registry batch r
         },
         env,
       );
-      expect(renamed.status).toBe(200);
-      expect(await renamed.json()).toEqual({
+      expect(chosen.status).toBe(200);
+      expect(await chosen.json()).toEqual({
         user: { id: 'github:12345', handle: 'cyan-admin', login: 'octouser', admin: true },
       });
+
+      const rename = await app.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': firstSession },
+          body: JSON.stringify({ handle: 'cyan-rename' }),
+        },
+        env,
+      );
+      expect(rename.status).toBe(409);
+      expect(await rename.json()).toMatchObject({ code: 'handle_immutable' });
 
       const tokenResponse = await app.request('/tokens', {
         method: 'POST',
@@ -364,34 +377,126 @@ describe('tokens user profile session admin permission artifact registry batch r
     });
   });
 
-  test('profile handles are validated and unique', async () => {
-    const session = await localSession('user_member');
+  test('profile handles are validated, unique, and immutable once set', async () => {
+    const memberSession = await localSession('user_member');
     const invalid = await app.request('/me', {
       method: 'PATCH',
-      headers: { 'x-cyanprint-session': session },
+      headers: { 'x-cyanprint-session': memberSession },
       body: JSON.stringify({ handle: 'no' }),
     });
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({ code: 'invalid_handle' });
 
-    const duplicate = await app.request('/me', {
+    const alreadySet = await app.request('/me', {
       method: 'PATCH',
-      headers: { 'x-cyanprint-session': session },
-      body: JSON.stringify({ handle: 'local' }),
+      headers: { 'x-cyanprint-session': memberSession },
+      body: JSON.stringify({ handle: 'member-renamed' }),
     });
-    expect(duplicate.status).toBe(409);
-    expect(await duplicate.json()).toMatchObject({ code: 'handle_taken' });
+    expect(alreadySet.status).toBe(409);
+    expect(await alreadySet.json()).toMatchObject({ code: 'handle_immutable' });
+
+    await withMockGitHubOAuth(async env => {
+      const session = await githubSession(env);
+      const duplicate = await app.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': session },
+          body: JSON.stringify({ handle: 'local' }),
+        },
+        env,
+      );
+      expect(duplicate.status).toBe(409);
+      expect(await duplicate.json()).toMatchObject({ code: 'handle_taken' });
+
+      const stillUnset = await app.request('/me', { headers: { 'x-cyanprint-session': session } }, env);
+      expect(await stillUnset.json()).toMatchObject({ user: { handle: null } });
+    });
   });
 
-  test('D1-backed profile handle updates return duplicate only for unique handle conflicts', async () => {
+  test('publishing is blocked until a GitHub user chooses a handle', async () => {
+    await withMockGitHubOAuth(async () => {
+      const env = { ...githubOAuthEnv, CYANPRINT_GITHUB_ADMIN_LOGINS: '' };
+      const session = await githubSession(env);
+      const tokenResponse = await app.request(
+        '/tokens',
+        {
+          method: 'POST',
+          headers: { 'x-cyanprint-session': session },
+          body: JSON.stringify({ name: 'handle-gate' }),
+        },
+        env,
+      );
+      const token = ((await tokenResponse.json()) as { token: string }).token;
+      const manifest = 'cyanprint: 4\nkind: template\nowner: octo-owner\nname: gated\nbundledEntry: cyan.ts\n';
+      const bundle = 'export default async () => ({});\n';
+      const startBody = JSON.stringify({
+        kind: 'template',
+        owner: 'octo-owner',
+        name: 'gated',
+        objects: {
+          manifest: { sha256: sha256(manifest), size: byteLength(manifest) },
+          bundle: { sha256: sha256(bundle), size: byteLength(bundle) },
+        },
+      });
+
+      const blocked = await app.request(
+        '/uploads/start',
+        { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: startBody },
+        env,
+      );
+      expect(blocked.status).toBe(403);
+      expect(await blocked.json()).toMatchObject({ code: 'owner_required' });
+
+      const chosen = await app.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': session },
+          body: JSON.stringify({ handle: 'octo-owner' }),
+        },
+        env,
+      );
+      expect(chosen.status).toBe(200);
+
+      const allowed = await app.request(
+        '/uploads/start',
+        { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: startBody },
+        env,
+      );
+      expect(allowed.status).toBe(200);
+    });
+  });
+
+  test('listing users requires an admin API token', async () => {
+    const anonymous = await app.request('/users');
+    expect(anonymous.status).toBe(403);
+
+    const memberSession = await localSession('user_member');
+    const sessionOnly = await app.request('/users', { headers: { 'x-cyanprint-session': memberSession } });
+    expect(sessionOnly.status).toBe(403);
+
+    const memberToken = (await localToken('member-users', 'user_member')).token;
+    const nonAdmin = await app.request('/users', { headers: { authorization: `Bearer ${memberToken}` } });
+    expect(nonAdmin.status).toBe(403);
+
+    const adminToken = (await localToken('admin-users')).token;
+    const admin = await app.request('/users', { headers: { authorization: `Bearer ${adminToken}` } });
+    expect(admin.status).toBe(200);
+    const body = (await admin.json()) as { users: Array<{ id: string }> };
+    expect(body.users.some(user => user.id === 'user_member')).toBe(true);
+  });
+
+  test('D1-backed profile handles are set exactly once and reject duplicates', async () => {
     const bindings = await createTestCloudflareBindings();
     try {
       const storage = createCloudflareBindingStorage(bindings);
-      await storage.upsertUser({ id: 'user_a', handle: 'publisher-a', admin: false });
+      await storage.upsertUser({ id: 'user_a', handle: null, admin: false });
       await storage.upsertUser({ id: 'user_b', handle: 'publisher-b', admin: false });
       await storage.createSession('user_a', 'cps_d1_a');
+      const d1App = createApp(storage);
 
-      const duplicate = await createApp(storage).request(
+      const duplicate = await d1App.request(
         '/me',
         {
           method: 'PATCH',
@@ -402,6 +507,31 @@ describe('tokens user profile session admin permission artifact registry batch r
       );
       expect(duplicate.status).toBe(409);
       expect(await duplicate.json()).toMatchObject({ code: 'handle_taken' });
+      expect(await storage.getUser('user_a')).toMatchObject({ handle: null });
+
+      const chosen = await d1App.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': 'cps_d1_a' },
+          body: JSON.stringify({ handle: 'publisher-a' }),
+        },
+        bindings,
+      );
+      expect(chosen.status).toBe(200);
+      expect(await chosen.json()).toMatchObject({ user: { handle: 'publisher-a' } });
+
+      const rename = await d1App.request(
+        '/me',
+        {
+          method: 'PATCH',
+          headers: { 'x-cyanprint-session': 'cps_d1_a' },
+          body: JSON.stringify({ handle: 'publisher-c' }),
+        },
+        bindings,
+      );
+      expect(rename.status).toBe(409);
+      expect(await rename.json()).toMatchObject({ code: 'handle_immutable' });
       expect(await storage.getUser('user_a')).toMatchObject({ handle: 'publisher-a' });
     } finally {
       bindings.close();
@@ -803,7 +933,7 @@ describe('tokens user profile session admin permission artifact registry batch r
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: tokened\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const object = {
@@ -894,7 +1024,7 @@ describe('tokens user profile session admin permission artifact registry batch r
             '',
           ].join('\n'),
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const object = {
@@ -938,7 +1068,7 @@ describe('tokens user profile session admin permission artifact registry batch r
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: undeclared-pin\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const undeclaredPinObject = {
@@ -1424,7 +1554,7 @@ describe('tokens user profile session admin permission artifact registry batch r
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: counted\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const object = {
@@ -1630,7 +1760,7 @@ describe('tokens user profile session admin permission artifact registry batch r
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: different\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const object = {
@@ -1724,7 +1854,7 @@ describe('tokens user profile session admin permission artifact registry batch r
           path: 'cyan.yaml',
           content: 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: spoof\nbundledEntry: cyan.ts\n',
         },
-        { path: 'cyan.ts', content: 'export default async () => ({ files: {} });\n' },
+        { path: 'cyan.ts', content: 'export default async () => ({});\n' },
       ],
     });
     const object = {

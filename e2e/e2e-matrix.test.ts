@@ -50,8 +50,10 @@ const caseDetails: Record<number, CaseDetail> = {
     fixtures: 'same-path temp fixtures, template-resolver-1, template-resolver-2',
   },
   10: {
-    command: 'cyan create cyanprint/basic-group --answers examples/template-groups/basic/answers.json',
-    fixtures: 'examples/template-groups/basic child preset answers',
+    command:
+      'cyan create cyanprint/basic-group --answers examples/template-groups/basic/answers.json + runTemplateTest(<inline deterministicState>) + updateProject(<prior deterministicState>)',
+    fixtures:
+      'examples/template-groups/basic child preset answers; core inline deterministic state and update reuse fixtures',
   },
   11: {
     command: 'createProject(<multiple scoped processors fixture>)',
@@ -94,32 +96,34 @@ const caseDetails: Record<number, CaseDetail> = {
     fixtures: 'examples/templates/with-artifacts with processor/plugin/resolver dependencies',
   },
   21: {
-    command: 'cyan test examples/artifacts/processor-uppercase',
+    command: 'cyanprint test examples/artifacts/processor-uppercase',
     fixtures: 'examples/artifacts/processor-uppercase/tests/basic',
   },
   22: {
-    command: 'cyan test examples/artifacts/processor-default',
-    fixtures: 'examples/artifacts/processor-default/cyan.test.yaml commands',
+    command: 'cyanprint test examples/artifacts/processor-default',
+    fixtures: 'examples/artifacts/processor-default/cyan.test.yaml validations',
   },
   23: {
-    command: 'cyan test examples/artifacts/plugin-footer',
+    command: 'cyanprint test examples/artifacts/plugin-footer',
     fixtures: 'examples/artifacts/plugin-footer/tests/basic',
   },
   24: {
-    command: 'cyan test examples/artifacts/plugin-footer',
-    fixtures: 'examples/artifacts/plugin-footer/cyan.test.yaml commands',
+    command: 'cyanprint test examples/artifacts/plugin-footer',
+    fixtures: 'examples/artifacts/plugin-footer/cyan.test.yaml validations',
   },
   25: {
-    command: 'cyan test examples/artifacts/resolver-keep-user',
+    command: 'cyanprint test examples/artifacts/resolver-keep-user',
     fixtures: 'examples/artifacts/resolver-keep-user/tests/current-wins and folder-current-wins',
   },
   26: {
-    command: 'cyan test examples/templates/with-artifacts --answers examples/templates/with-artifacts/answers.json',
+    command:
+      'cyanprint test examples/templates/with-artifacts --answers examples/templates/with-artifacts/answers.json',
     fixtures: 'examples/templates/with-artifacts/expected/basic',
   },
   27: {
-    command: 'cyan test examples/templates/with-artifacts --answers examples/templates/with-artifacts/answers.json',
-    fixtures: 'examples/templates/with-artifacts/cyan.test.yaml commands',
+    command:
+      'cyanprint test examples/templates/with-artifacts --answers examples/templates/with-artifacts/answers.json',
+    fixtures: 'examples/templates/with-artifacts/cyan.test.yaml validations',
   },
   28: {
     command: 'cyan push examples/templates/{new,workspace,nix,with-artifacts} --registry <local-worker>',

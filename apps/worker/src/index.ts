@@ -478,7 +478,7 @@ function isEffectiveAdmin(user: RegistryUser | undefined, env: WorkerBindings | 
   if (!user?.admin) {
     return false;
   }
-  const login = (user.login ?? user.handle).toLowerCase();
+  const login = (user.login ?? user.handle ?? '').toLowerCase();
   return !user.id.startsWith('github:') || githubAdminLogins(env ?? {}).has(login);
 }
 
@@ -498,20 +498,10 @@ function validateHandle(value: unknown): string | undefined {
   return /^[a-z0-9][a-z0-9-]{2,38}$/.test(handle) ? handle : undefined;
 }
 
-async function availableHandle(storage: RegistryStorage, preferred: string, userId: string): Promise<string> {
-  const users = await storage.listUsers();
-  if (!users.some(user => user.id !== userId && user.handle === preferred)) {
-    return preferred;
-  }
-  const suffix = userId.replace(/^github:/, '').slice(-8);
-  const fallback = `${preferred.slice(0, Math.max(1, 39 - suffix.length - 1))}-${suffix}`;
-  return users.some(user => user.id !== userId && user.handle === fallback) ? `github-${suffix}` : fallback;
-}
-
 function publicUser(user: RegistryUser, env?: WorkerBindings) {
   return {
     id: user.id,
-    handle: user.handle,
+    handle: user.handle ?? null,
     login: user.login,
     admin: isEffectiveAdmin(user, env),
   };
@@ -624,6 +614,15 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
       );
     }
     const updated = await storage.updateUserHandle(user.id, handle);
+    if (updated === 'immutable') {
+      return problemResponse(
+        c,
+        409,
+        'validation',
+        'handle_immutable',
+        'Your CyanPrint username is already set and cannot be changed.',
+      );
+    }
     if (updated === 'duplicate') {
       return problemResponse(c, 409, 'validation', 'handle_taken', 'That CyanPrint username is already taken.');
     }
@@ -636,9 +635,8 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
 
   app.get('/users', async c => {
     const storage = resolveStorage(source, c);
-    const user = await requireUser(storage, c);
-    if (!user) {
-      return problemResponse(c, 401, 'auth', 'missing_session', 'A local authenticated session is required.');
+    if (!(await requireAdminToken(storage, c))) {
+      return problemResponse(c, 403, 'permission', 'admin_required', 'An admin API token is required to list users.');
     }
     const users = await storage.listUsers();
     return c.json({ users: users.map(user => publicUser(user, c.env)) });
@@ -701,9 +699,8 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
     const id = `github:${githubUser.id}`;
     const login = normalizeGitHubHandle(githubUser.login);
     const existing = await storage.getUser(id);
-    const handle = existing?.handle ?? (await availableHandle(storage, login, id));
     const admin = githubAdminLogins(c.env ?? {}).has(login);
-    const user = { id, handle, login, admin };
+    const user = { id, handle: existing?.handle ?? null, login, admin };
     await storage.upsertUser(user);
     const session = randomToken('cps');
     await storage.createSession(user.id, session);
