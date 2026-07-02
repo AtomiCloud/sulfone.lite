@@ -35,7 +35,7 @@ jobs:
       CYANPRINT_GITHUB_CLIENT_SECRET: ${{ secrets.CYANPRINT_GITHUB_CLIENT_SECRET }}
       CYANPRINT_SKIP_RESOURCE_BOOTSTRAP: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: AtomiCloud/actions.setup-nix@v3
       - run: nix develop .#ci -c bun install --frozen-lockfile
       - run: nix develop .#ci -c bun run deploy:release

@@ -9,7 +9,7 @@ jobs:
       - nscloud-cache-size-50gb
       - nscloud-cache-tag-atomi-nix-store-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: AtomiCloud/actions.setup-nix@v3
       - name: Run pre-commit
         run: nix develop .#ci -c ./scripts/ci/pre-commit.sh
