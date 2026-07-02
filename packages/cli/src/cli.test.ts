@@ -386,6 +386,49 @@ describe('inquirer prompt adapter', () => {
       text: 'text answer',
     });
   });
+
+  test('renders placeholders, descriptions, and per-option descriptions', async () => {
+    const calls: Array<{ kind: string; config: { message: string; choices?: unknown } }> = [];
+    const prompts = {
+      input: async config => {
+        calls.push({ kind: 'text', config });
+        return 'x';
+      },
+      confirm: async () => true,
+      select: async config => {
+        calls.push({ kind: 'select', config });
+        return 'a';
+      },
+      checkbox: async () => [],
+      number: async () => 1,
+    } as InquirerPrompts;
+    const adapter = inquirerPromptAdapter({}, prompts);
+
+    await adapter.ask({
+      kind: 'text',
+      name: 'url',
+      message: 'What is your URL?',
+      placeholder: 'https://example.com',
+      description: 'Used as the homepage link in the generated README.',
+    });
+    await adapter.ask({
+      kind: 'select',
+      name: 'flavor',
+      message: 'Pick a flavor',
+      options: [
+        { value: 'a', label: 'Flavor A', description: 'The classic.' },
+        { value: 'b', description: 'The bold one.' },
+      ],
+    });
+
+    expect(calls[0]?.config.message).toContain('What is your URL?');
+    expect(calls[0]?.config.message).toContain('e.g. https://example.com');
+    expect(calls[0]?.config.message).toContain('Used as the homepage link');
+    expect(calls[1]?.config.choices).toMatchObject([
+      { name: 'Flavor A', value: 'a', description: 'The classic.' },
+      { name: 'b', value: 'b', description: 'The bold one.' },
+    ]);
+  });
 });
 
 describe('interactive create wraps headless core', () => {

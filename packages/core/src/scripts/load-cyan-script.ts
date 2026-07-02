@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
 import type { Answers, CyanOutput, CyanScript, PromptAdapter, PromptRequest, VfsFile } from '@cyanprint/contracts';
-import { CyanError, makePromptContext, problem } from '@cyanprint/contracts';
+import { CyanError, makePromptContext, problem, promptOptionValue } from '@cyanprint/contracts';
 import { withTempSession } from '../sessions/temp-session';
 import { comparePaths, safeJoin } from '../util';
 
@@ -56,7 +56,7 @@ export function answersPromptAdapter(answers: Answers, interactive = false): Pro
             }),
           );
         }
-        if (request.kind === 'select' && !request.options.includes(String(parsed))) {
+        if (request.kind === 'select' && !request.options.map(promptOptionValue).includes(String(parsed))) {
           throw new CyanError(
             problem('validation', 'invalid_interactive_select', `Invalid select answer for ${request.name}`, {
               request,
@@ -66,7 +66,8 @@ export function answersPromptAdapter(answers: Answers, interactive = false): Pro
         }
         if (request.kind === 'multiselect') {
           const values = parsed as string[];
-          const invalid = values.filter(item => !request.options.includes(item));
+          const optionValues = request.options.map(promptOptionValue);
+          const invalid = values.filter(item => !optionValues.includes(item));
           if (invalid.length > 0) {
             throw new CyanError(
               problem(
