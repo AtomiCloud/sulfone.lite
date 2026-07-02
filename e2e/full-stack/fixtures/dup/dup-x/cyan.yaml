@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: dup-x
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/dup-leaf

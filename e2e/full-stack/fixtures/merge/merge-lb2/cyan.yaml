@@ -1,0 +1,11 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: merge-lb2
+bundledEntry: cyan.ts
+
+processors:
+  - cyan/default
+
+resolvers:
+  - cyanprint/merge-b

@@ -1,0 +1,6 @@
+cyanprint: 4
+kind: resolver
+owner: cyanprint
+name: merge-b
+entry: src/index.ts
+bundledEntry: dist/index.js

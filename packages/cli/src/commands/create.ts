@@ -3,7 +3,7 @@ import type { PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
-import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
+import { info, kv, pathLabel, printJson, printSection, progressLine, success } from '../ui';
 
 type CliRuntime = {
   promptAdapter?: PromptAdapter;
@@ -44,6 +44,7 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
     json,
     localFallback: !resolvedTemplate.registryHydrated,
     promptAdapter: effectiveHeadless ? undefined : promptAdapter,
+    onProgress: json || runtime.silent ? undefined : event => console.log(progressLine(event)),
   });
   if (json) {
     printJson({ ...result, cacheHydrated: resolvedTemplate.cacheHydrated });

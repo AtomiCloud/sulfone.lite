@@ -1,4 +1,5 @@
-import type { Answers, PromptAdapter } from './runtime';
+import { CyanError, problem } from './errors';
+import type { Answers, PromptAdapter, PromptRequest, PromptValidator } from './runtime';
 
 export type CyanFileGlob = {
   glob?: string;
@@ -10,11 +11,27 @@ export type CyanFileGlob = {
 };
 
 export type CyanPrompter = {
-  text(name: string, message: string, options?: { default?: string }): Promise<string>;
+  text(
+    name: string,
+    message: string,
+    options?: { default?: string; validate?: (value: string) => boolean | string },
+  ): Promise<string>;
   confirm(name: string, message: string, options?: { default?: boolean }): Promise<boolean>;
-  select(name: string, message: string, options: { options: string[]; default?: string }): Promise<string>;
-  multiselect(name: string, message: string, options: { options: string[]; default?: string[] }): Promise<string[]>;
-  number(name: string, message: string, options?: { default?: number }): Promise<number>;
+  select(
+    name: string,
+    message: string,
+    options: { options: string[]; default?: string; validate?: (value: string) => boolean | string },
+  ): Promise<string>;
+  multiselect(
+    name: string,
+    message: string,
+    options: { options: string[]; default?: string[]; validate?: (value: string[]) => boolean | string },
+  ): Promise<string[]>;
+  number(
+    name: string,
+    message: string,
+    options?: { default?: number; validate?: (value: number) => boolean | string },
+  ): Promise<number>;
 };
 
 export type CyanPromptContext = {
@@ -60,27 +77,54 @@ export function makePromptContext(
   deterministicState: Record<string, unknown>,
   runtime: { sessionPath?: string } = {},
 ): CyanPromptContext {
+  // Interactive adapters honor request.validate by re-prompting; this wrapper is the
+  // backstop that also validates reused/headless answers, failing the run loudly.
+  const ask = async <T>(request: PromptRequest): Promise<T> => {
+    const value = await adapter.ask<T>(request);
+    assertValidAnswer(request, value);
+    return value;
+  };
   return {
     answers,
     runtime: {
       sessionPath: runtime.sessionPath ?? '',
     },
     prompt: {
-      text: (name, message, options) => adapter.ask<string>({ kind: 'text', name, message, default: options?.default }),
-      confirm: (name, message, options) =>
-        adapter.ask<boolean>({ kind: 'confirm', name, message, default: options?.default }),
+      text: (name, message, options) =>
+        ask<string>({
+          kind: 'text',
+          name,
+          message,
+          default: options?.default,
+          validate: options?.validate as PromptValidator | undefined,
+        }),
+      confirm: (name, message, options) => ask<boolean>({ kind: 'confirm', name, message, default: options?.default }),
       select: (name, message, options) =>
-        adapter.ask<string>({ kind: 'select', name, message, options: options.options, default: options.default }),
+        ask<string>({
+          kind: 'select',
+          name,
+          message,
+          options: options.options,
+          default: options.default,
+          validate: options.validate as PromptValidator | undefined,
+        }),
       multiselect: (name, message, options) =>
-        adapter.ask<string[]>({
+        ask<string[]>({
           kind: 'multiselect',
           name,
           message,
           options: options.options,
           default: options.default,
+          validate: options.validate as PromptValidator | undefined,
         }),
       number: (name, message, options) =>
-        adapter.ask<number>({ kind: 'number', name, message, default: options?.default }),
+        ask<number>({
+          kind: 'number',
+          name,
+          message,
+          default: options?.default,
+          validate: options?.validate as PromptValidator | undefined,
+        }),
     },
     deterministic: {
       get: key => deterministicState[key] as never,
@@ -89,4 +133,22 @@ export function makePromptContext(
       },
     },
   };
+}
+
+function assertValidAnswer(request: PromptRequest, value: unknown): void {
+  if (!request.validate) {
+    return;
+  }
+  const result = request.validate(value);
+  if (result === true) {
+    return;
+  }
+  throw new CyanError(
+    problem(
+      'validation',
+      'invalid_answer',
+      typeof result === 'string' ? result : `Invalid answer for ${request.name}: ${String(value)}`,
+      { name: request.name },
+    ),
+  );
 }

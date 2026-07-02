@@ -36,3 +36,12 @@ export function printSection(title: string, rows: string[]): void {
     console.log(`  ${row}`);
   }
 }
+
+/** One live line per generation step: templates flush left, their artifacts indented. */
+export function progressLine(event: { kind: string; ref: string; detail?: string }): string {
+  if (event.kind === 'template') {
+    return `${chalk.cyan('▸')} template ${pathLabel(event.ref)}`;
+  }
+  const suffix = event.kind === 'resolver' && event.detail ? chalk.dim(` (${event.detail})`) : '';
+  return `  ${chalk.dim('•')} ${event.kind} ${event.ref}${suffix}`;
+}

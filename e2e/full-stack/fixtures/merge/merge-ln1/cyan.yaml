@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: merge-ln1
+bundledEntry: cyan.ts
+
+processors:
+  - cyan/default

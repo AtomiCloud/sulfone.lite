@@ -25,6 +25,17 @@ import { executeCyanScript, globTemplateFiles } from '../scripts/load-cyan-scrip
 import { buildGeneratedState, writeGeneratedState } from '../state/generated-state';
 import { comparePaths, safeJoin, sha256, writeText } from '../util';
 
+/**
+ * A generation step, emitted as it starts: which template is generating, which
+ * processor/plugin is running, which resolver is merging (detail = path), or which
+ * post-generation command is executing.
+ */
+export type GenerationProgressEvent = {
+  kind: 'template' | 'processor' | 'plugin' | 'resolver' | 'command';
+  ref: string;
+  detail?: string;
+};
+
 export type CreateProjectOptions = {
   template: string;
   outDir: string;
@@ -35,6 +46,7 @@ export type CreateProjectOptions = {
   localFallback?: boolean;
   promptAdapter?: PromptAdapter;
   trace?: TraceCollector;
+  onProgress?: (event: GenerationProgressEvent) => void;
 };
 
 export type CreateProjectResult = {
@@ -124,6 +136,7 @@ type GenerationContext = {
   // Feature 3: provenance collector + the current template's trace node (both optional).
   trace?: TraceCollector;
   traceNode?: { children: TraceNode[] };
+  onProgress?: (event: GenerationProgressEvent) => void;
 };
 
 type GeneratedTemplate = {
@@ -151,6 +164,7 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
     seenTemplateRefs: new Set(),
     trace: options.trace,
     traceNode: options.trace?.root,
+    onProgress: options.onProgress,
   };
   const generated = await generateTemplate(options.template, context, new Set());
   const { manifest, files } = generated;
@@ -164,6 +178,7 @@ export async function createProject(options: CreateProjectOptions): Promise<Crea
 
   let commandFailure: CyanError | undefined;
   for (const command of generated.commands) {
+    options.onProgress?.({ kind: 'command', ref: [command.command, ...(command.args ?? [])].join(' ') });
     const { runPostGenerationCommand } = await import('../commands/post-generation-command');
     const result = await runPostGenerationCommand({ ...command, cwd: options.outDir });
     if (!result.allowed) {
@@ -271,6 +286,8 @@ async function generateTemplateLayers(
   context: GenerationContext,
   stack: Set<string>,
 ): Promise<GeneratedTemplate> {
+  context.onProgress?.({ kind: 'template', ref: `${manifest.owner}/${manifest.name}` });
+
   // Feature 3: record this template's node in the trace tree, and make children nest under it.
   let traceNode: TraceNode | undefined;
   if (context.trace) {
@@ -410,6 +427,11 @@ async function generateTemplateLayers(
     await resolveArtifact(resolver);
   }
   for (const processor of cyanProcessors) {
+    context.onProgress?.({
+      kind: 'processor',
+      ref: `${processor.owner}/${processor.name}`,
+      detail: `${manifest.owner}/${manifest.name}`,
+    });
     const bundle = await resolveArtifact(processor);
     const processorOutput = await invokeProcessorForUse(
       bundle,
@@ -436,6 +458,11 @@ async function generateTemplateLayers(
     artifactUses.processors.push(normalizeArtifactUse(processor, manifest.owner));
   }
   for (const plugin of cyanPlugins) {
+    context.onProgress?.({
+      kind: 'plugin',
+      ref: `${plugin.owner}/${plugin.name}`,
+      detail: `${manifest.owner}/${manifest.name}`,
+    });
     const bundle = await resolveArtifact(plugin);
     ownFiles = await invokePluginForUse(bundle, ownFiles, plugin, templateDir, artifactPipelineState);
     artifactUses.plugins.push(normalizeArtifactUse(plugin, manifest.owner));
@@ -776,6 +803,7 @@ async function mergeWithCreateResolver(
   if (!bundle) {
     return { file: target, merged: false, reason: 'resolver_missing_bundle' };
   }
+  context.onProgress?.({ kind: 'resolver', ref: `${resolver.owner}/${resolver.name}`, detail: target.path });
   const content = await invokeResolver(bundle, {
     files: resolverInputs,
     config: { ...(isRecord(resolver.config) ? resolver.config : {}), path: target.path },

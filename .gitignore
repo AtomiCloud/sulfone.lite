@@ -49,3 +49,7 @@ dist/
 #### source: b304ab1c-173d-4650-a0d9-93d5d67e2d3a
 Thumbs.db
 desktop.ini
+
+# local playground outputs at the repo root
+/.cyan_state.yaml
+/hello/

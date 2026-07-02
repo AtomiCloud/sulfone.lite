@@ -30,6 +30,14 @@ Templates compose child templates (declared in `cyan.yaml` `templates:` or retur
 - **Each template appears once.** A template (`owner/name`, version ignored) may appear only once in the whole composition; a second occurrence anywhere is an error. Processors, plugins, and resolvers may be shared freely.
 - **Same-path files merge.** When two templates emit the same path, a resolver both sides declare merges them; otherwise the later layer wins and a conflict is recorded.
 
+## Progress
+
+`create`, `try`, and `update` print each generation step live — the template being generated and every processor, plugin, resolver, and post-generation command as it starts (suppressed with `--json`).
+
+## Prompt validation
+
+Template authors can attach a `validate` function to `text`, `select`, `multiselect`, and `number` prompts (return `true` or an error message). Interactive runs re-prompt until the answer passes; headless answers that fail validation abort the run with the message.
+
 ## Trace
 
 To see which template contributed each file — and the diff between a template's isolated output and the final merged result — run:
@@ -39,3 +47,10 @@ cyanprint trace examples/template-groups/basic --headless --answers examples/tem
 ```
 
 `--json` prints the machine-readable report; generation happens in a throwaway temp directory.
+
+Trace also accepts a **generated project** directory: it reuses the answers and deterministic state recorded in `.cyan_state.yaml` so the trace reflects exactly what produced the project. The template resolves from the recorded ref, or pass `--template` to override (e.g. for projects generated from a local path):
+
+```bash
+cyanprint trace my-project --headless
+cyanprint trace my-project --template ./templates/my-template --headless
+```

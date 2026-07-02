@@ -13,7 +13,7 @@ for (const row of rows) {
   }
 }
 const missing: number[] = [];
-for (let id = 1; id <= 216; id += 1) {
+for (let id = 1; id <= 219; id += 1) {
   if (!counts.has(id)) {
     missing.push(id);
   }
@@ -28,13 +28,13 @@ const duplicates = [...counts.entries()].filter(([, count]) => count !== 1);
 if (duplicates.length > 0) {
   throw new Error(`FR coverage matrix has duplicate rows: ${duplicates.map(([id]) => `FR${id}`).join(', ')}`);
 }
-const extras = [...counts.keys()].filter(id => id < 1 || id > 216);
+const extras = [...counts.keys()].filter(id => id < 1 || id > 219);
 if (extras.length > 0) {
   throw new Error(`FR coverage matrix has out-of-range rows: ${extras.map(id => `FR${id}`).join(', ')}`);
 }
 if (invalid.length > 0) {
   throw new Error(`FR coverage matrix has non-implemented statuses: ${invalid.join(', ')}`);
 }
-console.log(JSON.stringify({ status: 'done', range: 'FR1-FR216', missing }));
+console.log(JSON.stringify({ status: 'done', range: 'FR1-FR219', missing }));
 
 export {};

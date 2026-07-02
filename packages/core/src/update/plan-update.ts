@@ -2,7 +2,7 @@ import { lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promis
 import { dirname, join, relative } from 'node:path';
 import type { Answers, GeneratedState, PromptAdapter, VfsFile } from '@cyanprint/contracts';
 import { invokeResolver, type ArtifactBundleRef, type ResolverFile } from '@cyanprint/artifact-runner';
-import { createProject } from '../create/create-project';
+import { createProject, type GenerationProgressEvent } from '../create/create-project';
 import { loadManifest } from '../manifest/load-manifest';
 import { loadGeneratedState, writeGeneratedState } from '../state/generated-state';
 import { withTempSession } from '../sessions/temp-session';
@@ -24,6 +24,7 @@ export async function updateProject(args: {
   headless?: boolean;
   localFallback?: boolean;
   promptAdapter?: PromptAdapter;
+  onProgress?: (event: GenerationProgressEvent) => void;
 }): Promise<UpdatePlanResult> {
   const prior = await loadGeneratedState(args.projectDir);
   const answers = { ...prior.answers, ...(args.answers ?? {}) };
@@ -45,6 +46,7 @@ export async function updateProject(args: {
       json: true,
       localFallback: args.localFallback,
       promptAdapter: args.promptAdapter,
+      onProgress: args.onProgress,
     });
     const target = await loadGeneratedState(session.path);
     const priorFiles = stateFilesToVfs(prior.files);

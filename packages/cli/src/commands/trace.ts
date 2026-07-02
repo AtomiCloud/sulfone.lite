@@ -1,9 +1,10 @@
-import { traceProject, type TraceNode } from '@cyanprint/core';
-import type { PromptAdapter } from '@cyanprint/contracts';
+import { join } from 'node:path';
+import { loadGeneratedState, traceProject, type TraceNode } from '@cyanprint/core';
+import type { Answers, PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
-import { kv, pathLabel, printJson, printSection, success } from '../ui';
+import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
 
 type CliRuntime = {
   promptAdapter?: PromptAdapter;
@@ -13,14 +14,28 @@ type CliRuntime = {
 
 export async function traceCommand(argv: string[], runtime: CliRuntime = {}): Promise<void> {
   const { positional, flags } = parseFlags(argv);
-  const template = positional[0];
-  if (!template) {
-    throw new Error('trace requires a template path or registry reference');
+  const target = positional[0];
+  if (!target) {
+    throw new Error('trace requires a template path, registry reference, or generated project directory');
   }
   const answersPath = flagString(flags, 'answers');
-  const answers = answersPath ? await readAnswersFile(answersPath) : {};
+  let answers: Answers = answersPath ? await readAnswersFile(answersPath) : {};
+  let deterministicState: Record<string, unknown> | undefined;
   const json = flagBool(flags, 'json');
   const headless = flagBool(flags, 'headless') || json;
+
+  // A generated project carries .cyan_state.yaml: trace regenerates it with the SAME
+  // answers and deterministic state, using the recorded template (or --template override).
+  let template = target;
+  if (await Bun.file(join(target, '.cyan_state.yaml')).exists()) {
+    const state = await loadGeneratedState(target);
+    answers = { ...state.answers, ...answers };
+    deterministicState = state.deterministicState;
+    template = flagString(flags, 'template') ?? state.template.source;
+    if (!json) {
+      console.log(info(`tracing generated project ${pathLabel(target)} via ${pathLabel(template)}`));
+    }
+  }
   const promptAdapter = runtime.promptAdapterFactory?.(answers) ?? runtime.promptAdapter;
 
   const resolved = await resolveTemplateInput({
@@ -36,6 +51,7 @@ export async function traceCommand(argv: string[], runtime: CliRuntime = {}): Pr
   const trace = await traceProject({
     template: resolved.templateDir,
     answers,
+    deterministicState,
     headless,
     localFallback: !resolved.registryHydrated,
     promptAdapter: headless ? undefined : promptAdapter,

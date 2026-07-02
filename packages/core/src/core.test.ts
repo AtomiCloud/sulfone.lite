@@ -1284,6 +1284,69 @@ describe('artifact output layering', () => {
     expect(unifiedDiff('a\nb', '')).toContain('@@ -1,2 +0,0 @@');
   });
 
+  test('prompt validation rejects out-of-range headless answers and accepts valid ones', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-validate-'));
+    const template = join(tempRoot, 'examples/templates/validated');
+    const out = join(tempRoot, 'out');
+    try {
+      await mkdir(join(template, 'template'), { recursive: true });
+      await writeFile(join(template, 'template/OUT.md'), 'count=__COUNT__\n');
+      await writeFile(
+        join(template, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: template',
+          'owner: cyanprint',
+          'name: validated',
+          'bundledEntry: cyan.ts',
+          'processors:',
+          '  - cyan/default',
+          '',
+        ].join('\n'),
+      );
+      await writeFile(
+        join(template, 'cyan.ts'),
+        [
+          'export default async function cyan(prompt) {',
+          '  const count = await prompt.number("count", "Count", {',
+          '    validate: value => (value >= 5 && value <= 10 ? true : "count must be between 5 and 10"),',
+          '  });',
+          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { COUNT: String(count) } } }] };',
+          '}',
+          '',
+        ].join('\n'),
+      );
+      await expect(createProject({ template, outDir: out, headless: true, answers: { count: 3 } })).rejects.toThrow(
+        'count must be between 5 and 10',
+      );
+      await createProject({ template, outDir: out, headless: true, answers: { count: 7 } });
+      expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('count=7\n');
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('createProject reports generation progress for templates and artifacts', async () => {
+    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-progress-'));
+    const events: Array<{ kind: string; ref: string }> = [];
+    try {
+      await createProject({
+        template: join(root, 'examples/templates/hello'),
+        outDir: out,
+        headless: true,
+        answers: JSON.parse(await readFile(join(root, 'examples/templates/hello/answers.json'), 'utf8')) as Record<
+          string,
+          unknown
+        >,
+        onProgress: event => events.push({ kind: event.kind, ref: event.ref }),
+      });
+      expect(events.some(event => event.kind === 'template' && event.ref === 'cyanprint/hello')).toBe(true);
+      expect(events.some(event => event.kind === 'processor' && event.ref === 'cyan/default')).toBe(true);
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
   test('executes child templates returned by cyan.ts', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-runtime-template-'));
     const templatesRoot = join(tempRoot, 'examples/templates');
