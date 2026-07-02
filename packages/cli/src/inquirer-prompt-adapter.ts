@@ -1,4 +1,4 @@
-import { checkbox, confirm, input, number, select } from '@inquirer/prompts';
+import { checkbox, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import {
   promptOptionValue,
@@ -7,16 +7,23 @@ import {
   type PromptOption,
   type PromptRequest,
 } from '@cyanprint/contracts';
+import { describedConfirm, describedNumber, describedText } from './described-prompts';
 
 export type InquirerPrompts = {
   checkbox: typeof checkbox;
-  confirm: typeof confirm;
-  input: typeof input;
-  number: typeof number;
+  confirm: typeof describedConfirm;
+  input: typeof describedText;
+  number: typeof describedNumber;
   select: typeof select;
 };
 
-const defaultPrompts: InquirerPrompts = { checkbox, confirm, input, number, select };
+const defaultPrompts: InquirerPrompts = {
+  checkbox,
+  confirm: describedConfirm,
+  input: describedText,
+  number: describedNumber,
+  select,
+};
 
 export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts = defaultPrompts): PromptAdapter {
   return {
@@ -32,29 +39,36 @@ export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts
 }
 
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {
-  // request.validate re-prompts inline (inquirer shares the true-or-error-message contract).
+  // request.validate re-prompts inline (the prompts share the true-or-error-message contract).
+  // Free-form prompts render `description` BELOW the input (like select/checkbox render option
+  // help below the list) and `placeholder` as an inline ghost value.
   const validate = request.validate;
-  const message = promptMessage(request);
   if (request.kind === 'text') {
     return await prompts.input({
-      message,
+      message: request.message,
       default: request.default,
+      placeholder: request.placeholder,
+      description: request.description,
       validate: validate ? value => validate(value) : undefined,
     });
   }
   if (request.kind === 'confirm') {
-    return await prompts.confirm({ message, default: request.default });
+    return await prompts.confirm({
+      message: request.message,
+      default: request.default,
+      description: request.description,
+    });
   }
   if (request.kind === 'select') {
     return await prompts.select({
-      message,
+      message: promptMessage(request),
       choices: request.options.map(option => promptChoice(option)),
       default: request.default,
     });
   }
   if (request.kind === 'multiselect') {
     return await prompts.checkbox({
-      message,
+      message: promptMessage(request),
       choices: request.options.map(option => ({
         ...promptChoice(option),
         checked: request.default?.includes(promptOptionValue(option)),
@@ -63,23 +77,20 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
     });
   }
   return await prompts.number({
-    message,
+    message: request.message,
     default: request.default,
-    required: true,
+    placeholder: request.placeholder,
+    description: request.description,
     validate: validate ? value => validate(value) : undefined,
   });
 }
 
 /**
- * The prompt line: the author's question, a dim placeholder example for free-form inputs
- * (inquirer has no native inline placeholder), and a dim description on its own line.
- * Select/multiselect option descriptions render natively below the list as the highlight moves.
+ * List prompts reserve the bottom line for per-option descriptions, so a prompt-level
+ * description renders as a dim line under the question instead.
  */
 function promptMessage(request: PromptRequest): string {
   let message = request.message;
-  if ((request.kind === 'text' || request.kind === 'number') && request.placeholder !== undefined) {
-    message += ` ${chalk.dim(`e.g. ${request.placeholder}`)}`;
-  }
   if (request.description) {
     message += `\n${chalk.dim(request.description)}\n`;
   }
