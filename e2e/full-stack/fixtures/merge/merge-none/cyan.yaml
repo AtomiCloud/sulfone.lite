@@ -1,0 +1,9 @@
+cyanprint: 4
+kind: template-group
+owner: cyanprint
+name: merge-none
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/merge-ln1
+  - cyanprint/merge-ln2

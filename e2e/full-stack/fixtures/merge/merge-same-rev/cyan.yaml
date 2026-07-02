@@ -1,0 +1,9 @@
+cyanprint: 4
+kind: template-group
+owner: cyanprint
+name: merge-same-rev
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/merge-la2
+  - cyanprint/merge-la1

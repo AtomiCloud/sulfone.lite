@@ -1,0 +1,9 @@
+cyanprint: 4
+kind: template-group
+owner: cyanprint
+name: dup-group
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/dup-x
+  - cyanprint/dup-y

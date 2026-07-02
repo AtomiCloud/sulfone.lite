@@ -1,0 +1,14 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: cascade-b
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/cascade-c
+
+presets:
+  templates:
+    cyanprint/cascade-c:
+      answers:
+        grand: FROM_B

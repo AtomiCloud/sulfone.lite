@@ -1,0 +1,16 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: cascade-a
+bundledEntry: cyan.ts
+
+templates:
+  - cyanprint/cascade-b
+
+presets:
+  templates:
+    cyanprint/cascade-c:
+      answers:
+        grand: FROM_A
+      deterministic:
+        seed: A_SEED

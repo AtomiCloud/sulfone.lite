@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: cascade-c
+bundledEntry: cyan.ts
+
+processors:
+  - cyan/default
