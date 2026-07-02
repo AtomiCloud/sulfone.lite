@@ -378,7 +378,7 @@ describe('inquirer prompt adapter', () => {
         { name: 'two', value: 'two', checked: true },
       ],
     });
-    expect(calls[4]?.config).toMatchObject({ message: 'Number?', default: 3, required: true });
+    expect(calls[4]?.config).toMatchObject({ message: 'Number?', default: 3 });
     expect(answers).toMatchObject({
       confirm: true,
       multi: ['one'],
@@ -388,8 +388,11 @@ describe('inquirer prompt adapter', () => {
     });
   });
 
-  test('renders placeholders, descriptions, and per-option descriptions', async () => {
-    const calls: Array<{ kind: string; config: { message: string; choices?: unknown } }> = [];
+  test('passes placeholders and descriptions through, and maps per-option descriptions', async () => {
+    const calls: Array<{
+      kind: string;
+      config: { message: string; placeholder?: string; description?: string; choices?: unknown };
+    }> = [];
     const prompts = {
       input: async config => {
         calls.push({ kind: 'text', config });
@@ -422,9 +425,13 @@ describe('inquirer prompt adapter', () => {
       ],
     });
 
-    expect(calls[0]?.config.message).toContain('What is your URL?');
-    expect(calls[0]?.config.message).toContain('e.g. https://example.com');
-    expect(calls[0]?.config.message).toContain('Used as the homepage link');
+    // Free-form prompts receive placeholder/description as config (rendered as an inline
+    // ghost value and a bottom line by the described prompts) — never baked into the message.
+    expect(calls[0]?.config).toMatchObject({
+      message: 'What is your URL?',
+      placeholder: 'https://example.com',
+      description: 'Used as the homepage link in the generated README.',
+    });
     expect(calls[1]?.config.choices).toMatchObject([
       { name: 'Flavor A', value: 'a', description: 'The classic.' },
       { name: 'b', value: 'b', description: 'The bold one.' },
