@@ -1,7 +1,0 @@
-{
-  "owner": "acme",
-  "name": "service-template",
-  "kind": "template",
-  "title": "Service Template",
-  "description": "A CyanPrint v4 template."
-}

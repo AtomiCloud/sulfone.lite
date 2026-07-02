@@ -2707,64 +2707,8 @@ describe('standard artifact tests', () => {
   });
 });
 
-describe('main template parity fixtures', () => {
-  test('new template scaffolds all artifact kinds', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-new-'));
-    try {
-      const template = 'in-tree/official/templates/new';
-      const report = await runTemplateTest({
-        template,
-        answers: join(root, template, 'answers.json'),
-        outDir: out,
-      });
-      expect(report).toMatchObject({ passed: 4, failed: 0 });
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('new template generated runtime artifacts pass their own artifact tests', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-new-generated-'));
-    try {
-      const template = join(root, 'in-tree/official/templates/new');
-      const generated = [
-        ['processor', 'answers-processor.json'],
-        ['plugin', 'answers-plugin.json'],
-        ['resolver', 'answers-resolver.json'],
-      ] as const;
-      for (const [kind, answers] of generated) {
-        const artifactOut = join(out, kind);
-        await createProject({
-          template,
-          outDir: artifactOut,
-          headless: true,
-          answers: JSON.parse(await Bun.file(join(template, answers)).text()) as Record<string, unknown>,
-        });
-        const report = await runArtifactTests({ artifactDir: artifactOut });
-        expect(report, kind).toMatchObject({ passed: 1, failed: 0 });
-      }
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  for (const name of ['workspace', 'nix']) {
-    test(`${name} template matches its expected output fixture`, async () => {
-      const out = await mkdtemp(join(tmpdir(), `cyanprint-test-template-${name}-`));
-      try {
-        const template = `examples/templates/${name}`;
-        const report = await runTemplateTest({
-          template,
-          answers: join(root, template, 'answers.json'),
-          outDir: out,
-        });
-        expect(report).toMatchObject({ passed: 1, failed: 0 });
-      } finally {
-        await rm(out, { recursive: true, force: true });
-      }
-    });
-  }
-});
+// The parity templates (cyan/new, workspace, nix) prove themselves through their own
+// cyan.test.yaml suites, which run on every `cyanprint push` in the full-stack e2e.
 
 describe('update three state resolver merge trust safety post generation command machine readable errors', () => {
   test('update reuses answers and merge exposes conflicts', async () => {
