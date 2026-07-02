@@ -81,6 +81,10 @@ pre-commit-lib.run {
         ".*(Changelog|README|CommitConventions).+(MD|md)"
         ".*infra/root_chart.*"
         ".*node_modules.*"
+        # e2e fixture archives and expected outputs are byte-exact test data: formatting
+        # them mangles template placeholders (prettier turns __VAR__ into **VAR**).
+        ".*e2e/full-stack/fixtures.*"
+        ".*e2e/full-stack/expected.*"
       ];
       package = formatter;
     };

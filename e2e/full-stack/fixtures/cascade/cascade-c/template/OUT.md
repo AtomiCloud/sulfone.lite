@@ -1,1 +1,1 @@
-grand=**GRAND**
+grand=__GRAND__
