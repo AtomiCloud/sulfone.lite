@@ -1,10 +1,25 @@
 // Free-form prompts (text, number, confirm) built on @inquirer/core so the prompt
 // description renders BELOW the input line — consistent with select/checkbox, whose
-// option help renders below the list. Also gives text/number a real inline ghost
-// placeholder, which @inquirer/prompts input does not support.
+// option help renders below the list. `placeholder` renders as a dim backdrop inside
+// the empty input: typing replaces it and it is never submitted; `default` remains the
+// enter-to-keep value (@inquirer/prompts input supports neither placeholders nor
+// bottom descriptions).
 
 import { createPrompt, isBackspaceKey, isEnterKey, useKeypress, usePrefix, useState } from '@inquirer/core';
 import chalk from 'chalk';
+
+// While a free-form input is empty, its placeholder renders as a dim backdrop after a fake
+// block cursor, with the real terminal cursor hidden (it would otherwise sit after the
+// backdrop text). Typing replaces the backdrop; the backdrop itself is never submitted.
+const HIDE_CURSOR = '\u001B[?25l';
+const SHOW_CURSOR = '\u001B[?25h';
+
+function backdrop(placeholder: string | undefined): string {
+  if (!placeholder) {
+    return SHOW_CURSOR;
+  }
+  return `${chalk.inverse(' ')}${chalk.dim(placeholder)}${HIDE_CURSOR}`;
+}
 
 export type DescribedTextConfig = {
   message: string;
@@ -72,8 +87,8 @@ export const describedText: DescribedPrompt<string, DescribedTextConfig> = creat
 
     const message = chalk.bold(config.message);
     const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-    const ghost = !value && status === 'idle' && config.placeholder ? chalk.dim(config.placeholder) : '';
-    const shown = status === 'done' ? chalk.cyan(value) : value || ghost;
+    const shown =
+      status === 'done' ? chalk.cyan(value) + SHOW_CURSOR : value ? value + SHOW_CURSOR : backdrop(config.placeholder);
     return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
   },
 );
@@ -116,8 +131,8 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
 
   const message = chalk.bold(config.message);
   const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-  const ghost = !value && status === 'idle' && config.placeholder ? chalk.dim(config.placeholder) : '';
-  const shown = status === 'done' ? chalk.cyan(value) : value || ghost;
+  const shown =
+    status === 'done' ? chalk.cyan(value) + SHOW_CURSOR : value ? value + SHOW_CURSOR : backdrop(config.placeholder);
   return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
 });
 

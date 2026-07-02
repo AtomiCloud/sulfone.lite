@@ -25,23 +25,55 @@ const defaultPrompts: InquirerPrompts = {
   select,
 };
 
-export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts = defaultPrompts): PromptAdapter {
+export function inquirerPromptAdapter(
+  answers: Answers,
+  prompts: InquirerPrompts = defaultPrompts,
+  suggestions: Answers = {},
+): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
       if (request.name in answers) {
         return answers[request.name] as T;
       }
-      const value = await askPrompt(request, prompts);
+      const value = await askPrompt(applySuggestion(request, suggestions), prompts);
       answers[request.name] = value;
       return value as T;
     },
   };
 }
 
+/**
+ * When re-running a template over an existing project, the previously answered value
+ * becomes every prompt's default — press enter to keep it, or answer to change it.
+ * A recorded value whose shape no longer matches the prompt kind (e.g. the template
+ * changed a question's type between versions) is ignored rather than trusted.
+ */
+function applySuggestion(request: PromptRequest, suggestions: Answers): PromptRequest {
+  const suggested = suggestions[request.name];
+  if (suggested === undefined || !suggestionMatchesKind(request, suggested)) {
+    return request;
+  }
+  return { ...request, default: suggested } as PromptRequest;
+}
+
+function suggestionMatchesKind(request: PromptRequest, suggested: unknown): boolean {
+  switch (request.kind) {
+    case 'text':
+    case 'select':
+      return typeof suggested === 'string';
+    case 'confirm':
+      return typeof suggested === 'boolean';
+    case 'number':
+      return typeof suggested === 'number';
+    case 'multiselect':
+      return Array.isArray(suggested) && suggested.every(item => typeof item === 'string');
+  }
+}
+
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {
   // request.validate re-prompts inline (the prompts share the true-or-error-message contract).
-  // Free-form prompts render `description` BELOW the input (like select/checkbox render option
-  // help below the list) and `placeholder` as an inline ghost value.
+  // Every prompt kind renders `description` BELOW the input/list; free-form prompts also
+  // render `placeholder` as an inline ghost value.
   const validate = request.validate;
   if (request.kind === 'text') {
     return await prompts.input({
@@ -61,19 +93,21 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
   }
   if (request.kind === 'select') {
     return await prompts.select({
-      message: promptMessage(request),
-      choices: request.options.map(option => promptChoice(option)),
+      message: request.message,
+      choices: request.options.map(option => promptChoice(option, request.description)),
       default: request.default,
+      theme: listDescriptionTheme,
     });
   }
   if (request.kind === 'multiselect') {
     return await prompts.checkbox({
-      message: promptMessage(request),
+      message: request.message,
       choices: request.options.map(option => ({
-        ...promptChoice(option),
+        ...promptChoice(option, request.description),
         checked: request.default?.includes(promptOptionValue(option)),
       })),
       validate: validate ? items => validate(items.map(item => item.value)) : undefined,
+      theme: listDescriptionTheme,
     });
   }
   return await prompts.number({
@@ -85,21 +119,29 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
   });
 }
 
-/**
- * List prompts reserve the bottom line for per-option descriptions, so a prompt-level
- * description renders as a dim line under the question instead.
- */
-function promptMessage(request: PromptRequest): string {
-  let message = request.message;
-  if (request.description) {
-    message += `\n${chalk.dim(request.description)}\n`;
-  }
-  return message;
-}
+// The bottom lines are pre-styled in promptChoice (option help cyan, prompt description
+// dim), so the theme must not restyle them.
+const listDescriptionTheme = { style: { description: (text: string) => text } };
 
-function promptChoice(option: PromptOption): { name: string; value: string; description?: string } {
-  if (typeof option === 'string') {
-    return { name: option, value: option };
+/**
+ * A list choice's bottom content: the option's own help (following the highlight) with the
+ * prompt-level description stacked underneath — so the prompt description renders at the
+ * bottom for every kind, matching the free-form prompts.
+ */
+function promptChoice(
+  option: PromptOption,
+  promptDescription: string | undefined,
+): { name: string; value: string; description?: string } {
+  const base =
+    typeof option === 'string'
+      ? { name: option, value: option, description: undefined as string | undefined }
+      : { name: option.label ?? option.value, value: option.value, description: option.description };
+  const lines: string[] = [];
+  if (base.description) {
+    lines.push(chalk.cyan(base.description));
   }
-  return { name: option.label ?? option.value, value: option.value, description: option.description };
+  if (promptDescription) {
+    lines.push(chalk.dim(promptDescription));
+  }
+  return { name: base.name, value: base.value, description: lines.length > 0 ? lines.join('\n') : undefined };
 }

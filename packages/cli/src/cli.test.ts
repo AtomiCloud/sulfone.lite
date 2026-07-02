@@ -436,6 +436,48 @@ describe('inquirer prompt adapter', () => {
       { name: 'Flavor A', value: 'a', description: 'The classic.' },
       { name: 'b', value: 'b', description: 'The bold one.' },
     ]);
+
+    // A prompt-level description on a list prompt stacks below the option help, so it
+    // renders at the bottom for every kind — never embedded in the message.
+    await adapter.ask({
+      kind: 'select',
+      name: 'size',
+      message: 'Pick a size',
+      description: 'You can change this later in config.',
+      options: ['small', { value: 'large', description: 'Roomy.' }],
+    });
+    expect(calls[2]?.config.message).toBe('Pick a size');
+    expect(calls[2]?.config.choices).toMatchObject([
+      { name: 'small', value: 'small', description: 'You can change this later in config.' },
+      { name: 'large', value: 'large', description: 'Roomy.\nYou can change this later in config.' },
+    ]);
+  });
+
+  test('re-run suggestions prefill free-form prompts and default list prompts', async () => {
+    const calls: Array<{ kind: string; config: { placeholder?: string; default?: unknown } }> = [];
+    const prompts = {
+      input: async config => {
+        calls.push({ kind: 'text', config });
+        return 'x';
+      },
+      confirm: async () => true,
+      select: async config => {
+        calls.push({ kind: 'select', config });
+        return 'a';
+      },
+      checkbox: async () => [],
+      number: async () => 1,
+    } as InquirerPrompts;
+    const adapter = inquirerPromptAdapter({}, prompts, { name: 'Prior Project', flavor: 'b' });
+
+    await adapter.ask({ kind: 'text', name: 'name', message: 'Name?', placeholder: 'example' });
+    await adapter.ask({ kind: 'select', name: 'flavor', message: 'Flavor?', options: ['a', 'b'], default: 'a' });
+
+    // The recorded answer becomes the default everywhere (enter keeps it); the
+    // placeholder backdrop stays as a display-only suggestion.
+    expect(calls[0]?.config.default).toBe('Prior Project');
+    expect(calls[0]?.config.placeholder).toBe('example');
+    expect(calls[1]?.config.default).toBe('b');
   });
 });
 

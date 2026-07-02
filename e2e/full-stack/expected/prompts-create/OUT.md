@@ -1,5 +1,7 @@
-name=Everything
-enabled=true
-flavor=mocha
-toppings=nuts,cherry
-count=3
+# Everything App
+
+url:      https://demo.dev
+public:   false
+flavor:   chaos
+toppings: docker, docs
+port:     4321

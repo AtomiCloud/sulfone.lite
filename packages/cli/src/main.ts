@@ -20,7 +20,7 @@ type OptionValues = Record<string, string | boolean | undefined>;
 
 type ProgramRuntime = {
   jsonErrors?: boolean;
-  promptAdapterFactory?: (answers: Record<string, unknown>) => PromptAdapter;
+  promptAdapterFactory?: (answers: Record<string, unknown>, suggestions?: Record<string, unknown>) => PromptAdapter;
   silent?: boolean;
 };
 
@@ -33,7 +33,10 @@ type CliOptionSpec = {
 };
 
 export function createProgram(runtime: ProgramRuntime = {}): Command {
-  const promptAdapterFactory = runtime.promptAdapterFactory ?? inquirerPromptAdapter;
+  const promptAdapterFactory =
+    runtime.promptAdapterFactory ??
+    ((answers: Record<string, unknown>, suggestions?: Record<string, unknown>) =>
+      inquirerPromptAdapter(answers, undefined, suggestions));
   const program = new Command();
   program
     .name('cyanprint')

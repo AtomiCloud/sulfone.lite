@@ -1,5 +1,7 @@
-name=__NAME__
-enabled=__ENABLED__
-flavor=__FLAVOR__
-toppings=__TOPPINGS__
-count=__COUNT__
+# __PROJECT__
+
+url:      __URL__
+public:   __PUBLIC__
+flavor:   __FLAVOR__
+toppings: __TOPPINGS__
+port:     __PORT__
