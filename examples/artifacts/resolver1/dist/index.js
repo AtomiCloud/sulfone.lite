@@ -1,5 +1,7 @@
 // @bun
 // examples/artifacts/resolver1/src/index.ts
+import { dirname } from 'path';
+import { mkdir } from 'fs/promises';
 function configStrategy(config) {
   if (!config || typeof config !== 'object' || !('arrayStrategy' in config)) {
     return 'replace';
@@ -41,18 +43,38 @@ function mergeJson(left, right, strategy) {
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
-function resolver(input) {
+async function resolver(input) {
   const strategy = configStrategy(input.config);
-  const documents = [...input.files]
-    .sort(
-      (left, right) =>
-        left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
-    )
-    .map(file => file.content)
-    .filter(content => Boolean(content?.trim()))
+  const path = configPath(input.config);
+  const sorted = [...input.inputDirs].sort(
+    (left, right) =>
+      left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
+  );
+  const documents = (await Promise.all(sorted.map(async entry => await readCandidate(entry.dir, path))))
+    .filter(content => Boolean(content.trim()))
     .map(content => JSON.parse(content));
   const merged = documents.reduce((acc, document) => mergeJson(acc, document, strategy));
-  return `${JSON.stringify(merged, null, 2)}
-`;
+  await writeOutput(
+    input.outputDir,
+    path,
+    `${JSON.stringify(merged, null, 2)}
+`,
+  );
+}
+async function readCandidate(dir, path) {
+  return await Bun.file(`${dir}/${path}`)
+    .text()
+    .catch(() => '');
+}
+function configPath(config) {
+  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.path === 'string') {
+    return config.path;
+  }
+  return 'output.txt';
+}
+async function writeOutput(outputDir, path, content) {
+  const outputPath = `${outputDir}/${path}`;
+  await mkdir(dirname(outputPath), { recursive: true });
+  await Bun.write(outputPath, content);
 }
 export { resolver };

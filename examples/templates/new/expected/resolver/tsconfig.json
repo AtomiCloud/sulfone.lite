@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2023",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@cyanprint/sdk": ["./types/cyanprint-sdk.d.ts"]
+    }
+  },
+  "include": ["src", "types"]
+}

@@ -2,7 +2,7 @@
 
 __DESCRIPTION__
 
-This plugin receives `{ files, config }` and returns a file map. Use plugins for additive or final project edits after processors.
+This plugin receives `(input, helper)` after processors have merged. Use `helper.read()` / `helper.write()` for the output folder and `helper.exec()` to run idempotent commands such as `git init`. `input.outputDir` stays available for raw access.
 
 ## Test
 
@@ -13,5 +13,5 @@ cyanprint test .
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push .
 ```

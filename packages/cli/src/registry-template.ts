@@ -72,6 +72,7 @@ type ArtifactBundleIndexEntry = {
   dependency: { kind: string; owner: string; name: string; version?: string };
   runtimeFile: string;
   integrity?: string;
+  api?: 1 | 2;
 };
 
 async function hydrateRegistryArtifactWithPins(
@@ -117,6 +118,7 @@ async function hydrateRegistryArtifactWithPins(
       dependency: { kind: pin.kind, owner: pin.owner, name: pin.name, version: pin.version },
       runtimeFile,
       integrity: sha256(await Bun.file(runtimeFile).text()),
+      api: manifest.api,
     });
   }
   await writeFile(

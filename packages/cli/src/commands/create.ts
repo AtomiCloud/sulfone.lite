@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import { createProject } from '@cyanprint/core';
 import type { PromptAdapter } from '@cyanprint/contracts';
-import { parseFlags, flagBool, flagString } from '../args';
+import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
 import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
@@ -19,7 +18,7 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
     throw new Error('create requires a template path or registry reference');
   }
   const answersPath = flagString(flags, 'answers');
-  const answers = answersPath ? (JSON.parse(await readFile(answersPath, 'utf8')) as Record<string, unknown>) : {};
+  const answers = answersPath ? await readAnswersFile(answersPath) : {};
   const outDir = flagString(flags, 'out') ?? positional[1] ?? '.';
   const json = flagBool(flags, 'json');
   const headless = flagBool(flags, 'headless');

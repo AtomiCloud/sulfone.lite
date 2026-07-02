@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import YAML from 'yaml';
-import { exportedFunctionParameterCount, parseCyanManifest } from '@cyanprint/contracts';
+import { assertRuntimeExportArity, parseCyanManifest } from '@cyanprint/contracts';
 
 export type BundleResult = {
   runtimeFile: string;
@@ -15,6 +15,7 @@ export type BundleResult = {
 
 const resolverSymbol = Symbol.for('cyanprint.resolver');
 const workspaceResolvedPackages = new Set(['@atomicloud/cyan-sdk', 'smob', 'yaml']);
+const workspaceFallbackPackages = new Set(['eta']);
 
 function resolverGlobal(): Record<PropertyKey, unknown> {
   return globalThis as unknown as Record<PropertyKey, unknown>;
@@ -87,22 +88,12 @@ export async function assertRequiredRuntimeExport(runtimeFile: string, kind: str
         `Use "export function ${exportName}(input)" instead of a default-exported object.`,
     );
   }
-  const parameterCount = exportedFunctionParameterCount(source, exportName);
-  if (parameterCount === undefined && kind === 'resolver' && exported === registeredResolver) {
-    return;
-  }
-  if (parameterCount === undefined) {
-    throw new Error(
-      `Artifact build expected ${kind} bundle to declare "export function ${exportName}(input)". ` +
-        `Exported const/function-expression artifacts are not supported.`,
-    );
-  }
-  if (parameterCount !== 1) {
-    throw new Error(
-      `Artifact build expected ${kind} function ${exportName} to take one input object. ` +
-        `Use "export function ${exportName}(input)" and read config from input.config.`,
-    );
-  }
+  assertRuntimeExportArity({
+    declaredParameterCount: exported.length,
+    exportName,
+    isRegisteredLegacyResolver: kind === 'resolver' && exported === registeredResolver,
+    label: `Artifact build ${kind} bundle`,
+  });
 }
 
 function requiredRuntimeExportName(kind: string): string | undefined {
@@ -118,7 +109,12 @@ function requiredRuntimeExportName(kind: string): string | undefined {
   return undefined;
 }
 
-export async function compileRuntimeBundle(args: { entrypoint: string; output: string; kind?: string }): Promise<void> {
+export async function compileRuntimeBundle(args: {
+  entrypoint: string;
+  output: string;
+  kind?: string;
+  validateExport?: boolean;
+}): Promise<void> {
   await mkdir(dirname(args.output), { recursive: true });
   await rm(args.output, { force: true });
   const tempOut = await mkdtemp(join(tmpdir(), 'cyanprint-bundle-'));
@@ -133,10 +129,13 @@ export async function compileRuntimeBundle(args: { entrypoint: string; output: s
           name: 'cyanprint-workspace-dependency-resolver',
           setup(build) {
             build.onResolve({ filter: /.*/ }, args => {
-              if (!workspaceResolvedPackages.has(args.path)) {
-                return undefined;
+              if (workspaceResolvedPackages.has(args.path)) {
+                return { path: Bun.resolveSync(args.path, import.meta.dir) };
               }
-              return { path: Bun.resolveSync(args.path, import.meta.dir) };
+              if (workspaceFallbackPackages.has(args.path) && !canResolveFromImporter(args.path, args.importer)) {
+                return { path: Bun.resolveSync(args.path, import.meta.dir) };
+              }
+              return undefined;
             });
           },
         },
@@ -154,11 +153,40 @@ export async function compileRuntimeBundle(args: { entrypoint: string; output: s
       throw new Error('Artifact build did not emit a JavaScript output.');
     }
     await copyFile(emittedFile, args.output);
-    if (args.kind) {
+    await stripSourceMapComments(args.output);
+    if (args.kind && args.validateExport !== false) {
       await assertRequiredRuntimeExport(args.output, args.kind);
     }
   } finally {
     await rm(tempOut, { recursive: true, force: true });
+  }
+}
+
+async function stripSourceMapComments(path: string): Promise<void> {
+  const source = await readFile(path, 'utf8');
+  const lineEnding = source.includes('\r\n') ? '\r\n' : '\n';
+  const hadTrailingNewline = source.endsWith('\n');
+  const lines = source.split(/\r?\n/u);
+  if (lines.at(-1) === '') {
+    lines.pop();
+  }
+  const finalLine = lines.at(-1)?.trimStart();
+  if (!finalLine || !/^\/\/# sourceMappingURL=[^\s]+$/u.test(finalLine)) {
+    return;
+  }
+  lines.pop();
+  const stripped = lines.join(lineEnding) + (hadTrailingNewline && lines.length > 0 ? lineEnding : '');
+  if (stripped !== source) {
+    await writeFile(path, stripped, 'utf8');
+  }
+}
+
+function canResolveFromImporter(specifier: string, importer: string): boolean {
+  try {
+    Bun.resolveSync(specifier, importer ? dirname(importer) : process.cwd());
+    return true;
+  } catch {
+    return false;
   }
 }
 

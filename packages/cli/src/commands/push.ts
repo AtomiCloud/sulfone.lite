@@ -1,13 +1,19 @@
-import { readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadManifest, safeJoin } from '@cyanprint/core';
+import { loadManifest, runArtifactTests, runTemplateTest, safeJoin } from '@cyanprint/core';
 import { RegistryClient } from '@cyanprint/registry-client';
-import { artifactIntegrity, type ArtifactPublish, type ResolvedDependencyPin } from '@cyanprint/contracts';
+import {
+  artifactIntegrity,
+  type ArtifactPublish,
+  type CyanManifest,
+  type ResolvedDependencyPin,
+} from '@cyanprint/contracts';
 import { buildBundle } from '@cyanprint/artifact-bundler';
 import { parseFlags, flagBool, flagString } from '../args';
 import { createArtifactTextObject, createTemplateArchivePayload } from '../local-object-package';
 import { defaultRegistryUrl } from '../registry-defaults';
-import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
+import { failure, info, kv, pathLabel, printJson, printSection, ReportedCliError, success } from '../ui';
 
 export async function pushCommand(argv: string[]): Promise<void> {
   const { positional, flags } = parseFlags(argv);
@@ -17,9 +23,26 @@ export async function pushCommand(argv: string[]): Promise<void> {
   }
   const json = flagBool(flags, 'json');
   const scriptOnly = flagBool(flags, 'script-only');
+  const dryRun = flagBool(flags, 'dry-run');
+  const skipBundle = flagBool(flags, 'no-bundle');
+  const skipTest = flagBool(flags, 'no-test');
   const { manifest } = await loadManifest(artifactDir);
   if (!json) {
     console.log(info(`preparing ${manifest.kind} ${pathLabel(`${manifest.owner}/${manifest.name}`)}`));
+  }
+  if (!skipTest) {
+    if (!json) {
+      console.log(info(`testing ${pathLabel(`${manifest.owner}/${manifest.name}`)}`));
+    }
+    const testReport = await runPushTests(artifactDir, manifest);
+    if (testReport.failed > 0) {
+      if (!json) {
+        console.log(
+          failure(`tests failed for ${pathLabel(`${manifest.owner}/${manifest.name}`)} (${testReport.failed} failing)`),
+        );
+      }
+      throw new ReportedCliError(`push aborted: ${testReport.failed} failing test(s). Fix them or pass --no-test.`);
+    }
   }
   const refs = [...manifest.templates, ...manifest.processors, ...manifest.plugins, ...manifest.resolvers].map(ref => ({
     ...ref,
@@ -49,9 +72,10 @@ export async function pushCommand(argv: string[]): Promise<void> {
       `Registry could not resolve declared dependencies: ${missing.map(ref => `${ref.kind}:${ref.owner ?? manifest.owner}:${ref.name}`).join(', ')}`,
     );
   }
-  const bundle = ['processor', 'plugin', 'resolver'].includes(manifest.kind)
-    ? await buildBundle({ artifactDir, dryRun: flagBool(flags, 'dry-run'), temporary: Boolean(registry) })
-    : { runtimeFile: safeJoin(artifactDir, manifest.bundledEntry), dryRun: flagBool(flags, 'dry-run'), sha256: '' };
+  const shouldBundle = !skipBundle && ['processor', 'plugin', 'resolver'].includes(manifest.kind);
+  const bundle = shouldBundle
+    ? await buildBundle({ artifactDir, dryRun, temporary: Boolean(registry) })
+    : { runtimeFile: safeJoin(artifactDir, manifest.bundledEntry), dryRun, sha256: '' };
   const manifestObject = await createArtifactTextObject(safeJoin(artifactDir, 'cyan.yaml'));
   const readmePath = await findReadmePath(artifactDir, manifest.readme);
   const readmeObject = readmePath ? await createArtifactTextObject(readmePath).catch(() => undefined) : undefined;
@@ -150,6 +174,41 @@ export async function pushCommand(argv: string[]): Promise<void> {
       kv('remote execution', false),
     ]);
   }
+}
+
+async function runPushTests(target: string, manifest: CyanManifest): Promise<{ failed: number }> {
+  if (!(await hasTests(target))) {
+    return { failed: 0 };
+  }
+  if (manifest.kind === 'template' || manifest.kind === 'template-group') {
+    const outDir = await mkdtemp(join(tmpdir(), 'cyanprint-push-test-'));
+    try {
+      return await runTemplateTest({
+        template: target,
+        answers: await defaultTemplateAnswers(target),
+        outDir,
+        updateSnapshots: false,
+      });
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  }
+  return await runArtifactTests({ artifactDir: target });
+}
+
+async function defaultTemplateAnswers(target: string): Promise<string | undefined> {
+  const answers = join(target, 'answers.json');
+  return (await Bun.file(answers).exists()) ? answers : undefined;
+}
+
+async function hasTests(target: string): Promise<boolean> {
+  if (await Bun.file(join(target, 'cyan.test.yaml')).exists()) {
+    return true;
+  }
+  if (await Bun.file(join(target, 'test.cyan.yaml')).exists()) {
+    return true;
+  }
+  return Boolean(await stat(join(target, 'tests')).catch(() => undefined));
 }
 
 async function findReadmePath(artifactDir: string, declaredReadme: string): Promise<string | undefined> {

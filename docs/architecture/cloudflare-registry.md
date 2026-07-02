@@ -49,8 +49,13 @@ The GitHub release deploy workflow uses preconfigured IDs instead of bootstrappi
 
 - Secret: `CLOUDFLARE_API_TOKEN`
 - Secret: `CLOUDFLARE_ACCOUNT_ID`
+- Secret: `CYANPRINT_GITHUB_CLIENT_SECRET`
 - Variable: `CYANPRINT_D1_DATABASE_ID`
 - Variable: `CYANPRINT_KV_NAMESPACE_ID`
+- Variable: `CYANPRINT_GITHUB_CLIENT_ID`
+- Variable: `CYANPRINT_GITHUB_ADMIN_LOGINS`
+- Optional variable: `CYANPRINT_AUTH_RETURN_ORIGINS`
+- Optional variable: `CYANPRINT_WEB_URL`
 
 To create the release dependencies manually instead:
 
@@ -59,6 +64,16 @@ wrangler d1 create cyanprint-registry
 wrangler r2 bucket create cyanprint-registry-artifacts
 wrangler kv namespace create cyanprint-registry
 wrangler r2 bucket create cyanprint-web-opennext-cache
+```
+
+- GitHub OAuth drives production login. Create a GitHub OAuth app with callback URL `https://registry.cyanprint.dev/auth/github/callback`.
+- Set `CYANPRINT_GITHUB_CLIENT_ID` and `CYANPRINT_GITHUB_ADMIN_LOGINS` as repository variables. For local release deploys, the bootstrap script reads them from `gh variable`.
+- Set `CYANPRINT_GITHUB_CLIENT_SECRET` once. The deploy script stores it as a Cloudflare Worker secret when the environment variable is present; later deploys assume the Worker secret already exists.
+
+```bash
+export CYANPRINT_GITHUB_CLIENT_SECRET="<github-oauth-client-secret>"
+unset CLOUDFLARE_API_TOKEN
+pls deploy:release
 ```
 
 - API tokens authorize push and publish flows.

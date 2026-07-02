@@ -8,10 +8,9 @@ import { createElement } from 'react';
 import type { ReactNode } from 'react';
 import { renderToReadableStream } from 'react-dom/server';
 import HomePage from '../../apps/web/src/app/page';
+import SearchPage from '../../apps/web/src/app/search/page';
 import AccountPage from '../../apps/web/src/app/account/page';
 import TokensPage from '../../apps/web/src/app/account/tokens/page';
-import AdminPage from '../../apps/web/src/app/admin/page';
-import AdminArtifactsPage from '../../apps/web/src/app/admin/artifacts/page';
 import ArtifactTypePage from '../../apps/web/src/app/artifacts/[type]/page';
 import ArtifactDetailPage from '../../apps/web/src/app/artifacts/[type]/[owner]/[name]/page';
 import DocsPage from '../../apps/web/src/app/docs/[...slug]/page';
@@ -27,10 +26,6 @@ if (unsafeReadmeHtml.includes('<script>') || !unsafeReadmeHtml.includes('&lt;scr
 }
 if (!(await Bun.file('apps/web/public/logo/cyanprint-logo.svg').exists())) {
   throw new Error('logo artifact is missing');
-}
-const adminArtifacts = artifacts.filter(artifact => artifact.moderationState === 'active');
-if (adminArtifacts.length === 0) {
-  throw new Error('web admin artifact data boundary returned no artifacts');
 }
 
 type SpawnedWebServer = {
@@ -52,7 +47,8 @@ async function renderHtml(element: ReactNode | Promise<ReactNode>): Promise<stri
   return (await new Response(stream).text()).replaceAll(/<!--.*?-->/g, '');
 }
 
-await assertRendered('home page', HomePage({}), 'Registry');
+await assertRendered('home page', HomePage(), 'CyanPrint');
+await assertRendered('search page', SearchPage({ searchParams: Promise.resolve({}) }), 'Registry search');
 await assertRendered(
   'artifact type page',
   ArtifactTypePage({ params: Promise.resolve({ type: 'template' }), searchParams: Promise.resolve({}) }),
@@ -68,15 +64,13 @@ await assertRendered(
   DocsPage({ params: Promise.resolve({ slug: ['user', 'quickstart'] }) }),
   'Quickstart',
 );
-await assertRendered('account page', AccountPage(), 'Publishing identity');
+await assertRendered('account page', AccountPage({ searchParams: Promise.resolve({}) }), 'Publishing identity');
 const tokenPageHtml = await renderHtml(TokensPage());
-for (const expected of ['Mint token', 'Proxy secret', 'Token name', 'Create token', 'Refresh']) {
+for (const expected of ['Sign in required', 'Sign in with GitHub']) {
   if (!tokenPageHtml.includes(expected)) {
     throw new Error(`tokens page did not render expected control: ${expected}`);
   }
 }
-await assertRendered('admin page', AdminPage(), 'Registry operations');
-await assertRendered('admin artifacts page', AdminArtifactsPage({}), 'Artifact moderation');
 
 const workerEnv = { CYANPRINT_ENABLE_LOCAL_AUTH: '1', CYANPRINT_LOCAL_DEV_SECRET: 'cyanprint-local-dev' };
 const app = createApp(createCloudflareLocalStorage(seedArtifacts, seedObjectPayloads));
@@ -85,21 +79,43 @@ let tokenRoutesVerified = false;
 let shellInteractionsVerified = false;
 try {
   process.env.CYANPRINT_REGISTRY_URL = server.url.toString().replace(/\/$/, '');
-  process.env.CYANPRINT_LOCAL_DEV_SECRET = 'cyanprint-local-dev';
-  process.env.CYANPRINT_WEB_ENABLE_LOCAL_TOKEN_PROXY = '1';
-  process.env.CYANPRINT_WEB_LOCAL_TOKEN_PROXY_SECRET = 'web-local-secret';
   const tokenRoute = await import('../../apps/web/src/app/api/tokens/route');
   const tokenByIdRoute = await import('../../apps/web/src/app/api/tokens/[id]/route');
+  const accountRoute = await import('../../apps/web/src/app/api/account/route');
+  const sameOriginHeaders = { origin: 'http://cyanprint.local' };
   const denied = await tokenRoute.POST(
     new Request('http://cyanprint.local/api/tokens', {
       method: 'POST',
+      headers: sameOriginHeaders,
       body: JSON.stringify({ name: 'denied' }),
     }),
   );
-  if (denied.status !== 502) {
-    throw new Error('web token route did not require local proxy secret');
+  if (denied.status !== 401) {
+    throw new Error('web token route did not require a signed-in session');
   }
-  const authHeaders = { 'x-cyanprint-web-token-secret': 'web-local-secret' };
+  const sessionResponse = await fetch(`${process.env.CYANPRINT_REGISTRY_URL}/auth/local-session`, {
+    method: 'POST',
+    headers: { 'x-cyanprint-dev-secret': 'cyanprint-local-dev' },
+    body: JSON.stringify({ userId: 'user_local' }),
+  });
+  if (!sessionResponse.ok) {
+    throw new Error('web token setup could not create a local registry session');
+  }
+  const session = ((await sessionResponse.json()) as { session: string }).session;
+  const authHeaders = {
+    cookie: `cyanprint_session=${encodeURIComponent(session)}`,
+    ...sameOriginHeaders,
+  };
+  const crossOrigin = await tokenRoute.POST(
+    new Request('http://cyanprint.local/api/tokens', {
+      method: 'POST',
+      headers: { cookie: authHeaders.cookie, origin: 'https://evil.example' },
+      body: JSON.stringify({ name: 'csrf' }),
+    }),
+  );
+  if (crossOrigin.status !== 403) {
+    throw new Error('web token mint route did not reject a cross-origin request');
+  }
   const emptyList = (await tokenRoute.GET(new Request('http://cyanprint.local/api/tokens', { headers: authHeaders })))
     .status;
   if (emptyList !== 200) {
@@ -125,6 +141,26 @@ try {
   if (revoke.status !== 200) {
     throw new Error('web token revoke route failed');
   }
+  const crossOriginAccount = await accountRoute.PATCH(
+    new Request('http://cyanprint.local/api/account', {
+      method: 'PATCH',
+      headers: { cookie: authHeaders.cookie, origin: 'https://evil.example' },
+      body: JSON.stringify({ handle: 'csrf-rename' }),
+    }),
+  );
+  if (crossOriginAccount.status !== 403) {
+    throw new Error('web account route did not reject a cross-origin request');
+  }
+  const immutableRename = await accountRoute.PATCH(
+    new Request('http://cyanprint.local/api/account', {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({ handle: 'renamed-local' }),
+    }),
+  );
+  if (immutableRename.status !== 409) {
+    throw new Error('web account route allowed renaming an already-set username');
+  }
   tokenRoutesVerified = true;
 } finally {
   server.stop(true);
@@ -138,7 +174,6 @@ console.log(
     status: 'done',
     spec,
     catalogData: true,
-    adminData: true,
     branding: true,
     contentSafety: true,
     tokenRoutesVerified,
@@ -177,7 +212,9 @@ async function runBrowserShellE2e(): Promise<void> {
     await search.click();
     await search.pressSequentially('resolver');
     await waitForUrlParam(page, 'q', 'resolver');
-    await page.selectOption('select[aria-label="Artifact kind"]', 'resolver');
+    await waitForPathname(page, '/search');
+    await page.getByLabel('Artifact kind filter').click();
+    await page.getByRole('menuitem', { name: 'Resolvers' }).click();
     await waitForUrlParam(page, 'kind', 'resolver');
     await page.getByTestId('search-result').first().waitFor();
     await assertBoxInsideViewport(page, '[data-testid="search-results"]', 'search results popover');
@@ -186,16 +223,19 @@ async function runBrowserShellE2e(): Promise<void> {
       throw new Error('browser search did not live-render resolver results.');
     }
 
-    await page.getByLabel('Open account menu').click();
-    await page.getByTestId('account-menu').waitFor();
-    const menuText = await page.getByTestId('account-menu').textContent();
-    if (!menuText?.includes('API tokens') || !menuText.includes('Personal info')) {
-      throw new Error('profile dropdown did not expose account actions.');
+    const signIn = page.getByRole('link', { name: 'Sign in' });
+    await signIn.waitFor();
+    if ((await page.getByTestId('account-menu').count()) !== 0) {
+      throw new Error('signed-out shell still renders an account dropdown.');
     }
-    await page.keyboard.press('Escape');
 
     await page.getByLabel('Open navigation').click();
-    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Templates' }).waitFor();
+    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Search' }).waitFor();
+    if (
+      (await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Templates' }).count()) !== 0
+    ) {
+      throw new Error('primary nav still exposes artifact tab links.');
+    }
     await assertBoxInsideViewport(page, '[data-testid="primary-nav"]', 'mobile navigation');
 
     await page.getByLabel('Switch to dark mode').click();
@@ -219,8 +259,7 @@ async function runBrowserShellE2e(): Promise<void> {
     await page.goto(baseUrl, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
     await waitForUrlParam(page, 'theme', 'dark');
-    await page.getByLabel('Open account menu').click();
-    await page.getByTestId('account-menu').getByText('Personal info').click();
+    await page.goto(`${baseUrl}/account?theme=dark`, { waitUntil: 'networkidle' });
     await waitForPathname(page, '/account');
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
     await waitForUrlParam(page, 'theme', 'dark');
@@ -230,16 +269,17 @@ async function runBrowserShellE2e(): Promise<void> {
     if ((await page.locator('.kind-tabs').count()) !== 0) {
       throw new Error('catalog route still rendered a second artifact filter control.');
     }
-    await page.selectOption('select[aria-label="Artifact kind"]', 'all');
-    await waitForUrlParam(page, 'kind', 'all');
+    await page.getByLabel('Artifact kind filter').click();
+    await page.getByRole('menuitem', { name: 'All' }).click();
+    await waitForPathname(page, '/search');
     const allCatalogText = await page.getByRole('main').textContent();
     if (!allCatalogText?.includes('cyanprint/keep-user')) {
       throw new Error('typed catalog route did not preserve the explicit all-artifacts URL state.');
     }
-    await page.selectOption('select[aria-label="Artifact kind"]', 'resolver');
+    await page.getByLabel('Artifact kind filter').click();
+    await page.getByRole('menuitem', { name: 'Resolvers' }).click();
     await waitForUrlParam(page, 'kind', 'resolver');
-    await page.getByLabel('Open navigation').click();
-    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Templates' }).click();
+    await page.goto(`${baseUrl}/search?kind=template&theme=dark`, { waitUntil: 'networkidle' });
     await waitForUrlParam(page, 'kind', 'template');
     const templateCards = page.getByTestId('artifact-card');
     try {
@@ -261,10 +301,120 @@ async function runBrowserShellE2e(): Promise<void> {
     await templateCards.filter({ hasText: 'cyanprint/hello' }).first().click();
     await waitForPathname(page, '/artifacts/template/cyanprint/hello');
     await assertArtifactDetailLayout(page);
+
+    await assertResponsiveThemeMatrix(page, baseUrl);
   } finally {
     await browser?.close();
     web.kill();
     await web.exited.catch(() => undefined);
+  }
+}
+
+async function assertResponsiveThemeMatrix(page: Page, baseUrl: string): Promise<void> {
+  const routes = [
+    '/',
+    '/search',
+    '/search?q=hello&kind=template',
+    '/docs/user/quickstart',
+    '/docs/user/artifact-authoring',
+    '/account',
+    '/account/tokens',
+    '/artifacts/template',
+    '/artifacts/template/cyanprint/hello',
+  ];
+  const viewports = [
+    { label: 'mobile', width: 390, height: 820 },
+    { label: 'desktop', width: 1440, height: 920 },
+  ];
+  const themes = ['light', 'dark'] as const;
+
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    for (const theme of themes) {
+      for (const route of routes) {
+        const url = themedUrl(baseUrl, route, theme);
+        const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
+        if (!response?.ok()) {
+          throw new Error(`${viewport.label} ${theme} ${route}: HTTP ${response?.status() ?? 'unknown'}`);
+        }
+        await page.waitForFunction(() => document.documentElement.dataset.cyanprintShell === 'ready');
+        await assertNoHorizontalOverflow(page, `${viewport.label} ${theme} ${route}`);
+        await assertThemeApplied(page, theme, `${viewport.label} ${theme} ${route}`);
+        await assertReadableText(page, `${viewport.label} ${theme} ${route}`);
+        if (route.startsWith('/docs/')) {
+          await assertMarkdownLayout(page, `${viewport.label} ${theme} ${route}`);
+        }
+      }
+    }
+  }
+}
+
+function themedUrl(baseUrl: string, route: string, theme: 'light' | 'dark'): string {
+  const url = new URL(route, baseUrl);
+  if (theme === 'dark') {
+    url.searchParams.set('theme', 'dark');
+  } else {
+    url.searchParams.set('theme', 'light');
+  }
+  return url.toString();
+}
+
+async function assertThemeApplied(page: Page, theme: 'light' | 'dark', label: string): Promise<void> {
+  const dark = await page.evaluate(() => document.documentElement.classList.contains('dark'));
+  if (theme === 'dark' && !dark) {
+    throw new Error(`${label}: dark theme class was not applied`);
+  }
+  if (theme === 'light' && dark) {
+    throw new Error(`${label}: light route still has dark theme class`);
+  }
+}
+
+async function assertReadableText(page: Page, label: string): Promise<void> {
+  const state = await page.evaluate(() => {
+    const visibleElements = Array.from(document.querySelectorAll('main h1, main h2, main p, main li, main code'))
+      .map(element => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return {
+          color: style.color,
+          height: rect.height,
+          text: element.textContent?.trim() ?? '',
+          width: rect.width,
+        };
+      })
+      .filter(element => element.text && element.width > 0 && element.height > 0);
+    return {
+      blankTextCount: visibleElements.filter(element => element.color === 'rgba(0, 0, 0, 0)').length,
+      count: visibleElements.length,
+    };
+  });
+  if (state.count === 0 || state.blankTextCount > 0) {
+    throw new Error(`${label}: readable text check failed: ${JSON.stringify(state)}`);
+  }
+}
+
+async function assertMarkdownLayout(page: Page, label: string): Promise<void> {
+  await page.locator('.markdown-body').first().waitFor();
+  const state = await page.evaluate(() => {
+    const body = document.querySelector('.markdown-body')?.getBoundingClientRect();
+    const pre = document.querySelector('.markdown-body pre')?.getBoundingClientRect();
+    const preStyle = document.querySelector('.markdown-body pre')
+      ? window.getComputedStyle(document.querySelector('.markdown-body pre')!)
+      : undefined;
+    return {
+      bodyHeight: body?.height ?? 0,
+      bodyWidth: body?.width ?? 0,
+      preBackground: preStyle?.backgroundColor ?? '',
+      preColor: preStyle?.color ?? '',
+      preHeight: pre?.height ?? 0,
+      preWidth: pre?.width ?? 0,
+    };
+  });
+  if (state.bodyHeight <= 0 || state.bodyWidth <= 0) {
+    throw new Error(`${label}: markdown body is empty: ${JSON.stringify(state)}`);
+  }
+  if (state.preHeight > 0 && (state.preColor === state.preBackground || state.preWidth <= 0)) {
+    throw new Error(`${label}: markdown code block is unreadable: ${JSON.stringify(state)}`);
   }
 }
 
@@ -297,15 +447,15 @@ async function assertArtifactDetailLayout(page: Page): Promise<void> {
 async function assertLandingLayout(page: Page, label: string): Promise<void> {
   const state = await page.evaluate(() => {
     const hero = document.querySelector('.hero')?.getBoundingClientRect();
-    const dashboard = document.querySelector('.hero-dashboard')?.getBoundingClientRect();
+    const ledger = document.querySelector('.hero-ledger')?.getBoundingClientRect();
     const catalog = document.querySelector('.catalog-section')?.getBoundingClientRect();
     const stylesheetCount = document.styleSheets.length;
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight;
     return {
       catalogTop: catalog?.top ?? null,
-      dashboardBottom: dashboard?.bottom ?? null,
-      dashboardTop: dashboard?.top ?? null,
+      ledgerBottom: ledger?.bottom ?? null,
+      ledgerTop: ledger?.top ?? null,
       heroBottom: hero?.bottom ?? null,
       heroTop: hero?.top ?? null,
       scrollWidth: document.documentElement.scrollWidth,
@@ -320,18 +470,18 @@ async function assertLandingLayout(page: Page, label: string): Promise<void> {
   if (state.scrollWidth > state.viewportWidth) {
     throw new Error(`${label}: horizontal overflow ${state.scrollWidth} > ${state.viewportWidth}`);
   }
-  if (state.catalogTop === null || state.catalogTop > state.viewportHeight) {
-    throw new Error(`${label}: catalog hint is not visible in first viewport: ${JSON.stringify(state)}`);
+  if (state.catalogTop !== null) {
+    throw new Error(`${label}: landing page still renders the catalog section: ${JSON.stringify(state)}`);
   }
   if (
     state.heroTop === null ||
     state.heroBottom === null ||
-    state.dashboardTop === null ||
-    state.dashboardBottom === null ||
-    state.dashboardTop < state.heroTop ||
-    state.dashboardBottom > state.heroBottom + 1
+    state.ledgerTop === null ||
+    state.ledgerBottom === null ||
+    state.ledgerTop < state.heroTop ||
+    state.ledgerBottom > state.heroBottom + 1
   ) {
-    throw new Error(`${label}: hero dashboard escapes hero bounds: ${JSON.stringify(state)}`);
+    throw new Error(`${label}: hero ledger escapes hero bounds: ${JSON.stringify(state)}`);
   }
 }
 

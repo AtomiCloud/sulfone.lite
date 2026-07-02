@@ -1,0 +1,5 @@
+cases:
+  - name: basic
+    answers:
+      name: cyanprint-nix
+    expected: expected

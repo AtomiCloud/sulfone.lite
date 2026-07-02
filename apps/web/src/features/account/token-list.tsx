@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { Button } from '../../components/ui/button';
-import { saveTokenProxySecret, tokenProxyHeaders } from './token-proxy-secret';
 
 type Token = {
   id: string;
@@ -17,7 +16,7 @@ export function TokenList() {
   async function loadTokens() {
     setError('');
     try {
-      const response = await fetch('/api/tokens', { cache: 'no-store', headers: tokenProxyHeaders() });
+      const response = await fetch('/api/tokens', { cache: 'no-store' });
       const body = (await response.json()) as { tokens?: Token[]; error?: string };
       if (!response.ok || !body.tokens) {
         throw new Error(body.error ?? 'Unable to load tokens.');
@@ -33,7 +32,6 @@ export function TokenList() {
     try {
       const response = await fetch(`/api/tokens/${encodeURIComponent(id)}`, {
         method: 'DELETE',
-        headers: tokenProxyHeaders(),
       });
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -58,17 +56,9 @@ export function TokenList() {
         className="inline-form"
         onSubmit={event => {
           event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          saveTokenProxySecret(String(form.get('proxySecret') || ''));
           void loadTokens();
         }}
       >
-        <input
-          aria-label="Proxy secret for refreshing tokens"
-          name="proxySecret"
-          placeholder="proxy secret"
-          type="password"
-        />
         <Button tone="secondary" type="submit">
           Refresh
         </Button>

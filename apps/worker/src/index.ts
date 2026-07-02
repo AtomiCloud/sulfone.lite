@@ -20,13 +20,17 @@ import {
 } from '@cyanprint/contracts';
 import { storage as defaultStorage } from './state';
 import { createCloudflareBindingStorage, type WorkerBindings } from './storage/cloudflare-binding-storage';
-import type { RegistryStorage, StoredUploadSession } from './storage/types';
+import type { RegistryStorage, RegistryUser, StoredUploadSession } from './storage/types';
 import { problemResponse } from './http/problem';
-import { isActiveArtifact } from '@cyanprint/registry-client';
+import { cyanprintSessionCookieName, isActiveArtifact, readCookie } from '@cyanprint/registry-client';
 
 type AppContext = Context<{ Bindings: WorkerBindings }>;
 type StorageSource = RegistryStorage | ((env: WorkerBindings) => RegistryStorage);
 type UploadPartName = keyof ArtifactObjects;
+type GitHubUser = {
+  id: number;
+  login: string;
+};
 
 async function sha256Hex(content: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content));
@@ -49,17 +53,20 @@ async function requireToken(storage: RegistryStorage, c: { req: { header(name: s
 }
 
 async function requireUser(storage: RegistryStorage, c: { req: { header(name: string): string | undefined } }) {
-  const session = c.req.header('x-cyanprint-session');
+  const session = c.req.header('x-cyanprint-session') ?? readCookie(c.req.header('cookie'), cyanprintSessionCookieName);
   return session ? storage.getSessionUser(session) : undefined;
 }
 
-async function requireAdminToken(storage: RegistryStorage, c: { req: { header(name: string): string | undefined } }) {
+async function requireAdminToken(
+  storage: RegistryStorage,
+  c: { env?: WorkerBindings; req: { header(name: string): string | undefined } },
+) {
   const token = await requireToken(storage, c);
   if (!token) {
     return undefined;
   }
   const user = await storage.getUser(token.userId);
-  return user?.admin ? { token, user } : undefined;
+  return isEffectiveAdmin(user, c.env) ? { token, user } : undefined;
 }
 
 async function validateArtifactInput(storage: RegistryStorage, artifact: ArtifactPublish): Promise<string | undefined> {
@@ -409,15 +416,21 @@ async function canPublishArtifact(
   storage: RegistryStorage,
   token: { userId: string },
   artifact: ArtifactPublish,
+  env?: WorkerBindings,
 ): Promise<boolean> {
   const user = await storage.getUser(token.userId);
-  return Boolean(user?.admin || user?.handle === artifact.owner);
+  return Boolean(isEffectiveAdmin(user, env) || user?.handle === artifact.owner);
 }
 
-async function canWriteObject(storage: RegistryStorage, token: { userId: string }, ref: ObjectRef): Promise<boolean> {
+async function canWriteObject(
+  storage: RegistryStorage,
+  token: { userId: string },
+  ref: ObjectRef,
+  env?: WorkerBindings,
+): Promise<boolean> {
   const user = await storage.getUser(token.userId);
   const owner = ref.key.split('/')[1];
-  return Boolean(user?.admin || user?.handle === owner);
+  return Boolean(isEffectiveAdmin(user, env) || user?.handle === owner);
 }
 
 function resolveStorage(source: StorageSource, c: AppContext): RegistryStorage {
@@ -444,6 +457,128 @@ function legacyPackageApiEnabled(storage: RegistryStorage, c: AppContext): boole
   return c.env?.CYANPRINT_ENABLE_LEGACY_PACKAGE_API === '1' || storage.mode === 'in-memory';
 }
 
+function randomToken(prefix: string): string {
+  return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`;
+}
+
+function expiresIn(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+function githubAdminLogins(env: WorkerBindings): Set<string> {
+  return new Set(
+    (env.CYANPRINT_GITHUB_ADMIN_LOGINS ?? '')
+      .split(',')
+      .map(login => login.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function isEffectiveAdmin(user: RegistryUser | undefined, env: WorkerBindings | undefined): boolean {
+  if (!user?.admin) {
+    return false;
+  }
+  const login = (user.login ?? user.handle ?? '').toLowerCase();
+  return !user.id.startsWith('github:') || githubAdminLogins(env ?? {}).has(login);
+}
+
+function normalizeGitHubHandle(login: string): string {
+  return normalizeHandle(login);
+}
+
+function normalizeHandle(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function validateHandle(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const handle = normalizeHandle(value);
+  return /^[a-z0-9][a-z0-9-]{2,38}$/.test(handle) ? handle : undefined;
+}
+
+function publicUser(user: RegistryUser, env?: WorkerBindings) {
+  return {
+    id: user.id,
+    handle: user.handle ?? null,
+    login: user.login,
+    admin: isEffectiveAdmin(user, env),
+  };
+}
+
+function allowedReturnOrigins(env: WorkerBindings, requestOrigin: string): Set<string> {
+  return new Set(
+    [env.CYANPRINT_WEB_URL, env.CYANPRINT_AUTH_RETURN_ORIGINS, 'https://cyanprint.dev', requestOrigin]
+      .filter(Boolean)
+      .flatMap(value => String(value).split(','))
+      .map(value => value.trim().replace(/\/$/, ''))
+      .filter(Boolean),
+  );
+}
+
+function validateReturnTo(env: WorkerBindings, requestOrigin: string, value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const url = new URL(value);
+    return allowedReturnOrigins(env, requestOrigin).has(url.origin) ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function redirectWithAuthError(c: AppContext, returnTo: string | undefined, code: string): Response {
+  if (!returnTo) {
+    return problemResponse(c, 401, 'auth', code, 'GitHub authentication failed.');
+  }
+  const url = new URL(returnTo);
+  url.searchParams.set('error', code);
+  return c.redirect(url.toString(), 302);
+}
+
+async function exchangeGitHubCode(env: WorkerBindings, origin: string, code: string): Promise<string | undefined> {
+  if (!env.CYANPRINT_GITHUB_CLIENT_ID || !env.CYANPRINT_GITHUB_CLIENT_SECRET) {
+    return undefined;
+  }
+  const response = await fetch('https://github.com/login/oauth/access_token', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/x-www-form-urlencoded',
+      'user-agent': 'cyanprint-registry',
+    },
+    body: new URLSearchParams({
+      client_id: env.CYANPRINT_GITHUB_CLIENT_ID,
+      client_secret: env.CYANPRINT_GITHUB_CLIENT_SECRET,
+      code,
+      redirect_uri: `${origin}/auth/github/callback`,
+    }),
+  });
+  if (!response.ok) {
+    return undefined;
+  }
+  const body = (await response.json().catch(() => ({}))) as { access_token?: string };
+  return body.access_token;
+}
+
+async function fetchGitHubUser(accessToken: string): Promise<GitHubUser | undefined> {
+  const response = await fetch('https://api.github.com/user', {
+    headers: {
+      accept: 'application/vnd.github+json',
+      authorization: `Bearer ${accessToken}`,
+      'user-agent': 'cyanprint-registry',
+      'x-github-api-version': '2022-11-28',
+    },
+  });
+  if (!response.ok) {
+    return undefined;
+  }
+  const body = (await response.json().catch(() => ({}))) as Partial<GitHubUser>;
+  return typeof body.id === 'number' && typeof body.login === 'string' ? { id: body.id, login: body.login } : undefined;
+}
+
 export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBindings }> {
   const app = new Hono<{ Bindings: WorkerBindings }>();
 
@@ -458,17 +593,53 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
     if (!user) {
       return problemResponse(c, 401, 'auth', 'missing_session', 'A local authenticated session is required.');
     }
-    return c.json({ user });
+    return c.json({ user: publicUser(user, c.env) });
   });
 
-  app.get('/users', async c => {
+  app.patch('/me', async c => {
     const storage = resolveStorage(source, c);
     const user = await requireUser(storage, c);
     if (!user) {
       return problemResponse(c, 401, 'auth', 'missing_session', 'A local authenticated session is required.');
     }
+    const body = (await c.req.json().catch(() => ({}))) as { handle?: unknown };
+    const handle = validateHandle(body.handle);
+    if (!handle) {
+      return problemResponse(
+        c,
+        400,
+        'validation',
+        'invalid_handle',
+        'Handle must be 3-39 lowercase letters, numbers, or hyphens, and start with a letter or number.',
+      );
+    }
+    const updated = await storage.updateUserHandle(user.id, handle);
+    if (updated === 'immutable') {
+      return problemResponse(
+        c,
+        409,
+        'validation',
+        'handle_immutable',
+        'Your CyanPrint username is already set and cannot be changed.',
+      );
+    }
+    if (updated === 'duplicate') {
+      return problemResponse(c, 409, 'validation', 'handle_taken', 'That CyanPrint username is already taken.');
+    }
+    if (updated === 'not_found') {
+      return problemResponse(c, 404, 'not_found', 'user_not_found', 'Authenticated user was not found.');
+    }
+    const next = await storage.getUser(user.id);
+    return c.json({ user: publicUser(next ?? { ...user, handle }, c.env) });
+  });
+
+  app.get('/users', async c => {
+    const storage = resolveStorage(source, c);
+    if (!(await requireAdminToken(storage, c))) {
+      return problemResponse(c, 403, 'permission', 'admin_required', 'An admin API token is required to list users.');
+    }
     const users = await storage.listUsers();
-    return c.json({ users: users.map(({ id, handle, admin }) => ({ id, handle, admin: Boolean(admin) })) });
+    return c.json({ users: users.map(user => publicUser(user, c.env)) });
   });
 
   app.post('/auth/local-session', async c => {
@@ -488,7 +659,83 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
     }
     const session = `cps_${crypto.randomUUID().replaceAll('-', '')}`;
     await storage.createSession(user.id, session);
-    return c.json({ session, user: { id: user.id, handle: user.handle, admin: Boolean(user.admin) } });
+    return c.json({ session, user: publicUser(user, c.env) });
+  });
+
+  app.get('/auth/github/start', async c => {
+    const storage = resolveStorage(source, c);
+    const origin = new URL(c.req.url).origin;
+    const returnTo = validateReturnTo(c.env ?? {}, origin, c.req.query('return_to'));
+    if (!returnTo) {
+      return problemResponse(c, 400, 'auth', 'invalid_return_to', 'A valid return_to URL is required.');
+    }
+    if (!c.env?.CYANPRINT_GITHUB_CLIENT_ID || !c.env.CYANPRINT_GITHUB_CLIENT_SECRET) {
+      return problemResponse(c, 503, 'auth', 'github_oauth_not_configured', 'GitHub OAuth is not configured.');
+    }
+    const state = randomToken('cpo');
+    await storage.saveOAuthState({ id: state, returnTo, expiresAt: expiresIn(10 * 60) });
+    const authorize = new URL('https://github.com/login/oauth/authorize');
+    authorize.searchParams.set('client_id', c.env.CYANPRINT_GITHUB_CLIENT_ID);
+    authorize.searchParams.set('redirect_uri', `${origin}/auth/github/callback`);
+    authorize.searchParams.set('state', state);
+    authorize.searchParams.set('scope', 'read:user');
+    return c.redirect(authorize.toString(), 302);
+  });
+
+  app.get('/auth/github/callback', async c => {
+    const storage = resolveStorage(source, c);
+    const stateId = c.req.query('state');
+    const code = c.req.query('code');
+    const state = stateId ? await storage.consumeOAuthState(stateId) : undefined;
+    if (!state || !code) {
+      return redirectWithAuthError(c, state?.returnTo, 'invalid_oauth_state');
+    }
+    const origin = new URL(c.req.url).origin;
+    const accessToken = await exchangeGitHubCode(c.env ?? {}, origin, code);
+    const githubUser = accessToken ? await fetchGitHubUser(accessToken) : undefined;
+    if (!githubUser) {
+      return redirectWithAuthError(c, state.returnTo, 'github_login_failed');
+    }
+    const id = `github:${githubUser.id}`;
+    const login = normalizeGitHubHandle(githubUser.login);
+    const existing = await storage.getUser(id);
+    const admin = githubAdminLogins(c.env ?? {}).has(login);
+    const user = { id, handle: existing?.handle ?? null, login, admin };
+    await storage.upsertUser(user);
+    const session = randomToken('cps');
+    await storage.createSession(user.id, session);
+    const handoff = randomToken('cph');
+    await storage.saveAuthHandoff({ id: handoff, userId: user.id, session, expiresAt: expiresIn(2 * 60) });
+    const redirectTo = new URL(state.returnTo);
+    redirectTo.searchParams.set('handoff', handoff);
+    return c.redirect(redirectTo.toString(), 302);
+  });
+
+  app.post('/auth/github/consume', async c => {
+    const storage = resolveStorage(source, c);
+    const body = (await c.req.json().catch(() => ({}))) as { handoff?: string };
+    const handoff = body.handoff ? await storage.consumeAuthHandoff(body.handoff) : undefined;
+    if (!handoff) {
+      return problemResponse(c, 401, 'auth', 'invalid_auth_handoff', 'GitHub auth handoff is invalid or expired.');
+    }
+    const user = await storage.getUser(handoff.userId);
+    if (!user) {
+      return problemResponse(c, 404, 'not_found', 'user_not_found', 'Authenticated user was not found.');
+    }
+    return c.json({
+      session: handoff.session,
+      user: publicUser(user, c.env),
+    });
+  });
+
+  app.post('/auth/logout', async c => {
+    const storage = resolveStorage(source, c);
+    const session =
+      c.req.header('x-cyanprint-session') ?? readCookie(c.req.header('cookie'), cyanprintSessionCookieName);
+    if (session) {
+      await storage.deleteSession(session);
+    }
+    return c.json({ ok: true });
   });
 
   app.post('/tokens', async c => {
@@ -529,9 +776,9 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
         'A local authenticated user is required to list tokens.',
       );
     }
-    const tokens = await storage.listTokens();
+    const tokens = await storage.listTokensForUser(user.id);
     return c.json({
-      tokens: tokens.filter(token => token.userId === user.id).map(({ secretHash: _secretHash, ...token }) => token),
+      tokens: tokens.map(({ secretHash: _secretHash, ...token }) => token),
     });
   });
 
@@ -547,12 +794,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
         'A local authenticated user is required to revoke tokens.',
       );
     }
-    const tokens = await storage.listTokens();
-    const token = tokens.find(item => item.id === c.req.param('id') && item.userId === user.id);
-    if (token) {
-      token.revoked = true;
-      await storage.createToken(token);
-    }
+    await storage.revokeTokenForUser(user.id, c.req.param('id'));
     return c.json({ ok: true });
   });
 
@@ -642,7 +884,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
       likes: 0,
     };
     const parsedArtifact = ArtifactPublishSchema.safeParse(artifactForPermission);
-    if (!parsedArtifact.success || !(await canPublishArtifact(storage, token, parsedArtifact.data))) {
+    if (!parsedArtifact.success || !(await canPublishArtifact(storage, token, parsedArtifact.data, c.env))) {
       return problemResponse(c, 403, 'permission', 'owner_required', 'Token owner cannot upload this artifact owner.');
     }
     const uploadId = crypto.randomUUID();
@@ -767,7 +1009,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
         'Upload identity does not match artifact metadata.',
       );
     }
-    if (!(await canPublishArtifact(storage, token, artifact))) {
+    if (!(await canPublishArtifact(storage, token, artifact, c.env))) {
       return problemResponse(c, 403, 'permission', 'owner_required', 'Token owner cannot publish this artifact owner.');
     }
     const validationError = await validateArtifactInput(storage, artifact);
@@ -803,7 +1045,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
     if (!ref.success || typeof body?.payload !== 'string') {
       return problemResponse(c, 400, 'validation', 'invalid_object', 'Object upload requires ref and payload.');
     }
-    if (!(await canWriteObject(storage, token, ref.data))) {
+    if (!(await canWriteObject(storage, token, ref.data, c.env))) {
       return problemResponse(c, 403, 'permission', 'owner_required', 'Token owner cannot upload this object key.');
     }
     if (
@@ -904,7 +1146,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
       downloads: 0,
       likes: 0,
     };
-    if (!(await canPublishArtifact(storage, token, artifact))) {
+    if (!(await canPublishArtifact(storage, token, artifact, c.env))) {
       return problemResponse(c, 403, 'permission', 'owner_required', 'Token owner cannot publish this artifact owner.');
     }
     const validationError = await validateArtifactInput(storage, artifact);

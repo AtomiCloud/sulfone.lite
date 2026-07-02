@@ -1,0 +1,11 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: tri-c
+bundledEntry: cyan.ts
+
+processors:
+  - cyan/default
+
+resolvers:
+  - cyanprint/tri-merge

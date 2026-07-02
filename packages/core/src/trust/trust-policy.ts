@@ -160,11 +160,13 @@ export function pinsFingerprint(pins: ResolvedDependencyPin[]): string {
         version: pin.version,
         integrity: pin.integrity,
       }))
-      .sort((left, right) =>
-        `${left.kind}:${left.owner}:${left.name}:${left.version}:${left.integrity}`.localeCompare(
-          `${right.kind}:${right.owner}:${right.name}:${right.version}:${right.integrity}`,
-        ),
-      ),
+      .sort((left, right) => {
+        // Code-unit ordering: this feeds the pins fingerprint, which must hash identically on
+        // every machine; localeCompare ordering varies with the host ICU/locale.
+        const leftKey = `${left.kind}:${left.owner}:${left.name}:${left.version}:${left.integrity}`;
+        const rightKey = `${right.kind}:${right.owner}:${right.name}:${right.version}:${right.integrity}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      }),
   );
 }
 

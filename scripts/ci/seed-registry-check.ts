@@ -1,6 +1,7 @@
 import { seedArtifacts, seedObjectPayloads } from '@cyanprint/registry-client';
 import { loadManifest, sha256 } from '@cyanprint/core';
 import { createTemplateArchivePayload } from '../../packages/cli/src/local-object-package';
+import { readSeedBundle } from './seed-bundles';
 
 const fixtureDirs: Record<string, string> = {
   'template:cyanprint:hello': 'examples/templates/hello',
@@ -45,7 +46,7 @@ for (const artifact of seedArtifacts) {
       continue;
     }
     const payload = payloads.get(key);
-    const source = await Bun.file(`${dir}/${path}`).text();
+    const source = part === 'bundle' ? await readSeedBundle(dir, manifest) : await Bun.file(`${dir}/${path}`).text();
     if (typeof payload !== 'string') {
       failures.push(
         `${artifact.kind}:${artifact.owner}/${artifact.name}@${artifact.version} ${part} should be seeded as text`,

@@ -1,7 +1,9 @@
 // @bun
 // examples/artifacts/processor-uppercase/src/index.ts
-function processor(input) {
-  const { files } = input;
-  return Object.fromEntries(Object.entries(files).map(([path, content]) => [path, content.toUpperCase()]));
+async function processor(input, fs) {
+  const files = await fs.read();
+  await fs.write(
+    files.map(file => (file.content === undefined ? file : { ...file, content: file.content.toUpperCase() })),
+  );
 }
 export { processor };

@@ -14,10 +14,6 @@ export function success(message: string): string {
   return `${chalk.green('[ok]')} ${message}`;
 }
 
-export function warn(message: string): string {
-  return `${chalk.yellow('[warn]')} ${message}`;
-}
-
 export function failure(message: string): string {
   return `${chalk.red('[error]')} ${message}`;
 }

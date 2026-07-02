@@ -26,10 +26,11 @@ export function CatalogBrowser({
     <section className="catalog-section">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Registry catalog</p>
+          <p className="eyebrow">Registry search</p>
           {headingLevel === 'h1' ? <h1>{catalogTitle(displayKind)}</h1> : <h2>{catalogTitle(displayKind)}</h2>}
           <p className="lede">
-            Search and artifact type are controlled from the top bar, then encoded in the URL for sharing.
+            Use the centered search bar above to filter by text and artifact type. The URL always carries the current
+            state.
           </p>
         </div>
       </div>

@@ -1,12 +1,12 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import type { Answers, GeneratedState, PromptAdapter } from '@cyanprint/contracts';
+import { lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, relative } from 'node:path';
+import type { Answers, GeneratedState, PromptAdapter, VfsFile } from '@cyanprint/contracts';
 import { invokeResolver, type ArtifactBundleRef, type ResolverFile } from '@cyanprint/artifact-runner';
 import { createProject } from '../create/create-project';
 import { loadManifest } from '../manifest/load-manifest';
 import { loadGeneratedState, writeGeneratedState } from '../state/generated-state';
 import { withTempSession } from '../sessions/temp-session';
-import { exists, readText, remove, safeJoin, sha256, writeText } from '../util';
+import { comparePaths, exists, readText, remove, safeJoin, sha256, writeText } from '../util';
 
 export type UpdatePlanResult =
   | { status: 'done'; reusedAnswers: string[]; outputPath: string; conflicts: [] }
@@ -15,8 +15,7 @@ export type UpdatePlanResult =
       reusedAnswers: string[];
       outputPath: string;
       conflicts: Array<{ path: string; reason: string }>;
-    }
-  | { status: 'need_input'; prompt: { name: string; message: string } };
+    };
 
 export async function updateProject(args: {
   projectDir: string;
@@ -31,6 +30,9 @@ export async function updateProject(args: {
   const conflicts: Array<{ path: string; reason: string }> = [];
   const pendingWrites: Array<{ path: string; file: StateFile }> = [];
   const pendingRemovals: string[] = [];
+  // Conflict `.target` files are deferred like every other write: nothing lands in the project
+  // during planning, and a conflict-free update clears any stale .cyan_conflicts/ leftovers.
+  const pendingConflictWrites: Array<{ path: string; file: StateFile }> = [];
   const { manifest: targetManifest } = await loadManifest(args.template);
 
   await withTempSession(async session => {
@@ -38,12 +40,16 @@ export async function updateProject(args: {
       template: args.template,
       outDir: session.path,
       answers,
+      deterministicState: prior.deterministicState,
       headless: args.headless ?? true,
       json: true,
       localFallback: args.localFallback,
       promptAdapter: args.promptAdapter,
     });
     const target = await loadGeneratedState(session.path);
+    const priorFiles = stateFilesToVfs(prior.files);
+    const targetFiles = stateFilesToVfs(target.files);
+    const currentFiles = await readProjectVfsFiles(args.projectDir);
     const targetArtifactBundles = new Map<string, ArtifactBundleRef>();
     for (const bundle of targetResult.artifactBundles) {
       targetArtifactBundles.set(artifactKey(bundle.dependency, targetManifest.owner), bundle);
@@ -87,15 +93,19 @@ export async function updateProject(args: {
 
       if (currentExists && !currentIsFile) {
         conflicts.push({ path, reason: 'user_replaced_file_with_directory' });
-        const conflictPath = safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`));
-        await writeStateFile(conflictPath, targetFile);
+        pendingConflictWrites.push({
+          path: safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`)),
+          file: targetFile,
+        });
         continue;
       }
 
       if (priorFile && !currentExists) {
         conflicts.push({ path, reason: 'user_deleted_and_target_changed' });
-        const conflictPath = safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`));
-        await writeStateFile(conflictPath, targetFile);
+        pendingConflictWrites.push({
+          path: safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`)),
+          file: targetFile,
+        });
         continue;
       }
 
@@ -120,10 +130,25 @@ export async function updateProject(args: {
         }
         const resolverFiles: ResolverFile[] = [];
         if (priorFile?.content !== undefined) {
-          resolverFiles.push({ path, content: priorFile.content, origin: { template: 'prior', layer: 0 } });
+          resolverFiles.push({
+            path,
+            content: priorFile.content,
+            origin: { template: 'prior', layer: 0 },
+            files: priorFiles,
+          });
         }
-        resolverFiles.push({ path, content: currentText, origin: { template: 'current', layer: 1 } });
-        resolverFiles.push({ path, content: targetFile.content ?? '', origin: { template: 'target', layer: 2 } });
+        resolverFiles.push({
+          path,
+          content: currentText,
+          origin: { template: 'current', layer: 1 },
+          files: currentFiles,
+        });
+        resolverFiles.push({
+          path,
+          content: targetFile.content ?? '',
+          origin: { template: 'target', layer: 2 },
+          files: targetFiles,
+        });
         const bundle = await resolveTargetResolverBundle({
           targetArtifactBundles,
           dependency: { ...resolverRef, kind: resolverRef.kind ?? 'resolver' },
@@ -131,7 +156,7 @@ export async function updateProject(args: {
         });
         const resolved = await invokeResolver(bundle, {
           files: resolverFiles,
-          config: { path, ...(isRecord(resolverRef.config) ? resolverRef.config : {}) },
+          config: { ...(isRecord(resolverRef.config) ? resolverRef.config : {}), path },
         });
         if (targetFile) {
           targetFile.content = resolved;
@@ -153,8 +178,10 @@ export async function updateProject(args: {
             ? 'user_edit_and_target_changed_ambiguous_resolver'
             : 'user_edit_and_target_changed',
       });
-      const conflictPath = safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`));
-      await writeStateFile(conflictPath, targetFile);
+      pendingConflictWrites.push({
+        path: safeJoin(args.projectDir, join('.cyan_conflicts', `${path}.target`)),
+        file: targetFile,
+      });
     }
 
     if (conflicts.length === 0) {
@@ -164,7 +191,12 @@ export async function updateProject(args: {
       for (const write of pendingWrites) {
         await writeStateFile(write.path, write.file);
       }
+      await remove(join(args.projectDir, '.cyan_conflicts'));
       await writeGeneratedState(args.projectDir, target);
+    } else {
+      for (const write of pendingConflictWrites) {
+        await writeStateFile(write.path, write.file);
+      }
     }
   });
 
@@ -185,6 +217,52 @@ function decodeText(bytes: Uint8Array): string | undefined {
     return text.includes('\u0000') ? undefined : text;
   } catch {
     return undefined;
+  }
+}
+
+function stateFilesToVfs(files: GeneratedState['files']): VfsFile[] {
+  return files
+    .map(file =>
+      file.bytesBase64 !== undefined
+        ? { path: file.path, bytesBase64: file.bytesBase64 }
+        : { path: file.path, content: file.content ?? '' },
+    )
+    .sort((left, right) => comparePaths(left.path, right.path));
+}
+
+async function readProjectVfsFiles(projectDir: string): Promise<VfsFile[]> {
+  const files: VfsFile[] = [];
+  await walkProjectFiles(projectDir, async path => {
+    const relativePath = relative(projectDir, path)
+      .split(/[\\/]+/)
+      .join('/');
+    if (relativePath === '.cyan_state.yaml' || relativePath.startsWith('.cyan_conflicts/')) {
+      return;
+    }
+    const bytes = await readFile(path);
+    const content = decodeText(bytes);
+    files.push(
+      content === undefined
+        ? { path: relativePath, bytesBase64: Buffer.from(bytes).toString('base64') }
+        : { path: relativePath, content },
+    );
+  });
+  return files.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+async function walkProjectFiles(root: string, visit: (path: string) => Promise<void>): Promise<void> {
+  const info = await lstat(root).catch(() => undefined);
+  if (!info?.isDirectory()) {
+    return;
+  }
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    const entryInfo = await lstat(path);
+    if (entryInfo.isDirectory()) {
+      await walkProjectFiles(path, visit);
+    } else if (entryInfo.isFile()) {
+      await visit(path);
+    }
   }
 }
 

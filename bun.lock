@@ -6,16 +6,12 @@
       "name": "cyanprint",
       "dependencies": {
         "@atomicloud/cyan-sdk": "workspace:*",
-        "@inquirer/prompts": "8.5.2",
-        "chalk": "5.6.2",
-        "commander": "15.0.0",
-        "hono": "4.10.7",
+        "eta": "^3.1.1",
         "next": "15.5.7",
         "react": "19.2.3",
         "react-dom": "19.2.3",
         "smob": "1.6.0",
         "yaml": "2.8.2",
-        "zod": "4.2.1",
       },
       "devDependencies": {
         "@opennextjs/cloudflare": "1.20.1",
@@ -875,6 +871,8 @@
     "esprima": ["esprima@4.0.1", "", { "bin": { "esparse": "./bin/esparse.js", "esvalidate": "./bin/esvalidate.js" } }, "sha512-eGuFFw7Upda+g4p+QHvnW0RyTX/SVeJBDM/gCtMARO0cLuT2HcEKnTPvhjV6aGeqrCB/sbNop0Kszm0jsaWU4A=="],
 
     "estree-util-is-identifier-name": ["estree-util-is-identifier-name@3.0.0", "", {}, "sha512-hFtqIDZTIUZ9BXLb8y4pYGyk6+wekIivNVTcmvk8NoOh+VeRn5y6cEHzbURrWbfp1fIqdVipilzj+lfaadNZmg=="],
+
+    "eta": ["eta@3.5.0", "", {}, "sha512-e3x3FBvGzeCIHhF+zhK8FZA2vC5uFn6b4HJjegUbIWrDb4mJ7JjTGMJY9VGIbRVpmSwHopNiaJibhjIr+HfLug=="],
 
     "etag": ["etag@1.8.1", "", {}, "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg=="],
 

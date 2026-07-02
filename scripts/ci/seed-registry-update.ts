@@ -1,6 +1,7 @@
 import { seedArtifacts } from '@cyanprint/registry-client';
 import { loadManifest, sha256 } from '@cyanprint/core';
 import { createTemplateArchivePayload } from '../../packages/cli/src/local-object-package';
+import { readSeedBundle } from './seed-bundles';
 
 const fixtureDirs: Record<string, string> = {
   'template:cyanprint:hello': 'examples/templates/hello',
@@ -33,7 +34,7 @@ for (const artifact of seedArtifacts) {
   if (objects.readme) {
     await replaceSeedPart(objects.readme.key, await Bun.file(`${dir}/README.md`).text());
   }
-  await replaceSeedPart(objects.bundle.key, await Bun.file(`${dir}/${manifest.bundledEntry}`).text());
+  await replaceSeedPart(objects.bundle.key, await readSeedBundle(dir, manifest));
   if (objects.archive) {
     const archive = await createTemplateArchivePayload(dir, { bundledEntry: manifest.bundledEntry });
     await replaceSeedPart(objects.archive.key, archive.payload, true);
@@ -47,15 +48,17 @@ async function replaceSeedPart(key: string, payload: string | Uint8Array, binary
   const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
   const hash = sha256(payload);
   const base64 = Buffer.from(bytes).toString('base64');
-  const replacement = [
-    'seedPart(',
-    `        ${JSON.stringify(key)},`,
-    `        ${JSON.stringify(hash)},`,
-    `        ${bytes.byteLength},`,
-    `        ${JSON.stringify(base64)},${binary ? '\n        true,' : ''}`,
-    '      )',
-  ].join('\n');
-  const next = replaceSeedPartCall(key, replacement);
+  const next = replaceSeedPartCall(key, ({ lineIndent }) => {
+    const argIndent = `${lineIndent}  `;
+    return [
+      'seedPart(',
+      `${argIndent}${quoteTsString(key)},`,
+      `${argIndent}${quoteTsString(hash)},`,
+      `${argIndent}${bytes.byteLength},`,
+      `${argIndent}${quoteTsString(base64)},${binary ? `\n${argIndent}true,` : ''}`,
+      `${lineIndent})`,
+    ].join('\n');
+  });
   if (next !== undefined) {
     if (next !== source) {
       source = next;
@@ -63,14 +66,20 @@ async function replaceSeedPart(key: string, payload: string | Uint8Array, binary
     }
     return;
   }
-  if (replaceRuntimeSeedFields(key, hash, bytes.byteLength, base64)) {
-    updates += 1;
+  const runtimeChanged = replaceRuntimeSeedFields(key, hash, bytes.byteLength, base64);
+  if (runtimeChanged !== undefined) {
+    if (runtimeChanged) {
+      updates += 1;
+    }
     return;
   }
   throw new Error(`Could not update seedPart ${key}`);
 }
 
-function replaceSeedPartCall(key: string, replacement: string): string | undefined {
+function replaceSeedPartCall(
+  key: string,
+  buildReplacement: (context: { lineIndent: string }) => string,
+): string | undefined {
   const keyIndex = findSeedKeyIndex(key);
   if (keyIndex === -1) {
     return undefined;
@@ -79,6 +88,10 @@ function replaceSeedPartCall(key: string, replacement: string): string | undefin
   if (start === -1) {
     return undefined;
   }
+  const lineStart = source.lastIndexOf('\n', start) + 1;
+  const linePrefix = source.slice(lineStart, start);
+  const lineIndent = linePrefix.match(/^\s*/)?.[0] ?? '';
+  const replacement = buildReplacement({ lineIndent });
   const close = source.slice(start).match(/\n\s*\)\s*,?/);
   if (!close || close.index === undefined) {
     return undefined;
@@ -96,10 +109,10 @@ function findSeedKeyIndex(key: string): number {
   return source.indexOf(`'${key.replaceAll("'", "\\'")}'`);
 }
 
-function replaceRuntimeSeedFields(key: string, hash: string, size: number, base64: string): boolean {
+function replaceRuntimeSeedFields(key: string, hash: string, size: number, base64: string): boolean | undefined {
   const [kind, , name, , filename] = key.split('/');
   if (!kind || !name || !filename) {
-    return false;
+    return undefined;
   }
   const fieldPrefix =
     filename === 'manifest.yaml'
@@ -110,32 +123,46 @@ function replaceRuntimeSeedFields(key: string, hash: string, size: number, base6
           ? 'bundle'
           : undefined;
   if (!fieldPrefix) {
-    return false;
+    return undefined;
   }
   const callStart = source.indexOf(`seedRuntimeDefinition('${kind}', '${name}'`);
   if (callStart === -1) {
-    return false;
+    return undefined;
   }
   const callEnd = source.indexOf('\n  }),', callStart);
   if (callEnd === -1) {
-    return false;
+    return undefined;
   }
   const before = source.slice(0, callStart);
   const block = source.slice(callStart, callEnd);
   const after = source.slice(callEnd);
   const shaPattern = new RegExp(`${fieldPrefix}Sha: ['"][^'"]+['"]`);
   const sizePattern = new RegExp(`${fieldPrefix}Size: \\d+`);
-  const base64Pattern = new RegExp(`${fieldPrefix}Base64:\\s*['"][A-Za-z0-9+/=]*['"]`);
+  const base64Pattern = new RegExp(
+    `${fieldPrefix}Base64:\\s*(?:['"][A-Za-z0-9+/=]*['"]|\\[\\n(?:\\s*['"][A-Za-z0-9+/=]*['"],\\n)+\\s*\\]\\.join\\(''\\))`,
+  );
   if (!shaPattern.test(block) || !sizePattern.test(block) || !base64Pattern.test(block)) {
-    return false;
+    return undefined;
   }
   const updated = block
-    .replace(shaPattern, `${fieldPrefix}Sha: ${JSON.stringify(hash)}`)
+    .replace(shaPattern, `${fieldPrefix}Sha: ${quoteTsString(hash)}`)
     .replace(sizePattern, `${fieldPrefix}Size: ${size}`)
-    .replace(base64Pattern, `${fieldPrefix}Base64: ${JSON.stringify(base64)}`);
+    .replace(base64Pattern, `${fieldPrefix}Base64: ${formatRuntimeBase64(base64)}`);
   if (updated === block) {
-    return true;
+    return false;
   }
   source = `${before}${updated}${after}`;
   return true;
+}
+
+function quoteTsString(value: string): string {
+  return `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+function formatRuntimeBase64(value: string): string {
+  if (value.length <= 120) {
+    return quoteTsString(value);
+  }
+  const chunks = value.match(/.{1,100}/g) ?? [''];
+  return `[\n${chunks.map(chunk => `      ${quoteTsString(chunk)},`).join('\n')}\n    ].join('')`;
 }

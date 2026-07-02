@@ -9,6 +9,10 @@ const defaults = {
   CYANPRINT_WEB_DOMAIN: 'cyanprint.dev',
   CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: 'cyanprint-web-opennext-cache',
   CYANPRINT_RELEASE_REGISTRY_URL: 'https://registry.cyanprint.dev',
+  CYANPRINT_GITHUB_CLIENT_ID: '',
+  CYANPRINT_GITHUB_ADMIN_LOGINS: '',
+  CYANPRINT_AUTH_RETURN_ORIGINS: 'https://cyanprint.dev',
+  CYANPRINT_WEB_URL: 'https://cyanprint.dev',
 };
 
 const required = ['CYANPRINT_D1_DATABASE_ID', 'CYANPRINT_KV_NAMESPACE_ID'] as const;
@@ -16,6 +20,16 @@ const required = ['CYANPRINT_D1_DATABASE_ID', 'CYANPRINT_KV_NAMESPACE_ID'] as co
 for (const key of required) {
   if (!process.env[key]) {
     throw new Error(`${key} is required for release Wrangler config rendering.`);
+  }
+}
+
+if (process.env.CYANPRINT_ALLOW_OAUTH_DISABLED !== '1') {
+  for (const key of ['CYANPRINT_GITHUB_CLIENT_ID', 'CYANPRINT_GITHUB_ADMIN_LOGINS'] as const) {
+    if (!process.env[key]) {
+      throw new Error(
+        `${key} is required for production GitHub login. Set CYANPRINT_ALLOW_OAUTH_DISABLED=1 only for an intentional auth-disabled deploy.`,
+      );
+    }
   }
 }
 
@@ -32,8 +46,9 @@ async function render(args: { templatePath: string; outPath: string }): Promise<
   const template = await Bun.file(args.templatePath).text();
   const rendered = template.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key: string) => {
     const configured = process.env[key];
-    const value = configured && configured.length > 0 ? configured : defaults[key as keyof typeof defaults];
-    if (!value) {
+    const value =
+      configured !== undefined && configured.length > 0 ? configured : defaults[key as keyof typeof defaults];
+    if (value === undefined) {
       throw new Error(`${key} is required for ${args.templatePath}.`);
     }
     return value;

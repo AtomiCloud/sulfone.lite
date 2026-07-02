@@ -1,7 +1,11 @@
+import { dirname } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+
 type Strategy = 'concat' | 'replace' | 'distinct';
 
 type ResolverInput = {
-  files: Array<{ content: string; origin: { template: string; layer: number } }>;
+  inputDirs: Array<{ dir: string; origin: { template: string; layer: number } }>;
+  outputDir: string;
   config?: unknown;
 };
 
@@ -49,16 +53,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function resolver(input: ResolverInput): string {
+export async function resolver(input: ResolverInput): Promise<void> {
   const strategy = configStrategy(input.config);
-  const documents = [...input.files]
-    .sort(
-      (left, right) =>
-        left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
-    )
-    .map(file => file.content)
-    .filter((content): content is string => Boolean(content?.trim()))
+  const path = configPath(input.config);
+  const sorted = [...input.inputDirs].sort(
+    (left, right) =>
+      left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
+  );
+  const documents = (await Promise.all(sorted.map(async entry => await readCandidate(entry.dir, path))))
+    .filter(content => Boolean(content.trim()))
     .map(content => JSON.parse(content) as unknown);
   const merged = documents.reduce((acc, document) => mergeJson(acc, document, strategy));
-  return `${JSON.stringify(merged, null, 2)}\n`;
+  await writeOutput(input.outputDir, path, `${JSON.stringify(merged, null, 2)}\n`);
+}
+
+async function readCandidate(dir: string, path: string): Promise<string> {
+  return await Bun.file(`${dir}/${path}`)
+    .text()
+    .catch(() => '');
+}
+
+function configPath(config: unknown): string {
+  if (
+    config &&
+    typeof config === 'object' &&
+    !Array.isArray(config) &&
+    typeof (config as { path?: unknown }).path === 'string'
+  ) {
+    return (config as { path: string }).path;
+  }
+  return 'output.txt';
+}
+
+async function writeOutput(outputDir: string, path: string, content: string): Promise<void> {
+  const outputPath = `${outputDir}/${path}`;
+  await mkdir(dirname(outputPath), { recursive: true });
+  await Bun.write(outputPath, content);
 }

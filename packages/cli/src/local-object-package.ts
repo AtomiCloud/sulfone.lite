@@ -4,7 +4,7 @@ import { readTemplateTarFiles } from '@cyanprint/contracts';
 import { safeJoin, sha256 } from '@cyanprint/core';
 import { decompress } from 'fzstd';
 
-export type LocalObjectPackage = {
+type LocalObjectPackage = {
   cyanprint: 4;
   files: Array<{ path: string; content: string }>;
 };
@@ -29,7 +29,8 @@ async function collectFiles(root: string, dir = root): Promise<Array<{ path: str
     }
     out.push({ path: relative(root, fullPath), content: await readFile(fullPath, 'utf8') });
   }
-  return out.sort((a, b) => a.path.localeCompare(b.path));
+  // Code-unit ordering: entry order feeds the payload hash and must not vary by host locale.
+  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 export async function createLocalObjectPayload(
@@ -86,17 +87,31 @@ async function collectArchiveFilePaths(root: string, bundledEntry?: string): Pro
 }
 
 export async function unpackTemplateArchivePayload(payload: string | Uint8Array, outDir: string): Promise<void> {
+  const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
+  // Check for real archive formats FIRST: a tar whose first entry name starts with "{"
+  // (e.g. an interpolation-named file like "{{name}}.txt") would otherwise be mis-sniffed
+  // as a legacy JSON payload and fail with a JSON parse error.
+  if (isZstdFrame(bytes) || isUstarArchive(bytes)) {
+    const files = readTemplateTarFiles(isZstdFrame(bytes) ? decompress(bytes) : bytes);
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+    for (const file of files) {
+      const target = safeJoin(outDir, file.path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, file.bytes);
+    }
+    return;
+  }
   if (typeof payload === 'string' && payload.trimStart().startsWith('{')) {
     await unpackLegacyJsonTemplateArchive(payload, outDir);
     return;
   }
-  const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
   const legacyPayload = decodeLegacyJsonArchive(bytes);
   if (legacyPayload) {
     await unpackLegacyJsonTemplateArchive(legacyPayload, outDir);
     return;
   }
-  const files = readTemplateTarFiles(isZstdFrame(bytes) ? decompress(bytes) : bytes);
+  const files = readTemplateTarFiles(bytes);
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   for (const file of files) {
@@ -213,6 +228,20 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 
 function isZstdFrame(payload: Uint8Array): boolean {
   return payload[0] === 0x28 && payload[1] === 0xb5 && payload[2] === 0x2f && payload[3] === 0xfd;
+}
+
+function isUstarArchive(payload: Uint8Array): boolean {
+  // ustar magic lives at offset 257 of the first tar header block.
+  if (payload.byteLength < 263) {
+    return false;
+  }
+  return (
+    payload[257] === 0x75 && // u
+    payload[258] === 0x73 && // s
+    payload[259] === 0x74 && // t
+    payload[260] === 0x61 && // a
+    payload[261] === 0x72 // r
+  );
 }
 
 function objectPayload(payload: string): { payload: string; sha256: string; size: number } {

@@ -3,17 +3,16 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import type { ArtifactVersion } from '@cyanprint/contracts';
 import {
-  Boxes,
   ChevronDown,
-  CircleUserRound,
   FileText,
   KeyRound,
-  LayoutDashboard,
+  LogOut,
   Menu,
   Moon,
   Search,
-  ShieldCheck,
+  Settings2,
   Sun,
+  UserRound,
   X,
 } from 'lucide-react';
 import Image from 'next/image';
@@ -23,19 +22,26 @@ import type { FocusEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '../../components/ui/badge';
 import { cn } from '../../lib/cn';
+import { AccountUserProvider } from '../account/account-context';
+import type { AccountUser } from '../account/token-service';
 import { artifactKinds, filterArtifacts, normalizeArtifactKind } from '../registry/artifact-search';
-import { artifactDetailHref, artifactTypeHref } from '../registry/artifact-url';
+import { artifactDetailHref } from '../registry/artifact-url';
 import { useUrlState } from './url-state';
 
 const navItems = [
-  { href: '/artifacts/template', label: 'Templates', icon: Boxes },
-  { href: '/artifacts/processor', label: 'Processors', icon: LayoutDashboard },
-  { href: '/artifacts/plugin', label: 'Plugins', icon: ShieldCheck },
-  { href: '/artifacts/resolver', label: 'Resolvers', icon: FileText },
+  { href: '/search', label: 'Search', icon: Search },
   { href: '/docs/user/quickstart', label: 'Docs', icon: FileText },
 ];
 
-export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]; children: ReactNode }) {
+export function AppShell({
+  artifacts,
+  children,
+  user,
+}: {
+  artifacts: ArtifactVersion[];
+  children: ReactNode;
+  user?: AccountUser;
+}) {
   const router = useRouter();
   const deferredNavigation = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const navigateWithoutScroll = useCallback(
@@ -45,10 +51,7 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
       }
       if (navigation?.defer) {
         deferredNavigation.current = setTimeout(() => {
-          const currentUrl = `${window.location.pathname}${window.location.search}`;
-          if (currentUrl === url) {
-            router.replace(url, { scroll: false });
-          }
+          router.replace(url, { scroll: false });
         }, 120);
         return;
       }
@@ -61,11 +64,11 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
   });
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchDraft, setSearchDraft] = useState(params.get('q') ?? '');
   const [searchResults, setSearchResults] = useState(artifacts);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [themePreferenceReady, setThemePreferenceReady] = useState(false);
   const [storedTheme, setStoredTheme] = useState<'dark' | 'light'>('light');
-  const query = params.get('q') ?? '';
   const pathKind = normalizeArtifactKind(kindFromPath(pathname));
   const kind = params.has('kind') ? normalizeArtifactKind(params.get('kind'), pathKind) : pathKind;
   const hasThemeParam = params.has('theme');
@@ -80,6 +83,10 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
       delete document.documentElement.dataset.cyanprintShell;
     };
   }, []);
+
+  useEffect(() => {
+    setSearchDraft(params.get('q') ?? '');
+  }, [params]);
 
   useEffect(() => {
     if (themePreferenceReady) {
@@ -120,8 +127,8 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
     const controller = new AbortController();
     const search = new URLSearchParams();
     search.set('limit', '8');
-    if (query) {
-      search.set('q', query);
+    if (searchDraft) {
+      search.set('q', searchDraft);
     }
     if (kind !== 'all') {
       search.set('kind', kind);
@@ -141,17 +148,34 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
         }
-        setSearchResults(filterArtifacts(artifacts, { query, kind }));
+        setSearchResults(filterArtifacts(artifacts, { query: searchDraft, kind }));
         setSearchHasMore(false);
       });
     return () => controller.abort();
-  }, [artifacts, query, kind]);
+  }, [artifacts, searchDraft, kind]);
 
   function updateState(
     next: { q?: string; kind?: string; theme?: string; cursor?: string },
     navigation?: { defer?: boolean },
   ) {
     update(next, navigation);
+  }
+
+  function updateSearchState(next: { q?: string; kind?: string }, navigation?: { defer?: boolean }) {
+    const search = new URLSearchParams(params.toString());
+    if (!search.has('kind') && kind !== 'all') {
+      search.set('kind', kind);
+    }
+    for (const [key, value] of Object.entries(next)) {
+      if (!value || (key === 'kind' && value === 'all')) {
+        search.delete(key);
+      } else {
+        search.set(key, value);
+      }
+    }
+    search.delete('cursor');
+    const queryString = search.toString();
+    navigateWithoutScroll(`/search${queryString ? `?${queryString}` : ''}`, navigation);
   }
 
   function setThemePreference(nextTheme: 'dark' | 'light') {
@@ -169,136 +193,168 @@ export function AppShell({ artifacts, children }: { artifacts: ArtifactVersion[]
 
   return (
     <>
-      <header className="shell-header">
-        <Link className="brand" href="/">
-          <Image alt="CyanPrint" height={38} src="/logo/cyanprint-logo.svg" width={38} priority />
-          <span>CyanPrint v4</span>
-        </Link>
+      <AccountUserProvider user={user}>
+        <header className="shell-header">
+          <Link className="brand" href="/">
+            <Image alt="CyanPrint" height={38} src="/logo/cyanprint-logo.svg" width={38} priority />
+            <span>CyanPrint</span>
+          </Link>
 
-        <div
-          className="top-search"
-          onBlur={handleSearchBlur}
-          onFocus={() => setSearchOpen(true)}
-          onKeyDown={event => {
-            if (event.key === 'Escape') {
-              setSearchOpen(false);
-            }
-          }}
-          role="search"
-        >
-          <Search aria-hidden="true" size={18} />
-          <input
-            aria-label="Search registry"
-            onChange={event => updateState({ q: event.currentTarget.value, cursor: undefined }, { defer: true })}
-            placeholder="Search templates, processors, plugins, resolvers"
-            value={query}
-          />
-          <select
-            aria-label="Artifact kind"
-            onChange={event => updateState({ kind: event.currentTarget.value, cursor: undefined })}
-            value={artifactKinds.includes(kind as (typeof artifactKinds)[number]) ? kind : 'all'}
+          <div
+            className="top-search"
+            onBlur={handleSearchBlur}
+            onFocus={() => setSearchOpen(true)}
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                setSearchOpen(false);
+              }
+            }}
+            role="search"
           >
-            {artifactKinds.map(item => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-          {searchOpen && (query || kind !== 'all') && (
-            <div aria-label="Search results" className="search-popover" data-testid="search-results" role="region">
-              <div className="search-popover-head">
-                <span aria-live="polite">
-                  {searchResults.length}
-                  {searchHasMore ? '+' : ''} matches
-                </span>
-                <Link href={artifactTypeHref(kind === 'all' ? 'template' : kind, ensureExplicitKind(params, kind))}>
-                  Open
-                </Link>
-              </div>
-              {searchResults.map(artifact => (
-                <Link
-                  className="search-result"
-                  data-testid="search-result"
-                  href={artifactDetailHref(artifact, params)}
-                  key={artifact.id}
-                >
-                  <Badge>{artifact.kind}</Badge>
-                  <span>
-                    {artifact.owner}/{artifact.name}
+            <Search aria-hidden="true" size={18} />
+            <input
+              aria-label="Search registry"
+              onChange={event => {
+                const value = event.currentTarget.value;
+                setSearchDraft(value);
+                updateSearchState({ q: value }, { defer: true });
+              }}
+              placeholder="Search the registry"
+              value={searchDraft}
+            />
+            <ArtifactKindDropdown
+              kind={artifactKinds.includes(kind as (typeof artifactKinds)[number]) ? kind : 'all'}
+              onChange={nextKind => updateSearchState({ kind: nextKind })}
+            />
+            {searchOpen && (searchDraft || kind !== 'all') ? (
+              <div aria-label="Search results" className="search-popover" data-testid="search-results" role="region">
+                <div className="search-popover-head">
+                  <span aria-live="polite">
+                    {searchResults.length}
+                    {searchHasMore ? '+' : ''} matches
                   </span>
-                  <small>v{artifact.version}</small>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
+                  <Link href={searchHref(params, kind)}>Open search</Link>
+                </div>
+                {searchResults.map(artifact => (
+                  <Link
+                    className="search-result"
+                    data-testid="search-result"
+                    href={artifactDetailHref(artifact, params)}
+                    key={artifact.id}
+                  >
+                    <Badge>{artifact.kind}</Badge>
+                    <span>
+                      {artifact.owner}/{artifact.name}
+                    </span>
+                    <small>v{artifact.version}</small>
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
-        <nav
-          className={cn('shell-nav', mobileOpen && 'open')}
-          aria-label="Primary"
-          data-testid="primary-nav"
-          id="primary-navigation"
-        >
-          {navItems.map(item => (
-            <Link key={item.href} href={withNavQuery(item.href, params)}>
-              <item.icon aria-hidden="true" size={16} />
-              {item.label}
-            </Link>
-          ))}
-        </nav>
+          <nav
+            className={cn('shell-nav', mobileOpen && 'open')}
+            aria-label="Primary"
+            data-testid="primary-nav"
+            id="primary-navigation"
+          >
+            {navItems.map(item => (
+              <Link key={item.href} href={withNavQuery(item.href, params)}>
+                <item.icon aria-hidden="true" size={16} />
+                {item.label}
+              </Link>
+            ))}
+          </nav>
 
-        <div className="shell-actions">
-          <button
-            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-            className="icon-button"
-            onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
-            type="button"
-          >
-            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
-          <AccountDropdown />
-          <button
-            aria-controls="primary-navigation"
-            aria-expanded={mobileOpen}
-            aria-label={mobileOpen ? 'Close navigation' : 'Open navigation'}
-            className="icon-button mobile-menu"
-            onClick={() => setMobileOpen(value => !value)}
-            type="button"
-          >
-            {mobileOpen ? <X size={18} /> : <Menu size={18} />}
-          </button>
-        </div>
-      </header>
-      <main>{children}</main>
+          <div className="shell-actions">
+            <button
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              className="icon-button"
+              onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
+              type="button"
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+            <AccountControl user={user} />
+            <button
+              aria-controls="primary-navigation"
+              aria-expanded={mobileOpen}
+              aria-label={mobileOpen ? 'Close navigation' : 'Open navigation'}
+              className="icon-button mobile-menu"
+              onClick={() => setMobileOpen(value => !value)}
+              type="button"
+            >
+              {mobileOpen ? <X size={18} /> : <Menu size={18} />}
+            </button>
+          </div>
+        </header>
+        <main>{children}</main>
+      </AccountUserProvider>
     </>
   );
 }
 
-function AccountDropdown() {
+function ArtifactKindDropdown({ kind, onChange }: { kind: string; onChange: (kind: string) => void }) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger className="kind-trigger" aria-label="Artifact kind filter">
+        <span>{kindLabel(kind)}</span>
+        <ChevronDown aria-hidden="true" size={15} />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" className="kind-menu" sideOffset={10}>
+          {artifactKinds.map(item => (
+            <DropdownMenu.Item
+              className={cn('menu-item', item === kind && 'selected')}
+              key={item}
+              onSelect={() => onChange(item)}
+            >
+              {kindLabel(item)}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function AccountControl({ user }: { user?: AccountUser }) {
+  if (!user) {
+    return (
+      <Link className="sign-in-button" href="/login" prefetch={false}>
+        <UserRound aria-hidden="true" size={16} />
+        Sign in
+      </Link>
+    );
+  }
+
+  const displayName = user.handle ?? user.login ?? 'New account';
+  const initials = displayName.slice(0, 2).toUpperCase();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger aria-label="Open account menu" className="profile-trigger">
-        <span className="avatar">CP</span>
+        <span className="avatar">{initials}</span>
         <span className="profile-copy">
-          <strong>CyanPrint</strong>
-          <small>publisher portal</small>
+          <strong>{displayName}</strong>
+          <small>{user.login ? `@${user.login}` : 'local account'}</small>
         </span>
         <ChevronDown aria-hidden="true" size={16} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" className="profile-menu" data-testid="account-menu" sideOffset={10}>
           <DropdownMenu.Label className="profile-menu-label">
-            <CircleUserRound aria-hidden="true" size={18} />
+            <span className="avatar large">{initials}</span>
             <span>
-              <strong>Registry</strong>
-              <small>account tools</small>
+              <strong>{displayName}</strong>
+              <small>{user.login ? `GitHub @${user.login}` : 'CyanPrint account'}</small>
             </span>
           </DropdownMenu.Label>
           <DropdownMenu.Separator className="menu-separator" />
           <DropdownMenu.Item asChild className="menu-item">
             <Link href="/account">
-              <CircleUserRound aria-hidden="true" size={16} />
-              Personal info
+              <Settings2 aria-hidden="true" size={16} />
+              Account settings
             </Link>
           </DropdownMenu.Item>
           <DropdownMenu.Item asChild className="menu-item">
@@ -307,12 +363,15 @@ function AccountDropdown() {
               API tokens
             </Link>
           </DropdownMenu.Item>
-          <DropdownMenu.Item asChild className="menu-item">
-            <Link href="/admin">
-              <ShieldCheck aria-hidden="true" size={16} />
-              Admin review
-            </Link>
-          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="menu-separator" />
+          <form action="/logout" method="post">
+            <DropdownMenu.Item asChild className="menu-item danger">
+              <button className="menu-button" type="submit">
+                <LogOut aria-hidden="true" size={16} />
+                Sign out
+              </button>
+            </DropdownMenu.Item>
+          </form>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -326,27 +385,29 @@ function kindFromPath(pathname: string): string {
 
 function withNavQuery(href: string, params: URLSearchParams): string {
   const next = new URLSearchParams(params.toString());
-  const artifactKind = artifactKindFromHref(href);
-  if (artifactKind) {
-    next.set('kind', artifactKind);
-    next.delete('cursor');
-  } else if (!href.startsWith('/artifacts/')) {
-    next.delete('cursor');
-  }
+  next.delete('cursor');
   const query = next.toString();
   return query ? `${href}?${query}` : href;
 }
 
-function artifactKindFromHref(href: string): string | undefined {
-  const match = href.match(/^\/artifacts\/([^/?]+)/);
-  return match?.[1];
-}
-
-function ensureExplicitKind(params: URLSearchParams, kind: string): URLSearchParams {
+function searchHref(params: URLSearchParams, kind: string): string {
   const next = new URLSearchParams(params.toString());
   if (kind === 'all') {
-    next.set('kind', 'all');
+    next.delete('kind');
+  } else {
+    next.set('kind', kind);
   }
   next.delete('cursor');
-  return next;
+  const query = next.toString();
+  return query ? `/search?${query}` : '/search';
+}
+
+function kindLabel(kind: string): string {
+  if (kind === 'all') {
+    return 'All';
+  }
+  if (kind === 'template-group') {
+    return 'Groups';
+  }
+  return `${kind.charAt(0).toUpperCase()}${kind.slice(1)}s`;
 }

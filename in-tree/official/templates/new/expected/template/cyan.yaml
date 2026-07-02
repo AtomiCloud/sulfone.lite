@@ -3,6 +3,7 @@ kind: template
 owner: acme
 name: service-template
 description: A CyanPrint v4 template.
-bundledEntry: cyan.ts
+entry: cyan.ts
+bundledEntry: dist/cyan.js
 processors:
   - cyan/default

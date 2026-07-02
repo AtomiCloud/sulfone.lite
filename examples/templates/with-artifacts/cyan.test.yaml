@@ -1,13 +1,7 @@
 cases:
   - name: basic
-    answers: answers.json
+    answers:
+      name: Artifact Project
     expected: expected/basic
-    snapshot: snapshots/basic/README.md
-    commands:
-      - command: bun
-        args:
-          - --eval
-          - |
-            const text = await Bun.file("README.md").text();
-            if (!text.includes("# ARTIFACT PROJECT")) process.exit(1);
-            if (!text.includes("Generated locally.")) process.exit(1);
+    validations:
+      - test -f .cyan_state.yaml

@@ -14,41 +14,121 @@ import {
   upsertArtifact,
   type SeedObjectPayload,
 } from '@cyanprint/registry-client';
-import type { RegistryStorage, StoredUploadSession } from './types';
+import type { RegistryStorage, RegistryUser, StoredAuthHandoff, StoredOAuthState, StoredUploadSession } from './types';
 
 export function createCloudflareLocalStorage(
   seed: ArtifactVersion[] = [],
   seedObjects: SeedObjectPayload[] = [],
 ): RegistryStorage {
   const state = createLocalRegistryState();
+  const users: RegistryUser[] = state.users.map(user => ({ ...user }));
   const objects = new Map<string, { ref: ObjectRef; payload: Uint8Array }>();
   const uploads = new Map<string, StoredUploadSession>();
-  const sessions = new Map<string, string>();
+  const sessions = new Map<string, { userId: string; expiresAt: string }>();
+  const oauthStates = new Map<string, StoredOAuthState>();
+  const authHandoffs = new Map<string, StoredAuthHandoff>();
   const likes = new Set<string>();
   const downloads: Array<{ artifactId: string; createdAt: string }> = [];
+  const objectArtifactIndex = new Map<string, string>();
   state.artifacts.push(...seed.map(artifact => structuredClone(artifact)));
   for (const object of seedObjects) {
     const payload = typeof object.payload === 'string' ? new TextEncoder().encode(object.payload) : object.payload;
     objects.set(objectKey(object.ref), { ref: structuredClone(object.ref), payload: cloneBytes(payload) });
   }
+  for (const artifact of state.artifacts) {
+    indexArtifactObjects(artifact);
+  }
+
+  function indexArtifactObjects(artifact: ArtifactVersion): void {
+    for (const ref of artifactObjectRefs(artifact)) {
+      objectArtifactIndex.set(objectArtifactIndexKey(ref), artifact.id);
+    }
+  }
+
+  function findActiveArtifactByObjectRef(ref: ObjectRef): ArtifactVersion | undefined {
+    const indexedId = objectArtifactIndex.get(objectArtifactIndexKey(ref));
+    if (indexedId) {
+      const indexed = state.artifacts.find(artifact => artifact.id === indexedId);
+      if (indexed && isActiveArtifact(indexed) && artifactHasObjectRef(indexed, ref)) {
+        return indexed;
+      }
+    }
+    const artifact = state.artifacts.find(item => isActiveArtifact(item) && artifactHasObjectRef(item, ref));
+    if (artifact) {
+      objectArtifactIndex.set(objectArtifactIndexKey(ref), artifact.id);
+    }
+    return artifact;
+  }
+
   return {
     mode: 'in-memory',
     bindings: [],
     getCurrentUser() {
-      return state.users[0];
+      return users[0];
     },
     getUser(id) {
-      return state.users.find(user => user.id === id);
+      return users.find(user => user.id === id);
+    },
+    upsertUser(user) {
+      const existing = users.findIndex(item => item.id === user.id);
+      if (existing >= 0) {
+        const current = users[existing]!;
+        users[existing] = {
+          ...current,
+          handle: user.handle ?? current.handle,
+          login: user.login ?? current.login,
+          admin: Boolean(user.admin),
+        };
+        return;
+      }
+      users.push({ id: user.id, handle: user.handle, login: user.login, admin: Boolean(user.admin) });
+    },
+    updateUserHandle(userId, handle) {
+      const user = users.find(item => item.id === userId);
+      if (!user) {
+        return 'not_found';
+      }
+      if (user.handle != null) {
+        return 'immutable';
+      }
+      if (users.some(item => item.id !== userId && item.handle === handle)) {
+        return 'duplicate';
+      }
+      user.handle = handle;
+      return 'updated';
     },
     listUsers() {
-      return state.users;
+      return users;
     },
     createSession(userId, session) {
-      sessions.set(session, userId);
+      sessions.set(session, { userId, expiresAt: sessionExpiresAt() });
     },
     getSessionUser(session) {
-      const userId = sessions.get(session);
-      return userId ? this.getUser(userId) : undefined;
+      const record = sessions.get(session);
+      if (!record || Date.parse(record.expiresAt) <= Date.now()) {
+        sessions.delete(session);
+        return undefined;
+      }
+      return this.getUser(record.userId);
+    },
+    deleteSession(session) {
+      sessions.delete(session);
+    },
+    saveOAuthState(state) {
+      oauthStates.set(state.id, state);
+    },
+    consumeOAuthState(id) {
+      const state = oauthStates.get(id);
+      oauthStates.delete(id);
+      return state && Date.parse(state.expiresAt) > Date.now() ? state : undefined;
+    },
+    saveAuthHandoff(handoff) {
+      authHandoffs.set(handoff.id, handoff);
+    },
+    consumeAuthHandoff(id) {
+      const handoff = authHandoffs.get(id);
+      authHandoffs.delete(id);
+      return handoff && Date.parse(handoff.expiresAt) > Date.now() ? handoff : undefined;
     },
     createToken(record) {
       const index = state.tokens.findIndex(token => token.id === record.id);
@@ -60,6 +140,15 @@ export function createCloudflareLocalStorage(
     },
     listTokens() {
       return state.tokens;
+    },
+    listTokensForUser(userId) {
+      return state.tokens.filter(token => token.userId === userId);
+    },
+    revokeTokenForUser(userId, tokenId) {
+      const token = state.tokens.find(item => item.id === tokenId && item.userId === userId);
+      if (token) {
+        token.revoked = true;
+      }
     },
     findTokenByHash(secretHash) {
       return state.tokens.find(token => token.secretHash === secretHash && !token.revoked);
@@ -112,10 +201,11 @@ export function createCloudflareLocalStorage(
       return state.artifacts.find(artifact => artifact.id === id);
     },
     getActiveArtifactByObjectRef(ref) {
-      return state.artifacts.find(artifact => isActiveArtifact(artifact) && artifactHasObjectRef(artifact, ref));
+      return findActiveArtifactByObjectRef(ref);
     },
     addArtifact(artifact) {
       upsertArtifact(state, artifact);
+      indexArtifactObjects(artifact);
     },
     commitArtifact(artifact) {
       const version = String(
@@ -134,6 +224,7 @@ export function createCloudflareLocalStorage(
         publishedAt: new Date().toISOString(),
       };
       upsertArtifact(state, committed);
+      indexArtifactObjects(committed);
       return committed;
     },
     likeArtifact(id, userId) {
@@ -149,7 +240,7 @@ export function createCloudflareLocalStorage(
       return artifact;
     },
     recordDownload(ref) {
-      const artifact = state.artifacts.find(item => isActiveArtifact(item) && artifactHasObjectRef(item, ref));
+      const artifact = findActiveArtifactByObjectRef(ref);
       if (!artifact) {
         return undefined;
       }
@@ -225,8 +316,26 @@ function objectKey(ref: ObjectRef): string {
   return `${ref.bucket}:${ref.key}:${ref.sha256}:${ref.size}`;
 }
 
+function objectArtifactIndexKey(ref: ObjectRef): string {
+  return `object-artifact:${ref.sha256}:${ref.key}`;
+}
+
+function artifactObjectRefs(artifact: ArtifactVersion): ObjectRef[] {
+  return [
+    artifact.object,
+    artifact.artifactObjects?.manifest,
+    artifact.artifactObjects?.readme,
+    artifact.artifactObjects?.bundle,
+    artifact.artifactObjects?.archive,
+  ].filter((ref): ref is ObjectRef => Boolean(ref));
+}
+
 function cloneBytes(payload: Uint8Array): Uint8Array {
   return payload.slice();
+}
+
+function sessionExpiresAt(): string {
+  return new Date(Date.now() + 60 * 60 * 24 * 30 * 1000).toISOString();
 }
 
 function objectsMatch(left: ObjectRef | undefined, right: ObjectRef): boolean {

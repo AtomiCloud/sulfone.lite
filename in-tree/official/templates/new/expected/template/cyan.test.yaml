@@ -1,11 +1,5 @@
 cases:
   - name: basic
-    answers: answers.json
+    answers:
+      project: Service Template App
     expected: expected
-    commands:
-      - command: bun
-        args:
-          - --eval
-          - |
-            const text = await Bun.file("README.md").text();
-            if (!text.includes("# Service Template App")) process.exit(1);

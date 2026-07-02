@@ -3,10 +3,16 @@ import { tmpdir } from 'node:os';
 import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import YAML from 'yaml';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
-import { invokePlugin, invokeProcessor, invokeResolver, type ArtifactBundleRef } from '@cyanprint/artifact-runner';
+import {
+  assertResolverCommutativity,
+  invokePlugin,
+  invokeProcessor,
+  invokeResolver,
+  type ArtifactBundleRef,
+} from '@cyanprint/artifact-runner';
 import type { ArtifactKind, CyanManifest, VfsFile } from '@cyanprint/contracts';
 import { loadManifest } from '../manifest/load-manifest';
-import { exists, readText, safeJoin, sha256, writeText } from '../util';
+import { comparePaths, exists, mapWithConcurrency, readText, safeJoin, sha256, writeText } from '../util';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
 type ArtifactTestCase = {
@@ -15,22 +21,13 @@ type ArtifactTestCase = {
   message?: string;
 };
 
-type TestValidation = {
-  path?: string;
-  exists?: boolean;
-  equals?: string;
-  contains?: string;
-  notContains?: string;
-};
-
 type FileArtifactCase = {
   name: string;
   input: string;
   expected?: string;
   config?: unknown;
   configFile?: string;
-  validations: TestValidation[];
-  commands: CommandValidation[];
+  validations: CommandValidation[];
 };
 
 type ResolverArtifactCase = {
@@ -42,8 +39,7 @@ type ResolverArtifactCase = {
   expected?: string;
   config?: unknown;
   configFile?: string;
-  validations: TestValidation[];
-  commands: CommandValidation[];
+  validations: CommandValidation[];
 };
 
 type ArtifactCase = FileArtifactCase | ResolverArtifactCase;
@@ -61,6 +57,7 @@ export async function runArtifactTests(args: {
   artifactDir: string;
   testsDir?: string;
   updateSnapshots?: boolean;
+  concurrency?: number;
 }): Promise<ArtifactTestReport> {
   const { manifest } = await loadManifest(args.artifactDir);
   if (!isRuntimeArtifact(manifest.kind)) {
@@ -72,31 +69,21 @@ export async function runArtifactTests(args: {
   try {
     const runtimeFile = await buildRuntime(args.artifactDir, manifest, runtimeDir);
     const bundle = await artifactBundle(manifest, runtimeFile);
-    const cases: ArtifactTestCase[] = [];
-    let snapshotUpdated = 0;
-
-    for (const testCase of testCases) {
-      const result =
-        manifest.kind === 'resolver'
-          ? await runResolverCase(bundle, testCase as ResolverArtifactCase, Boolean(args.updateSnapshots))
-          : await runFileArtifactCase(
-              bundle,
-              manifest.kind,
-              testCase as FileArtifactCase,
-              Boolean(args.updateSnapshots),
-            );
-      if (result.snapshotUpdated) {
-        snapshotUpdated += 1;
-      }
-      cases.push(result.case);
-    }
+    const commutative = manifest.kind === 'resolver' && manifest.api === 2 && manifest.commutative === true;
+    const update = Boolean(args.updateSnapshots);
+    const results = await mapWithConcurrency(testCases, args.concurrency ?? 1, testCase =>
+      manifest.kind === 'resolver'
+        ? runResolverCase(bundle, testCase as ResolverArtifactCase, update, commutative)
+        : runFileArtifactCase(bundle, manifest.kind as 'processor' | 'plugin', testCase as FileArtifactCase, update),
+    );
+    const cases = results.map(result => result.case);
 
     return {
       kind: manifest.kind,
       passed: cases.filter(testCase => testCase.status === 'passed').length,
       failed: cases.filter(testCase => testCase.status === 'failed').length,
       skipped: 0,
-      snapshotUpdated,
+      snapshotUpdated: results.filter(result => result.snapshotUpdated).length,
       cases,
     };
   } finally {
@@ -152,7 +139,6 @@ async function loadArtifactTestCases(
           expected: join(caseDir, 'expected.txt'),
           configFile: join(caseDir, 'config.json'),
           validations: [],
-          commands: [],
         } satisfies ResolverArtifactCase)
       : ({
           name,
@@ -160,7 +146,6 @@ async function loadArtifactTestCases(
           expected: join(caseDir, 'expected'),
           configFile: join(caseDir, 'config.json'),
           validations: [],
-          commands: [],
         } satisfies FileArtifactCase);
   });
 }
@@ -202,7 +187,6 @@ function parseKetoneResolverTestManifest(artifactDir: string, input: unknown): R
         readKetoneResolverInput(artifactDir, rawInput, `tests[${index}].resolver_inputs[${inputIndex}]`),
       ),
       validations: [],
-      commands: [],
     };
   });
 }
@@ -259,20 +243,26 @@ function parseManifestCase(
     throw new Error(`cyan.test.yaml case ${index + 1} must be a mapping.`);
   }
   const record = rawCase as Record<string, unknown>;
+  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`);
+  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`);
   const name = readRequiredString(record.name, `cases[${index}].name`);
-  const validations = readValidations(record.validations, `cases[${index}].validations`);
-  const commands = readCommandValidations(record.commands, `cases[${index}].commands`);
+  const validations = readCommandValidations(record.validations, `cases[${index}].validations`);
   if (kind === 'resolver') {
+    const resolverInputs = Array.isArray(record.resolverInputs)
+      ? record.resolverInputs.map((input, inputIndex) =>
+          readKetoneResolverInput(artifactDir, input, `cases[${index}].resolverInputs[${inputIndex}]`),
+        )
+      : undefined;
     return {
       name,
       prior: readOptionalPath(artifactDir, record.prior),
       current: readOptionalPath(artifactDir, record.current),
       target: readOptionalPath(artifactDir, record.target),
+      resolverInputs,
       expected: readOptionalPath(artifactDir, record.expected),
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),
       validations,
-      commands,
     };
   }
   return {
@@ -282,8 +272,13 @@ function parseManifestCase(
     config: record.config,
     configFile: readOptionalPath(artifactDir, record.configFile),
     validations,
-    commands,
   };
+}
+
+function rejectRemovedTestField(record: Record<string, unknown>, field: string, label: string): void {
+  if (record[field] !== undefined) {
+    throw new Error(`${label} is no longer supported. Use validations instead.`);
+  }
 }
 
 function readRequiredString(value: unknown, label: string): string {
@@ -303,48 +298,6 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   return safeJoin(root, value);
 }
 
-function readValidations(value: unknown, label: string): TestValidation[] {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array.`);
-  }
-  return value.map((rawValidation, index) => {
-    if (!rawValidation || typeof rawValidation !== 'object') {
-      throw new Error(`${label}[${index}] must be a mapping.`);
-    }
-    const record = rawValidation as Record<string, unknown>;
-    return {
-      path: readOptionalString(record.path, `${label}[${index}].path`),
-      exists: readOptionalBoolean(record.exists, `${label}[${index}].exists`),
-      equals: readOptionalString(record.equals, `${label}[${index}].equals`),
-      contains: readOptionalString(record.contains, `${label}[${index}].contains`),
-      notContains: readOptionalString(record.notContains, `${label}[${index}].notContains`),
-    };
-  });
-}
-
-function readOptionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new Error(`${label} must be a string.`);
-  }
-  return value;
-}
-
-function readOptionalBoolean(value: unknown, label: string): boolean | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'boolean') {
-    throw new Error(`${label} must be a boolean.`);
-  }
-  return value;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -359,6 +312,7 @@ async function artifactBundle(manifest: CyanManifest, runtimeFile: string): Prom
     },
     runtimeFile,
     integrity: sha256(await readText(runtimeFile)),
+    api: manifest.api,
   };
 }
 
@@ -368,6 +322,7 @@ async function buildRuntime(artifactDir: string, manifest: CyanManifest, runtime
     entrypoint: join(artifactDir, manifest.entry),
     output: runtimeFile,
     kind: manifest.kind,
+    validateExport: false,
   });
   return runtimeFile;
 }
@@ -383,33 +338,32 @@ async function runFileArtifactCase(
     const input = await readFileTree(testCase.input);
     const actual =
       kind === 'processor' ? await invokeProcessor(bundle, input, config) : await invokePlugin(bundle, input, config);
-    const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-    if (commandFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-    }
-    const validationFailure = validateFileOutput(actual, testCase.validations);
-    if (validationFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-    }
 
-    if (updateSnapshots && testCase.expected) {
-      await writeFileTree(testCase.expected, actual);
-      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
+    if (!testCase.expected) {
+      return {
+        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
+        snapshotUpdated: false,
+      };
     }
-
-    if (testCase.expected) {
+    if (!updateSnapshots) {
       const expected = await readFileTree(testCase.expected);
       const diff = compareFileTrees(expected, actual);
       if (diff) {
         return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
       }
-    } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
-      return {
-        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
-        snapshotUpdated: false,
-      };
     }
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+
+    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+    if (validationFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+    }
+    if (updateSnapshots && testCase.expected) {
+      await writeFileTree(testCase.expected, actual);
+    }
+    return {
+      case: { name: testCase.name, status: 'passed' },
+      snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+    };
   } catch (error) {
     return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
   }
@@ -419,10 +373,11 @@ async function runResolverCase(
   bundle: ArtifactBundleRef,
   testCase: ResolverArtifactCase,
   updateSnapshots: boolean,
+  commutative: boolean,
 ): Promise<{ case: ArtifactTestCase; snapshotUpdated: boolean }> {
   try {
     if (testCase.resolverInputs) {
-      return await runResolverFoldCase(bundle, testCase, updateSnapshots);
+      return await runResolverFoldCase(bundle, testCase, updateSnapshots, commutative);
     }
     if (await isFolderResolverCase(testCase)) {
       return await runResolverFolderCase(bundle, testCase, updateSnapshots);
@@ -443,36 +398,37 @@ async function runResolverCase(
       ],
       config,
     };
+    if (commutative) {
+      await enforceCommutativity(bundle, input.files, config, path);
+    }
     const actual = await invokeResolver(bundle, input);
-    const commandFailure = await runCommandsAgainstText(actual, testCase.commands);
-    if (commandFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
-    }
-    const validationFailure = validateTextOutput(actual, testCase.validations);
-    if (validationFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-    }
 
-    if (updateSnapshots && testCase.expected) {
-      await writeText(testCase.expected, actual);
-      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
+    if (!testCase.expected) {
+      return {
+        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
+        snapshotUpdated: false,
+      };
     }
-
-    if (testCase.expected) {
+    if (!updateSnapshots) {
       const expected = await readText(testCase.expected);
-      if (!fileContentsEqual(path, expected, actual)) {
+      if (!fileContentsEqual(expected, actual)) {
         return {
           case: { name: testCase.name, status: 'failed', message: `Resolver output mismatch for ${testCase.name}` },
           snapshotUpdated: false,
         };
       }
-    } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
-      return {
-        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
-        snapshotUpdated: false,
-      };
     }
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+    const validationFailure = await runCommandsAgainstText(actual, testCase.validations);
+    if (validationFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+    }
+    if (updateSnapshots && testCase.expected) {
+      await writeText(testCase.expected, actual);
+    }
+    return {
+      case: { name: testCase.name, status: 'passed' },
+      snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+    };
   } catch (error) {
     return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
   }
@@ -482,55 +438,78 @@ async function runResolverFoldCase(
   bundle: ArtifactBundleRef,
   testCase: ResolverArtifactCase,
   updateSnapshots: boolean,
+  commutative: boolean,
 ): Promise<{ case: ArtifactTestCase; snapshotUpdated: boolean }> {
   const config = await readCaseConfig(testCase);
   const groups = new Map<
     string,
-    Array<{ path: string; content: string; origin: { template: string; layer: number } }>
+    Array<{ path: string; content: string; origin: { template: string; layer: number }; files: VfsFile[] }>
   >();
   for (const input of testCase.resolverInputs ?? []) {
     const files = await readResolverInputFiles(input.path);
     for (const file of files) {
       const current = groups.get(file.path) ?? [];
-      current.push({ path: file.path, content: file.content ?? '', origin: input.origin });
+      current.push({ path: file.path, content: file.content ?? '', origin: input.origin, files });
       groups.set(file.path, current);
     }
   }
   const actual: VfsFile[] = [];
-  for (const [path, files] of [...groups.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [path, files] of [...groups.entries()].sort(([left], [right]) => comparePaths(left, right))) {
+    if (commutative) {
+      await enforceCommutativity(bundle, files, config, path);
+    }
     actual.push({
       path,
       content: await invokeResolver(bundle, {
         files,
-        config: { path, ...(isRecord(config) ? config : {}) },
+        config: { ...(isRecord(config) ? config : {}), path },
       }),
     });
   }
-  const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-  if (commandFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
+  if (!testCase.expected) {
+    return {
+      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
+      snapshotUpdated: false,
+    };
   }
-  const validationFailure = validateFileOutput(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
-  if (updateSnapshots && testCase.expected) {
-    await writeFileTree(testCase.expected, actual);
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-  }
-  if (testCase.expected) {
+  if (!updateSnapshots) {
     const expected = await readFileTree(testCase.expected);
     const diff = compareFileTrees(expected, actual);
     if (diff) {
       return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
     }
-  } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
-    return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
-      snapshotUpdated: false,
-    };
   }
-  return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+  if (validationFailure) {
+    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+  }
+  if (updateSnapshots && testCase.expected) {
+    await writeFileTree(testCase.expected, actual);
+  }
+  return {
+    case: { name: testCase.name, status: 'passed' },
+    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+  };
+}
+
+async function enforceCommutativity(
+  bundle: ArtifactBundleRef,
+  candidates: Array<{ path: string; content: string; origin: { template: string; layer: number } }>,
+  config: unknown,
+  path: string,
+): Promise<void> {
+  if (candidates.length < 2) {
+    return;
+  }
+  await assertResolverCommutativity(bundle, {
+    path,
+    config: isRecord(config) ? config : {},
+    candidates: candidates.map(candidate => ({
+      path: candidate.path,
+      content: candidate.content,
+      origin: candidate.origin,
+    })),
+  });
 }
 
 async function readResolverInputFiles(path: string): Promise<VfsFile[]> {
@@ -557,48 +536,47 @@ async function runResolverFolderCase(
   for (const path of paths) {
     const files = [
       ...(priorMap.has(path)
-        ? [{ path, content: priorMap.get(path) ?? '', origin: { template: 'prior', layer: 0 } }]
+        ? [{ path, content: priorMap.get(path) ?? '', origin: { template: 'prior', layer: 0 }, files: prior }]
         : []),
       ...(currentMap.has(path)
-        ? [{ path, content: currentMap.get(path) ?? '', origin: { template: 'current', layer: 1 } }]
+        ? [{ path, content: currentMap.get(path) ?? '', origin: { template: 'current', layer: 1 }, files: current }]
         : []),
       ...(targetMap.has(path)
-        ? [{ path, content: targetMap.get(path) ?? '', origin: { template: 'target', layer: 2 } }]
+        ? [{ path, content: targetMap.get(path) ?? '', origin: { template: 'target', layer: 2 }, files: target }]
         : []),
     ];
     actual.push({
       path,
       content: await invokeResolver(bundle, {
         files,
-        config: { path, ...(isRecord(config) ? config : {}) },
+        config: { ...(isRecord(config) ? config : {}), path },
       }),
     });
   }
-  const commandFailure = await runCommandsAgainstFiles(actual, testCase.commands);
-  if (commandFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: commandFailure }, snapshotUpdated: false };
+  if (!testCase.expected) {
+    return {
+      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
+      snapshotUpdated: false,
+    };
   }
-  const validationFailure = validateFileOutput(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
-  if (updateSnapshots && testCase.expected) {
-    await writeFileTree(testCase.expected, actual);
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
-  }
-  if (testCase.expected) {
+  if (!updateSnapshots) {
     const expected = await readFileTree(testCase.expected);
     const diff = compareFileTrees(expected, actual);
     if (diff) {
       return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
     }
-  } else if (testCase.validations.length === 0 && testCase.commands.length === 0) {
-    return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output or validations.' },
-      snapshotUpdated: false,
-    };
   }
-  return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+  if (validationFailure) {
+    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+  }
+  if (updateSnapshots && testCase.expected) {
+    await writeFileTree(testCase.expected, actual);
+  }
+  return {
+    case: { name: testCase.name, status: 'passed' },
+    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
+  };
 }
 
 async function isFolderResolverCase(testCase: ResolverArtifactCase): Promise<boolean> {
@@ -657,77 +635,27 @@ async function runCommandsAgainstText(output: string, commands: CommandValidatio
   }
 }
 
-function validateFileOutput(files: VfsFile[], validations: TestValidation[]): string | undefined {
-  const fileMap = new Map(files.map(file => [file.path, file.content ?? '']));
-  for (const validation of validations) {
-    if (!validation.path) {
-      return 'File output validations require path.';
-    }
-    const content = fileMap.get(validation.path);
-    const message = validateTextContent(content, validation, validation.path);
-    if (message) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function validateTextOutput(output: string, validations: TestValidation[]): string | undefined {
-  for (const validation of validations) {
-    if (validation.path) {
-      return 'Resolver validations do not support path.';
-    }
-    const message = validateTextContent(output, validation, 'resolver output');
-    if (message) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function validateTextContent(
-  content: string | undefined,
-  validation: TestValidation,
-  label: string,
-): string | undefined {
-  if (validation.exists === false && content !== undefined) {
-    return `${label} exists but should not.`;
-  }
-  if (validation.exists !== false && content === undefined) {
-    return `${label} does not exist.`;
-  }
-  if (content === undefined) {
-    return undefined;
-  }
-  if (validation.equals !== undefined && content !== validation.equals) {
-    return `${label} did not equal expected text.`;
-  }
-  if (validation.contains !== undefined && !content.includes(validation.contains)) {
-    return `${label} did not contain expected text.`;
-  }
-  if (validation.notContains !== undefined && content.includes(validation.notContains)) {
-    return `${label} contained forbidden text.`;
-  }
-  return undefined;
-}
-
 async function readFileTree(root: string): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
   await walk(root, async path => {
+    const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+    const content = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    const encodedContent = new TextEncoder().encode(content);
     files.push({
       path: relative(root, path),
-      content: await readText(path),
+      ...(bytesEqual(bytes, encodedContent) ? { content } : { bytesBase64: Buffer.from(bytes).toString('base64') }),
     });
   });
-  return files.sort((left, right) => left.path.localeCompare(right.path));
+  return files.sort((left, right) => comparePaths(left.path, right.path));
 }
 
 async function writeFileTree(root: string, files: VfsFile[]): Promise<void> {
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   for (const file of files) {
-    await mkdir(dirname(safeJoin(root, file.path)), { recursive: true });
-    await writeText(safeJoin(root, file.path), file.content ?? '');
+    const target = safeJoin(root, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    await Bun.write(target, fileToBytes(file));
   }
 }
 
@@ -750,13 +678,13 @@ async function walk(root: string, visit: (path: string) => Promise<void>): Promi
 }
 
 function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | undefined {
-  const expectedMap = new Map(expected.map(file => [file.path, file.content ?? '']));
-  const actualMap = new Map(actual.map(file => [file.path, file.content ?? '']));
+  const expectedMap = new Map(expected.map(file => [file.path, fileToBytes(file)]));
+  const actualMap = new Map(actual.map(file => [file.path, fileToBytes(file)]));
   for (const path of [...expectedMap.keys()].sort()) {
     if (!actualMap.has(path)) {
       return `Missing output file: ${path}`;
     }
-    if (!fileContentsEqual(path, expectedMap.get(path) ?? '', actualMap.get(path) ?? '')) {
+    if (!bytesEqual(expectedMap.get(path) ?? new Uint8Array(), actualMap.get(path) ?? new Uint8Array())) {
       return `Output mismatch: ${path}`;
     }
   }
@@ -768,38 +696,20 @@ function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | unde
   return undefined;
 }
 
-function fileContentsEqual(path: string, expected: string, actual: string): boolean {
-  if (path.endsWith('.json')) {
-    const expectedJson = parseJson(expected);
-    const actualJson = parseJson(actual);
-    if (expectedJson !== undefined && actualJson !== undefined) {
-      return canonicalJson(expectedJson) === canonicalJson(actualJson);
-    }
-  }
-  return normalizeSnapshotText(expected) === normalizeSnapshotText(actual);
+function fileContentsEqual(expected: string, actual: string): boolean {
+  return expected === actual;
 }
 
-function parseJson(content: string): unknown | undefined {
-  try {
-    return JSON.parse(content);
-  } catch {
-    return undefined;
+function fileToBytes(file: VfsFile): Uint8Array {
+  if (file.bytesBase64 !== undefined) {
+    return Buffer.from(file.bytesBase64, 'base64');
   }
+  return new TextEncoder().encode(file.content ?? '');
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(item => canonicalJson(item)).join(',')}]`;
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
   }
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function normalizeSnapshotText(content: string): string {
-  return content.replace(/\r\n?/g, '\n').replace(/\n+$/g, '');
+  return left.every((byte, index) => byte === right[index]);
 }

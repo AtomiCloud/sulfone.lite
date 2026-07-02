@@ -23,6 +23,20 @@ export type VfsFile = {
   mode?: number;
 };
 
+/**
+ * CyanPrint-managed metadata that lives alongside generated files but is never part of
+ * an artifact's VFS. Reads (including SDK helper reads) must ignore these paths.
+ */
+export const CYAN_METADATA_PATHS = {
+  stateFile: '.cyan_state.yaml',
+  conflictsPrefix: '.cyan_conflicts/',
+} as const;
+
+export function isCyanMetadataPath(relativePath: string): boolean {
+  const normalized = relativePath.split(/[\\/]+/).join('/');
+  return normalized === CYAN_METADATA_PATHS.stateFile || normalized.startsWith(CYAN_METADATA_PATHS.conflictsPrefix);
+}
+
 export type GeneratedState = {
   cyanprint: 4;
   template: {
@@ -36,11 +50,4 @@ export type GeneratedState = {
   files: Array<{ path: string; sha256: string; content?: string; bytesBase64?: string }>;
   artifacts: Array<{ kind: string; owner: string; name: string; version: string; integrity: string }>;
   conflicts?: Array<{ path: string; reason: string }>;
-};
-
-export type MachineEnvelope<T> = {
-  status: 'done' | 'need_input' | 'conflict' | 'error';
-  data?: T;
-  prompt?: PromptRequest;
-  problems?: Array<{ category: string; code: string; message: string; details?: Record<string, unknown> }>;
 };

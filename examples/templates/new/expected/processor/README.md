@@ -2,7 +2,7 @@
 
 A CyanPrint v4 processor.
 
-This processor receives `{ files, config }` and returns a file map. Use processors for deterministic file transformations after template files are loaded.
+This processor receives `(input, fs)`. Use `fs.read()` to load the input files as a VFS, transform them, and `fs.write(files)` to emit the result. `input.inputDir` and `input.outputDir` stay available for raw filesystem access. Keep output deterministic.
 
 ## Test
 
@@ -13,5 +13,5 @@ cyanprint test .
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push .
 ```

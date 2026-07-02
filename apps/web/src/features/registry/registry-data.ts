@@ -50,41 +50,6 @@ export async function listRegistryArtifactPage(
   };
 }
 
-export async function listAdminRegistryArtifactPage(
-  args: {
-    cursor?: string;
-    kind?: string;
-    limit?: number;
-    query?: string;
-  } = {},
-): Promise<RegistryArtifactPage> {
-  const registry = process.env.CYANPRINT_REGISTRY_URL;
-  const adminToken = process.env.CYANPRINT_ADMIN_TOKEN;
-  if (registry && adminToken) {
-    return new RegistryClient(registry, adminToken).listAdminArtifacts(args);
-  }
-  if (registry) {
-    throw new Error('CYANPRINT_ADMIN_TOKEN is required to load remote admin artifacts.');
-  }
-  const limit = args.limit ?? 100;
-  const matching = sortArtifacts(filterArtifacts(seedArtifacts, { kind: args.kind, query: args.query ?? '' }));
-  const decoded = decodeSeedCursor(args.cursor);
-  const start = decoded
-    ? Math.max(
-        0,
-        matching.findIndex(artifact => compareSeedArtifactToCursor(artifact, decoded) > 0),
-      )
-    : 0;
-  const artifacts = matching.slice(start, start + limit);
-  const nextArtifact = artifacts.at(-1);
-  return {
-    artifacts,
-    ...(start + artifacts.length < matching.length && nextArtifact
-      ? { nextCursor: encodeSeedCursor(nextArtifact) }
-      : {}),
-  };
-}
-
 export async function listLatestRegistryArtifacts(
   args: {
     cursor?: string;

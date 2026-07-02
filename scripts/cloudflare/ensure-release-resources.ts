@@ -17,6 +17,10 @@ const defaults = {
   CYANPRINT_WEB_DOMAIN: 'cyanprint.dev',
   CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: 'cyanprint-web-opennext-cache',
   CYANPRINT_RELEASE_REGISTRY_URL: 'https://registry.cyanprint.dev',
+  CYANPRINT_GITHUB_CLIENT_ID: '',
+  CYANPRINT_GITHUB_ADMIN_LOGINS: '',
+  CYANPRINT_AUTH_RETURN_ORIGINS: 'https://cyanprint.dev',
+  CYANPRINT_WEB_URL: 'https://cyanprint.dev',
 };
 
 const dryRun = process.env.CYANPRINT_CLOUDFLARE_BOOTSTRAP_DRY_RUN === '1';
@@ -31,6 +35,10 @@ const resolved = {
   CYANPRINT_WEB_DOMAIN: readEnv('CYANPRINT_WEB_DOMAIN'),
   CYANPRINT_WEB_CACHE_R2_BUCKET_NAME: readEnv('CYANPRINT_WEB_CACHE_R2_BUCKET_NAME'),
   CYANPRINT_RELEASE_REGISTRY_URL: readEnv('CYANPRINT_RELEASE_REGISTRY_URL'),
+  CYANPRINT_GITHUB_CLIENT_ID: readEnv('CYANPRINT_GITHUB_CLIENT_ID'),
+  CYANPRINT_GITHUB_ADMIN_LOGINS: readEnv('CYANPRINT_GITHUB_ADMIN_LOGINS'),
+  CYANPRINT_AUTH_RETURN_ORIGINS: readEnv('CYANPRINT_AUTH_RETURN_ORIGINS'),
+  CYANPRINT_WEB_URL: readEnv('CYANPRINT_WEB_URL'),
   CYANPRINT_D1_DATABASE_ID: process.env.CYANPRINT_D1_DATABASE_ID ?? '',
   CYANPRINT_KV_NAMESPACE_ID: process.env.CYANPRINT_KV_NAMESPACE_ID ?? '',
 };
@@ -212,7 +220,26 @@ function readObjectString(value: unknown, keys: string[]): string {
 
 function readEnv(key: keyof typeof defaults): string {
   const configured = process.env[key];
-  return configured && configured.length > 0 ? configured : defaults[key];
+  if (configured && configured.length > 0) {
+    return configured;
+  }
+  const repoVariable = readGitHubVariable(key);
+  return repoVariable && repoVariable.length > 0 ? repoVariable : defaults[key];
+}
+
+function readGitHubVariable(key: string): string {
+  if (!key.startsWith('CYANPRINT_')) {
+    return '';
+  }
+  const result = Bun.spawnSync(['gh', 'variable', 'get', key], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: process.env,
+  });
+  if (result.exitCode !== 0) {
+    return '';
+  }
+  return stripAnsi(new TextDecoder().decode(result.stdout)).trim();
 }
 
 function toShellEnv(values: Record<string, string>): string {

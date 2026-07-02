@@ -2,16 +2,22 @@ cases:
   - name: basic
     input: tests/basic/input
     expected: tests/basic/expected
+    config:
+      vars:
+        PROJECT: Example
+        NAME: Guide
+      parser:
+        varSyntax:
+          - ['@@', '@@']
+          - ['var__', '__']
+          - ['{{', '}}']
     validations:
-      - path: README.md
-        contains: '# Example'
-      - path: README.md
-        notContains: 'trailing spaces   '
-    commands:
       - command: bun
         args:
           - --eval
           - |
             const text = await Bun.file("README.md").text();
             if (!text.includes("# Example")) process.exit(1);
+            if (!(await Bun.file("Guide.md").text()).includes("Project: Example")) process.exit(1);
             if (text.includes("trailing spaces   ")) process.exit(1);
+            if (!(await Bun.file("Guide.md").exists())) process.exit(1);

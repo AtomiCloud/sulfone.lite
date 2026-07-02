@@ -7,11 +7,11 @@ This artifact is a folder-first CyanPrint template. It asks questions in `cyan.t
 ## Test
 
 ```bash
-cyanprint test . --answers answers.json
+cyanprint test .
 ```
 
 ## Push
 
 ```bash
-cyanprint push . --token "$CYANPRINT_TOKEN"
+CYANPRINT_TOKEN="<token>" cyanprint push .
 ```

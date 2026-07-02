@@ -4,3 +4,4 @@ owner: cyanprint
 name: resolver1
 entry: src/index.ts
 bundledEntry: dist/index.js
+api: 1

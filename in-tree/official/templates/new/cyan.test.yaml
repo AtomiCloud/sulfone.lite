@@ -1,25 +1,41 @@
 cases:
   - name: template
-    answers: answers-template.json
+    answers:
+      owner: acme
+      name: service-template
+      kind: template
+      title: Service Template
+      description: A CyanPrint v4 template.
     expected: expected/template
-    snapshot: expected/template/README.md
-    commands:
-      - command: bun
-        args:
-          - --eval
-          - |
-            for (const path of ["cyan.yaml", "cyan.ts", "cyan.test.yaml", ".github/workflows/ci.yml", ".cyan/skills/cyanprint-authoring.md"]) {
-              if (!(await Bun.file(path).exists())) process.exit(1);
-            }
+    validations:
+      - bun run build && cyanprint test . --json
   - name: processor
-    answers: answers-processor.json
+    answers:
+      owner: acme
+      name: trim-lines
+      kind: processor
+      title: Trim Lines Processor
+      description: A CyanPrint v4 processor.
     expected: expected/processor
-    snapshot: expected/processor/README.md
+    validations:
+      - bun run build && cyanprint test . --json
   - name: plugin
-    answers: answers-plugin.json
+    answers:
+      owner: acme
+      name: footer
+      kind: plugin
+      title: Footer Plugin
+      description: A CyanPrint v4 plugin.
     expected: expected/plugin
-    snapshot: expected/plugin/README.md
+    validations:
+      - bun run build && cyanprint test . --json
   - name: resolver
-    answers: answers-resolver.json
+    answers:
+      owner: acme
+      name: keep-latest
+      kind: resolver
+      title: Keep Latest Resolver
+      description: A CyanPrint v4 resolver.
     expected: expected/resolver
-    snapshot: expected/resolver/README.md
+    validations:
+      - bun run build && cyanprint test . --json

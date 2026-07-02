@@ -1,0 +1,5 @@
+cases:
+  - name: basic
+    answers:
+      name: Hello Lite
+    expected: expected

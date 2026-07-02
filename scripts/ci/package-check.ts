@@ -1,6 +1,27 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { sha256 } from '@cyanprint/core';
 import { assertGoreleaserConfig, loadGoreleaserConfig } from './release-config';
+
+// The @cyanprint/sdk type contract is vendored (not published) into generated artifacts.
+// Every checked-in copy must match packages/artifact-runner/src/sdk-types.ts so author DX never drifts.
+const sdkTypeContract = await Bun.file('packages/artifact-runner/src/sdk-types.ts').text();
+let vendoredSdkContracts = 0;
+for (const sdkRoot of ['in-tree/official/templates/new', 'examples/templates/new']) {
+  for await (const relativePath of new Bun.Glob('**/types/cyanprint-sdk.d.ts').scan({ cwd: sdkRoot })) {
+    const vendored = await Bun.file(join(sdkRoot, relativePath)).text();
+    if (vendored !== sdkTypeContract) {
+      throw new Error(
+        `vendored @cyanprint/sdk contract out of sync: ${join(sdkRoot, relativePath)}. ` +
+          'Run "bun run sdk:types:emit" and regenerate template snapshots.',
+      );
+    }
+    vendoredSdkContracts += 1;
+  }
+}
+if (vendoredSdkContracts === 0) {
+  throw new Error('expected vendored @cyanprint/sdk type contracts in the official "new" template, found none');
+}
 
 const version = (await import('../../packages/cli/src/version')).VERSION;
 const packageJson = await import('../../package.json');
