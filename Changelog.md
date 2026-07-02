@@ -1,3 +1,21 @@
+## [4.2.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.1.0...v4.2.0) (2026-07-02)
+
+
+### ✨ Features ✨
+
+* **lite:** prompt validation, progress steps, project trace ([e7d2149](https://github.com/AtomiCloud/sulfone.lite/commit/e7d2149b5fa4154cf0280605bcfde2154a57b319))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **lite:** exclude e2e fixture archives from treefmt ([1365c10](https://github.com/AtomiCloud/sulfone.lite/commit/1365c10464242b339fc748c10056b29b6084707e))
+
+
+### 🧪 Tests 🧪
+
+* **lite:** add parity matrix rows for presets, uniqueness, and trace ([f920e7c](https://github.com/AtomiCloud/sulfone.lite/commit/f920e7ca3f9cc46d3e0a14ff961cd8476404ab44))
+* **lite:** run all 39 parity cases as real e2e tests ([67a9663](https://github.com/AtomiCloud/sulfone.lite/commit/67a966321f6a5b834bf91a90206163e5cc3138d2))
+
 ## [4.1.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.0.1...v4.1.0) (2026-07-02)
 
 
