@@ -1,5 +1,6 @@
-import { createProject } from '@cyanprint/core';
-import type { PromptAdapter } from '@cyanprint/contracts';
+import { join } from 'node:path';
+import { createProject, loadGeneratedState } from '@cyanprint/core';
+import type { Answers, PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { resolveTemplateInput } from '../registry-template';
@@ -7,7 +8,7 @@ import { info, kv, pathLabel, printJson, printSection, progressLine, success } f
 
 type CliRuntime = {
   promptAdapter?: PromptAdapter;
-  promptAdapterFactory?: (answers: Record<string, unknown>) => PromptAdapter;
+  promptAdapterFactory?: (answers: Record<string, unknown>, suggestions?: Record<string, unknown>) => PromptAdapter;
   silent?: boolean;
 };
 
@@ -23,7 +24,10 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
   const json = flagBool(flags, 'json');
   const headless = flagBool(flags, 'headless');
   const effectiveHeadless = headless || json;
-  const promptAdapter = runtime.promptAdapterFactory?.(answers) ?? runtime.promptAdapter;
+  // Re-running a template over an existing project: the recorded answers carry over as
+  // suggestions — free-form prompts prefill them, lists/confirm default to them.
+  const priorAnswers = effectiveHeadless ? undefined : await readPriorAnswers(outDir);
+  const promptAdapter = runtime.promptAdapterFactory?.(answers, priorAnswers) ?? runtime.promptAdapter;
   if (!json && !runtime.silent) {
     console.log(info(`creating ${pathLabel(outDir)} from ${pathLabel(template)}`));
   }
@@ -56,4 +60,12 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
       kv('local execution', !result.remoteExecution),
     ]);
   }
+}
+
+async function readPriorAnswers(outDir: string): Promise<Answers | undefined> {
+  if (!(await Bun.file(join(outDir, '.cyan_state.yaml')).exists())) {
+    return undefined;
+  }
+  const state = await loadGeneratedState(outDir).catch(() => undefined);
+  return state?.answers;
 }

@@ -452,6 +452,32 @@ describe('inquirer prompt adapter', () => {
       { name: 'large', value: 'large', description: 'Roomy.\nYou can change this later in config.' },
     ]);
   });
+
+  test('re-run suggestions prefill free-form prompts and default list prompts', async () => {
+    const calls: Array<{ kind: string; config: { placeholder?: string; default?: unknown } }> = [];
+    const prompts = {
+      input: async config => {
+        calls.push({ kind: 'text', config });
+        return 'x';
+      },
+      confirm: async () => true,
+      select: async config => {
+        calls.push({ kind: 'select', config });
+        return 'a';
+      },
+      checkbox: async () => [],
+      number: async () => 1,
+    } as InquirerPrompts;
+    const adapter = inquirerPromptAdapter({}, prompts, { name: 'Prior Project', flavor: 'b' });
+
+    await adapter.ask({ kind: 'text', name: 'name', message: 'Name?', placeholder: 'example' });
+    await adapter.ask({ kind: 'select', name: 'flavor', message: 'Flavor?', options: ['a', 'b'], default: 'a' });
+
+    // The recorded answer wins: prefilled for text (replacing the example placeholder),
+    // default for select (overriding the template default).
+    expect(calls[0]?.config.placeholder).toBe('Prior Project');
+    expect(calls[1]?.config.default).toBe('b');
+  });
 });
 
 describe('interactive create wraps headless core', () => {

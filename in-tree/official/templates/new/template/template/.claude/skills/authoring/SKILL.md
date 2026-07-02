@@ -35,7 +35,7 @@ Any valid export form loads (const arrow, function expression); the default-func
 Polish and guard-rails, all optional:
 
 - `description` — dim help text rendered at the bottom of every prompt kind (below the input, or below the list under the option help).
-- `placeholder` — a dim ghost value shown inside empty free-form inputs (`text`, `number`).
+- `placeholder` — an editable suggestion pre-filled into free-form inputs (`text`, `number`); enter submits it as-is, so use it OR a `default`, not both.
 - `validate` (all except `confirm`) — return `true` or an error message; interactive users get re-prompted inline, headless answers fail the run with your message.
 - select/multiselect options may be objects `{ value, label?, description? }` — the description renders below the list and follows the highlighted option.
 

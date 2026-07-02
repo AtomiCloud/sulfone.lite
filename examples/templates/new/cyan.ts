@@ -11,14 +11,12 @@ function slug(value: string) {
 export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext) {
   const owner = await prompt.text('owner', 'Who owns this artifact?', {
     default: 'cyan',
-    placeholder: 'acme',
     description: 'Your registry username; published artifacts live under owner/name.',
   });
   const name =
     slug(
       await prompt.text('name', 'What should this artifact be called?', {
         default: 'app-template',
-        placeholder: 'my-app-template',
         description: 'Lowercase letters, numbers, and dashes; becomes the registry name.',
         validate: value => (slug(value).length > 0 ? true : 'Please use at least one letter or number.'),
       }),
@@ -34,11 +32,9 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
   });
   const title = await prompt.text('title', 'What is the human-friendly title?', {
     default: name,
-    placeholder: 'My App Template',
   });
   const description = await prompt.text('description', 'Describe this artifact in one line.', {
     default: `A CyanPrint v4 ${kind}.`,
-    placeholder: 'Scaffolds a Bun service with CI and tests.',
   });
   return {
     processors: [

@@ -1,9 +1,10 @@
 // Free-form prompts (text, number, confirm) built on @inquirer/core so the prompt
 // description renders BELOW the input line — consistent with select/checkbox, whose
-// option help renders below the list. Also gives text/number a real inline ghost
-// placeholder, which @inquirer/prompts input does not support.
+// option help renders below the list. `placeholder` pre-fills the input with an
+// editable suggestion: type over it, edit it, or press enter to submit it as-is
+// (@inquirer/prompts input supports neither prefill nor bottom descriptions).
 
-import { createPrompt, isBackspaceKey, isEnterKey, useKeypress, usePrefix, useState } from '@inquirer/core';
+import { createPrompt, isBackspaceKey, isEnterKey, useEffect, useKeypress, usePrefix, useState } from '@inquirer/core';
 import chalk from 'chalk';
 
 export type DescribedTextConfig = {
@@ -45,9 +46,16 @@ function bottomContent(description: string | undefined, error: string | undefine
 export const describedText: DescribedPrompt<string, DescribedTextConfig> = createPrompt<string, DescribedTextConfig>(
   (config, done) => {
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
-    const [value, setValue] = useState('');
+    const [value, setValue] = useState(config.placeholder ?? '');
     const [error, setError] = useState<string | undefined>(undefined);
     const prefix = usePrefix({ status });
+
+    // Prefill the placeholder as real, editable input.
+    useEffect(rl => {
+      if (config.placeholder) {
+        rl.write(config.placeholder);
+      }
+    }, []);
 
     useKeypress((key, rl) => {
       if (status !== 'idle') {
@@ -72,8 +80,7 @@ export const describedText: DescribedPrompt<string, DescribedTextConfig> = creat
 
     const message = chalk.bold(config.message);
     const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-    const ghost = !value && status === 'idle' && config.placeholder ? chalk.dim(config.placeholder) : '';
-    const shown = status === 'done' ? chalk.cyan(value) : value || ghost;
+    const shown = status === 'done' ? chalk.cyan(value) : value;
     return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
   },
 );
@@ -83,9 +90,16 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
   DescribedNumberConfig
 >((config, done) => {
   const [status, setStatus] = useState<'idle' | 'done'>('idle');
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(config.placeholder ?? '');
   const [error, setError] = useState<string | undefined>(undefined);
   const prefix = usePrefix({ status });
+
+  // Prefill the placeholder as real, editable input.
+  useEffect(rl => {
+    if (config.placeholder) {
+      rl.write(config.placeholder);
+    }
+  }, []);
 
   useKeypress((key, rl) => {
     if (status !== 'idle') {
@@ -116,8 +130,7 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
 
   const message = chalk.bold(config.message);
   const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-  const ghost = !value && status === 'idle' && config.placeholder ? chalk.dim(config.placeholder) : '';
-  const shown = status === 'done' ? chalk.cyan(value) : value || ghost;
+  const shown = status === 'done' ? chalk.cyan(value) : value;
   return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
 });
 

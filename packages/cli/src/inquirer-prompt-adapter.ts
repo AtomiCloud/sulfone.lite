@@ -25,17 +25,37 @@ const defaultPrompts: InquirerPrompts = {
   select,
 };
 
-export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts = defaultPrompts): PromptAdapter {
+export function inquirerPromptAdapter(
+  answers: Answers,
+  prompts: InquirerPrompts = defaultPrompts,
+  suggestions: Answers = {},
+): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
       if (request.name in answers) {
         return answers[request.name] as T;
       }
-      const value = await askPrompt(request, prompts);
+      const value = await askPrompt(applySuggestion(request, suggestions), prompts);
       answers[request.name] = value;
       return value as T;
     },
   };
+}
+
+/**
+ * When re-running a template over an existing project, the previously answered value
+ * carries over: free-form prompts get it prefilled (edit in place or enter to keep),
+ * list and confirm prompts get it as their default.
+ */
+function applySuggestion(request: PromptRequest, suggestions: Answers): PromptRequest {
+  const suggested = suggestions[request.name];
+  if (suggested === undefined) {
+    return request;
+  }
+  if (request.kind === 'text' || request.kind === 'number') {
+    return { ...request, placeholder: String(suggested) } as PromptRequest;
+  }
+  return { ...request, default: suggested } as PromptRequest;
 }
 
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {
