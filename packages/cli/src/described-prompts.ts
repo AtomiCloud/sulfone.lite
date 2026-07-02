@@ -4,8 +4,21 @@
 // editable suggestion: type over it, edit it, or press enter to submit it as-is
 // (@inquirer/prompts input supports neither prefill nor bottom descriptions).
 
-import { createPrompt, isBackspaceKey, isEnterKey, useEffect, useKeypress, usePrefix, useState } from '@inquirer/core';
+import { createPrompt, isBackspaceKey, isEnterKey, useKeypress, usePrefix, useState } from '@inquirer/core';
 import chalk from 'chalk';
+
+// While a free-form input is empty, its placeholder renders as a dim backdrop after a fake
+// block cursor, with the real terminal cursor hidden (it would otherwise sit after the
+// backdrop text). Typing replaces the backdrop; the backdrop itself is never submitted.
+const HIDE_CURSOR = '\u001B[?25l';
+const SHOW_CURSOR = '\u001B[?25h';
+
+function backdrop(placeholder: string | undefined): string {
+  if (!placeholder) {
+    return SHOW_CURSOR;
+  }
+  return `${chalk.inverse(' ')}${chalk.dim(placeholder)}${HIDE_CURSOR}`;
+}
 
 export type DescribedTextConfig = {
   message: string;
@@ -46,16 +59,9 @@ function bottomContent(description: string | undefined, error: string | undefine
 export const describedText: DescribedPrompt<string, DescribedTextConfig> = createPrompt<string, DescribedTextConfig>(
   (config, done) => {
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
-    const [value, setValue] = useState(config.placeholder ?? '');
+    const [value, setValue] = useState('');
     const [error, setError] = useState<string | undefined>(undefined);
     const prefix = usePrefix({ status });
-
-    // Prefill the placeholder as real, editable input.
-    useEffect(rl => {
-      if (config.placeholder) {
-        rl.write(config.placeholder);
-      }
-    }, []);
 
     useKeypress((key, rl) => {
       if (status !== 'idle') {
@@ -80,7 +86,8 @@ export const describedText: DescribedPrompt<string, DescribedTextConfig> = creat
 
     const message = chalk.bold(config.message);
     const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-    const shown = status === 'done' ? chalk.cyan(value) : value;
+    const shown =
+      status === 'done' ? chalk.cyan(value) + SHOW_CURSOR : value ? value + SHOW_CURSOR : backdrop(config.placeholder);
     return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
   },
 );
@@ -90,16 +97,9 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
   DescribedNumberConfig
 >((config, done) => {
   const [status, setStatus] = useState<'idle' | 'done'>('idle');
-  const [value, setValue] = useState(config.placeholder ?? '');
+  const [value, setValue] = useState('');
   const [error, setError] = useState<string | undefined>(undefined);
   const prefix = usePrefix({ status });
-
-  // Prefill the placeholder as real, editable input.
-  useEffect(rl => {
-    if (config.placeholder) {
-      rl.write(config.placeholder);
-    }
-  }, []);
 
   useKeypress((key, rl) => {
     if (status !== 'idle') {
@@ -130,7 +130,8 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
 
   const message = chalk.bold(config.message);
   const hint = config.default !== undefined && status === 'idle' && !value ? chalk.dim(` (${config.default})`) : '';
-  const shown = status === 'done' ? chalk.cyan(value) : value;
+  const shown =
+    status === 'done' ? chalk.cyan(value) + SHOW_CURSOR : value ? value + SHOW_CURSOR : backdrop(config.placeholder);
   return [`${prefix} ${message}${hint} ${shown}`, bottomContent(config.description, error, status === 'idle')];
 });
 

@@ -44,16 +44,12 @@ export function inquirerPromptAdapter(
 
 /**
  * When re-running a template over an existing project, the previously answered value
- * carries over: free-form prompts get it prefilled (edit in place or enter to keep),
- * list and confirm prompts get it as their default.
+ * becomes every prompt's default — press enter to keep it, or answer to change it.
  */
 function applySuggestion(request: PromptRequest, suggestions: Answers): PromptRequest {
   const suggested = suggestions[request.name];
   if (suggested === undefined) {
     return request;
-  }
-  if (request.kind === 'text' || request.kind === 'number') {
-    return { ...request, placeholder: String(suggested) } as PromptRequest;
   }
   return { ...request, default: suggested } as PromptRequest;
 }

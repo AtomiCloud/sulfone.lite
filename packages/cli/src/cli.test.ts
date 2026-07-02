@@ -473,9 +473,10 @@ describe('inquirer prompt adapter', () => {
     await adapter.ask({ kind: 'text', name: 'name', message: 'Name?', placeholder: 'example' });
     await adapter.ask({ kind: 'select', name: 'flavor', message: 'Flavor?', options: ['a', 'b'], default: 'a' });
 
-    // The recorded answer wins: prefilled for text (replacing the example placeholder),
-    // default for select (overriding the template default).
-    expect(calls[0]?.config.placeholder).toBe('Prior Project');
+    // The recorded answer becomes the default everywhere (enter keeps it); the
+    // placeholder backdrop stays as a display-only suggestion.
+    expect(calls[0]?.config.default).toBe('Prior Project');
+    expect(calls[0]?.config.placeholder).toBe('example');
     expect(calls[1]?.config.default).toBe('b');
   });
 });

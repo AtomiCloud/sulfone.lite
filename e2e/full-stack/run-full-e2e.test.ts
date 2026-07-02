@@ -83,12 +83,32 @@ test(
 test(
   'case 2: template works with all input types (text, confirm, select, multiselect, number)',
   async () => {
+    // The all-types fixture is the prompt showcase: placeholders, descriptions,
+    // per-option help, validation, and defaults — try it interactively with
+    // `bun run cyan -- create e2e/full-stack/fixtures/prompts/all-types .tmp/demo`.
     const out = join(tmp, 'prompts-create');
     await resetDir(out);
     await cyan(
       `create ${fixtures}/prompts/all-types --out ${out} --headless --answers ${fixtures}/prompts/all-types/answers.json --json`,
     );
     expect(await diffAgainstExpected(out, `${expected}/prompts-create`)).toEqual([]);
+
+    // Defaults fill unanswered prompts headlessly (public=true, flavor=batteries, toppings=ci).
+    const defaultsOut = join(tmp, 'prompts-defaults');
+    await resetDir(defaultsOut);
+    await cyan(
+      `create ${fixtures}/prompts/all-types --out ${defaultsOut} --headless --answers ${fixtures}/prompts/all-types/answers-defaults.json --json`,
+    );
+    const rendered = await Bun.file(join(defaultsOut, 'OUT.md')).text();
+    expect(rendered).toContain('public:   true');
+    expect(rendered).toContain('flavor:   batteries');
+    expect(rendered).toContain('toppings: ci');
+
+    // Validation rejects out-of-range headless answers with the author's message.
+    const failure = await cyanExpectingFailure(
+      `create ${fixtures}/prompts/all-types --out ${join(tmp, 'prompts-invalid')} --headless --answers ${fixtures}/prompts/all-types/answers-invalid.json --json`,
+    );
+    expect(failure).toContain('Port must be between 1024 and 65535');
   },
   T,
 );

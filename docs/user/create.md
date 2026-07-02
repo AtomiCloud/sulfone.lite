@@ -36,9 +36,9 @@ Templates compose child templates (declared in `cyan.yaml` `templates:` or retur
 
 ## Prompts
 
-Template authors can polish every prompt: a `description` renders as dim help text at the bottom of every prompt kind, a `placeholder` pre-fills free-form inputs with an editable suggestion (type over it, edit it, or press enter to submit it as-is — don't combine it with a `default`), and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option (with the prompt description stacked beneath it).
+Template authors can polish every prompt: a `description` renders as dim help text at the bottom of every prompt kind, a `placeholder` renders as a dim backdrop inside empty free-form inputs (typing replaces it; it is never submitted), a `default` is submitted on plain enter, and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option (with the prompt description stacked beneath it).
 
-Re-running `create` over an existing project carries the recorded answers forward: free-form prompts come prefilled with the previous value, and select/multiselect/confirm default to it — press enter to keep everything as-is, or edit what changed.
+Re-running `create` over an existing project carries the recorded answers forward as each prompt's default — press enter to keep everything as-is, or answer to change it.
 
 A `validate` function on `text`, `select`, `multiselect`, and `number` prompts (return `true` or an error message) guards answers: interactive runs re-prompt until the answer passes; headless answers that fail validation abort the run with the message.
 
