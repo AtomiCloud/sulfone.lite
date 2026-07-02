@@ -27,7 +27,9 @@ export async function traceCommand(argv: string[], runtime: CliRuntime = {}): Pr
   // A generated project carries .cyan_state.yaml: trace regenerates it with the SAME
   // answers and deterministic state, using the recorded template (or --template override).
   let template = target;
+  let tracingProject = false;
   if (await Bun.file(join(target, '.cyan_state.yaml')).exists()) {
+    tracingProject = true;
     const state = await loadGeneratedState(target);
     answers = { ...state.answers, ...answers };
     deterministicState = state.deterministicState;
@@ -46,6 +48,16 @@ export async function traceCommand(argv: string[], runtime: CliRuntime = {}): Pr
     trusted: flagBool(flags, 'trust'),
     trustFixture: flagString(flags, 'trust-fixture'),
     trustDir: flagString(flags, 'trust-dir'),
+  }).catch((error: unknown) => {
+    if (tracingProject && !flagString(flags, 'template')) {
+      throw new Error(
+        `Could not resolve this project's template (${template}) from the registry: ` +
+          `${error instanceof Error ? error.message : String(error)}\n` +
+          `If the project was generated from a local template, pass it explicitly: ` +
+          `cyanprint trace ${target} --template <path-or-ref>`,
+      );
+    }
+    throw error;
   });
 
   const trace = await traceProject({
