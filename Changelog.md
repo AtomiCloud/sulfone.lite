@@ -1,3 +1,15 @@
+## [4.4.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.3.0...v4.4.0) (2026-07-02)
+
+
+### ✨ Features ✨
+
+* **lite:** render prompt descriptions below the input ([7c88ef9](https://github.com/AtomiCloud/sulfone.lite/commit/7c88ef90c4c9c0da5480efc6a4456329ecf2ec3a))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **lite:** sync bun.lock with release version bumps ([da93621](https://github.com/AtomiCloud/sulfone.lite/commit/da9362110b6120e4efc6ca9166ea24d9a1ea00bb))
+
 ## [4.3.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.2.0...v4.3.0) (2026-07-02)
 
 
