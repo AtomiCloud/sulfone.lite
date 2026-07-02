@@ -1,3 +1,27 @@
+## [4.1.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.0.1...v4.1.0) (2026-07-02)
+
+
+### 📜 Documentation 📜
+
+* **lite:** deepen official artifact skills ([6591ae5](https://github.com/AtomiCloud/sulfone.lite/commit/6591ae5a7328bdaecd20f3c362b73ee1c77a926f))
+
+
+### ✨ Features ✨
+
+* **lite:** composition features, registry hardening, readable e2e ([08ab6ce](https://github.com/AtomiCloud/sulfone.lite/commit/08ab6ce3e040f73c760aac44ef6be30193d2ad6a))
+* **lite:** stabilize auth and official artifacts ([b990397](https://github.com/AtomiCloud/sulfone.lite/commit/b990397b7a7c081f3d6d68e707b2e63160c216c2))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **lite:** build seed archive from clean template tree ([9eb3032](https://github.com/AtomiCloud/sulfone.lite/commit/9eb3032e39fae923a3dc454579d79fb94a1ecb41))
+* **lite:** resync meta template fixtures and seed after formatting ([1fc0989](https://github.com/AtomiCloud/sulfone.lite/commit/1fc09891387a60d656cf618fc28a3025943a76e7))
+
+
+### 🧪 Tests 🧪
+
+* **lite:** make artifact validations command based ([0f5d147](https://github.com/AtomiCloud/sulfone.lite/commit/0f5d147ecff5e668977264ba7106a0b6955a42b7))
+
 ## [4.0.1](https://github.com/AtomiCloud/sulfone.lite/compare/v4.0.0...v4.0.1) (2026-06-29)
 
 
