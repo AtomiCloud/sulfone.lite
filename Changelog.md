@@ -1,3 +1,19 @@
+## [4.3.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.2.0...v4.3.0) (2026-07-02)
+
+
+### ✨ Features ✨
+
+* **lite:** compile cyanprint in nix and bundle source artifacts ([2fcbc4d](https://github.com/AtomiCloud/sulfone.lite/commit/2fcbc4d936ff19bf458af13d773e3b578de07638))
+* **lite:** prompt placeholders, descriptions, and option help ([6c974a2](https://github.com/AtomiCloud/sulfone.lite/commit/6c974a28ee5a35b50d2d6deea2f1bea760bdb53b))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **lite:** bump package.json version on release ([d36881f](https://github.com/AtomiCloud/sulfone.lite/commit/d36881fd1eb6ff9c527b571f55c5fdde9056b465))
+* **lite:** guide trace users when a project template cannot resolve ([ca2a663](https://github.com/AtomiCloud/sulfone.lite/commit/ca2a663fbd99755727ab4bcd231c54a0206bb335))
+* **lite:** harden source runtime bundle materialization ([9531151](https://github.com/AtomiCloud/sulfone.lite/commit/9531151d824c63e1e989ba57d177ee3503016780))
+* **lite:** include lock files in the source runtime cache key ([d26ba3b](https://github.com/AtomiCloud/sulfone.lite/commit/d26ba3bfbe1ce215bf16560bfffddb26d9613f88))
+
 ## [4.2.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.1.0...v4.2.0) (2026-07-02)
 
 
