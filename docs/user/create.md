@@ -36,7 +36,7 @@ Templates compose child templates (declared in `cyan.yaml` `templates:` or retur
 
 ## Prompts
 
-Template authors can polish every prompt: a `description` renders as dim help text under the question, a `placeholder` shows a dim example next to free-form inputs, and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option.
+Template authors can polish every prompt: a `description` renders as dim help text below the input, a `placeholder` renders as a dim ghost value inside free-form inputs, and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option.
 
 A `validate` function on `text`, `select`, `multiselect`, and `number` prompts (return `true` or an error message) guards answers: interactive runs re-prompt until the answer passes; headless answers that fail validation abort the run with the message.
 
