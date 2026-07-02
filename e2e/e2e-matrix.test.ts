@@ -159,7 +159,20 @@ const caseDetails: Record<number, CaseDetail> = {
   },
   36: {
     command: 'cyan create cyanprint/tri-suite@1, then cyan update <project> --template cyanprint/tri-suite',
-    fixtures: 'temp tri-a, tri-b, tri-c templates with cyanprint/tri-merge resolver v1 -> v2',
+    fixtures: 'e2e/full-stack/fixtures/tri (resolver, tri-a/b/c v1+v2, tri-suite)',
+  },
+  37: {
+    command: 'createProject(<A -> B -> C preset cascade fixture>)',
+    fixtures: 'temp a/b/c templates where A and B preset the grandchild answer and det-state differently',
+  },
+  38: {
+    command: 'createProject(<duplicate template composition>) + createProject(<shared processor group>)',
+    fixtures: 'temp group -> x,y both pulling cyanprint/dup; temp p/q sharing cyan/default',
+  },
+  39: {
+    command:
+      'cyanprint trace examples/template-groups/basic --headless --answers examples/template-groups/basic/answers.json',
+    fixtures: 'examples/template-groups/basic; temp deep-a -> deep-b -> deep-c provenance fixture',
   },
 };
 
@@ -196,9 +209,9 @@ function requireDetail(id: number): CaseDetail {
   return detail;
 }
 
-test('e2e.md lists the complete 36-case parity matrix in order', () => {
-  expect(matrix).toHaveLength(36);
-  expect(matrix.map(entry => entry.id)).toEqual(Array.from({ length: 36 }, (_, index) => index + 1));
+test('e2e.md lists the complete 39-case parity matrix in order', () => {
+  expect(matrix).toHaveLength(39);
+  expect(matrix.map(entry => entry.id)).toEqual(Array.from({ length: 39 }, (_, index) => index + 1));
   expect(
     Object.keys(caseDetails)
       .map(Number)

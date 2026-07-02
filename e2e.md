@@ -41,6 +41,9 @@ Every requested parity case is now mapped to local automated coverage. Status is
 |  34 | `push` works on resolver.                                                                                                                 | covered | `push-e2e.ts`                                                                                                                             |
 |  35 | `push` works on resolver, bumping version.                                                                                                | covered | `push-e2e.ts` repeated resolver push                                                                                                      |
 |  36 | Three templates with dependencies and upgraded resolver merge previous VFS, updated VFS, removals, conflicts, and clean three-way output. | covered | `e2e/full-stack/run-full-e2e.test.ts` three-template dependency resolver upgrade scenario                                                 |
+|  37 | Parent presets cascade answers and deterministic state to all descendant templates; the outermost ancestor wins conflicts.                | covered | `packages/core/src/core.test.ts` root ancestor presets win over a nearer parent                                                           |
+|  38 | Each template may appear only once in a composition; duplicates are rejected while shared processors/plugins/resolvers stay allowed.      | covered | `packages/core/src/core.test.ts` rejects duplicate template; allows shared processor                                                      |
+|  39 | `trace` reports per-file provenance, per-template isolated output, and contribution diffs in human and JSON views.                        | covered | `packages/core/src/core.test.ts` traceProject + grandchild provenance; `packages/cli/src/cli.test.ts` trace command                       |
 
 ## Current Commands
 
