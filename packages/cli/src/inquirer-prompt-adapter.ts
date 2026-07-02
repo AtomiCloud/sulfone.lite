@@ -1,5 +1,12 @@
 import { checkbox, confirm, input, number, select } from '@inquirer/prompts';
-import type { Answers, PromptAdapter, PromptRequest } from '@cyanprint/contracts';
+import chalk from 'chalk';
+import {
+  promptOptionValue,
+  type Answers,
+  type PromptAdapter,
+  type PromptOption,
+  type PromptRequest,
+} from '@cyanprint/contracts';
 
 export type InquirerPrompts = {
   checkbox: typeof checkbox;
@@ -27,38 +34,61 @@ export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {
   // request.validate re-prompts inline (inquirer shares the true-or-error-message contract).
   const validate = request.validate;
+  const message = promptMessage(request);
   if (request.kind === 'text') {
     return await prompts.input({
-      message: request.message,
+      message,
       default: request.default,
       validate: validate ? value => validate(value) : undefined,
     });
   }
   if (request.kind === 'confirm') {
-    return await prompts.confirm({ message: request.message, default: request.default });
+    return await prompts.confirm({ message, default: request.default });
   }
   if (request.kind === 'select') {
     return await prompts.select({
-      message: request.message,
-      choices: request.options.map(option => ({ name: option, value: option })),
+      message,
+      choices: request.options.map(option => promptChoice(option)),
       default: request.default,
     });
   }
   if (request.kind === 'multiselect') {
     return await prompts.checkbox({
-      message: request.message,
+      message,
       choices: request.options.map(option => ({
-        name: option,
-        value: option,
-        checked: request.default?.includes(option),
+        ...promptChoice(option),
+        checked: request.default?.includes(promptOptionValue(option)),
       })),
       validate: validate ? items => validate(items.map(item => item.value)) : undefined,
     });
   }
   return await prompts.number({
-    message: request.message,
+    message,
     default: request.default,
     required: true,
     validate: validate ? value => validate(value) : undefined,
   });
+}
+
+/**
+ * The prompt line: the author's question, a dim placeholder example for free-form inputs
+ * (inquirer has no native inline placeholder), and a dim description on its own line.
+ * Select/multiselect option descriptions render natively below the list as the highlight moves.
+ */
+function promptMessage(request: PromptRequest): string {
+  let message = request.message;
+  if ((request.kind === 'text' || request.kind === 'number') && request.placeholder !== undefined) {
+    message += ` ${chalk.dim(`e.g. ${request.placeholder}`)}`;
+  }
+  if (request.description) {
+    message += `\n${chalk.dim(request.description)}\n`;
+  }
+  return message;
+}
+
+function promptChoice(option: PromptOption): { name: string; value: string; description?: string } {
+  if (typeof option === 'string') {
+    return { name: option, value: option };
+  }
+  return { name: option.label ?? option.value, value: option.value, description: option.description };
 }

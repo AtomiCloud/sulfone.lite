@@ -30,14 +30,31 @@ Any valid export form loads (const arrow, function expression); the default-func
 
 ## Prompts and shared answers
 
-`prompt` supports `text`, `confirm`, `select`, `multiselect`, and `number` — each takes a stable answer key, a message, and an optional default. All except `confirm` also take an optional `validate` function returning `true` or an error message — interactive users get re-prompted, headless answers fail the run with your message:
+`prompt` supports `text`, `confirm`, `select`, `multiselect`, and `number` — each takes a stable answer key, a message, and an optional default. Write messages as friendly questions ("What is your URL?"), not key names.
+
+Polish and guard-rails, all optional:
+
+- `description` — dim help text rendered under the question.
+- `placeholder` — a dim example shown next to free-form inputs (`text`, `number`).
+- `validate` (all except `confirm`) — return `true` or an error message; interactive users get re-prompted inline, headless answers fail the run with your message.
+- select/multiselect options may be objects `{ value, label?, description? }` — the description renders below the list and follows the highlighted option.
 
 ```ts
-const port = await prompt.number('port', 'Port', {
-  validate: value => (value >= 1024 && value <= 65535 ? true : 'port must be 1024-65535'),
+const url = await prompt.text('url', 'What is your project URL?', {
+  placeholder: 'https://example.com',
+  description: 'Used as the homepage link in the generated README.',
+  validate: value => (/^https?:\/\//.test(value) ? true : 'Enter a full URL, starting with http(s)://'),
 });
-const phone = await prompt.text('phone', 'Phone number', {
-  validate: value => (/^\+?[0-9 -]{7,15}$/.test(value) ? true : 'enter a valid phone number'),
+const flavor = await prompt.select('flavor', 'Which flavor do you want?', {
+  options: [
+    { value: 'minimal', description: 'Just the essentials; add your own tooling.' },
+    { value: 'batteries', description: 'CI, tests, formatter, and docs preconfigured.' },
+  ],
+  default: 'minimal',
+});
+const port = await prompt.number('port', 'Which port should the dev server use?', {
+  placeholder: '3000',
+  validate: value => (value >= 1024 && value <= 65535 ? true : 'Port must be 1024-65535.'),
 });
 ```
 

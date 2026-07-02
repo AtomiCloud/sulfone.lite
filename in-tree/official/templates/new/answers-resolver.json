@@ -1,7 +1,0 @@
-{
-  "owner": "acme",
-  "name": "keep-latest",
-  "kind": "resolver",
-  "title": "Keep Latest Resolver",
-  "description": "A CyanPrint v4 resolver."
-}
