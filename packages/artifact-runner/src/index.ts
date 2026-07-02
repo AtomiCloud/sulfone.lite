@@ -231,10 +231,18 @@ async function collectSourceRuntimeFiles(root: string, files: string[]): Promise
     const path = join(root, entry.name);
     if (entry.isDirectory()) {
       await collectSourceRuntimeFiles(path, files);
-    } else if (entry.isFile() && ['.ts', '.tsx', '.js', '.mjs', '.json'].includes(extname(entry.name))) {
+    } else if (entry.isFile() && isSourceRuntimeInput(entry.name)) {
       files.push(path);
     }
   }
+}
+
+// Lock files count as bundle inputs: the materialized bundle inlines dependencies, so a
+// dependency update (lock change without a source change) must produce a new cache key.
+const LOCK_FILES = new Set(['bun.lock', 'bun.lockb', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
+
+function isSourceRuntimeInput(name: string): boolean {
+  return ['.ts', '.tsx', '.js', '.mjs', '.json'].includes(extname(name)) || LOCK_FILES.has(name);
 }
 
 export async function invokeProcessor(
