@@ -436,6 +436,21 @@ describe('inquirer prompt adapter', () => {
       { name: 'Flavor A', value: 'a', description: 'The classic.' },
       { name: 'b', value: 'b', description: 'The bold one.' },
     ]);
+
+    // A prompt-level description on a list prompt stacks below the option help, so it
+    // renders at the bottom for every kind — never embedded in the message.
+    await adapter.ask({
+      kind: 'select',
+      name: 'size',
+      message: 'Pick a size',
+      description: 'You can change this later in config.',
+      options: ['small', { value: 'large', description: 'Roomy.' }],
+    });
+    expect(calls[2]?.config.message).toBe('Pick a size');
+    expect(calls[2]?.config.choices).toMatchObject([
+      { name: 'small', value: 'small', description: 'You can change this later in config.' },
+      { name: 'large', value: 'large', description: 'Roomy.\nYou can change this later in config.' },
+    ]);
   });
 });
 
