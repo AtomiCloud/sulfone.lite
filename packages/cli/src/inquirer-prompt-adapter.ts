@@ -45,13 +45,29 @@ export function inquirerPromptAdapter(
 /**
  * When re-running a template over an existing project, the previously answered value
  * becomes every prompt's default — press enter to keep it, or answer to change it.
+ * A recorded value whose shape no longer matches the prompt kind (e.g. the template
+ * changed a question's type between versions) is ignored rather than trusted.
  */
 function applySuggestion(request: PromptRequest, suggestions: Answers): PromptRequest {
   const suggested = suggestions[request.name];
-  if (suggested === undefined) {
+  if (suggested === undefined || !suggestionMatchesKind(request, suggested)) {
     return request;
   }
   return { ...request, default: suggested } as PromptRequest;
+}
+
+function suggestionMatchesKind(request: PromptRequest, suggested: unknown): boolean {
+  switch (request.kind) {
+    case 'text':
+    case 'select':
+      return typeof suggested === 'string';
+    case 'confirm':
+      return typeof suggested === 'boolean';
+    case 'number':
+      return typeof suggested === 'number';
+    case 'multiselect':
+      return Array.isArray(suggested) && suggested.every(item => typeof item === 'string');
+  }
 }
 
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {

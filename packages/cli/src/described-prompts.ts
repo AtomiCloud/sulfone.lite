@@ -1,8 +1,9 @@
 // Free-form prompts (text, number, confirm) built on @inquirer/core so the prompt
 // description renders BELOW the input line — consistent with select/checkbox, whose
-// option help renders below the list. `placeholder` pre-fills the input with an
-// editable suggestion: type over it, edit it, or press enter to submit it as-is
-// (@inquirer/prompts input supports neither prefill nor bottom descriptions).
+// option help renders below the list. `placeholder` renders as a dim backdrop inside
+// the empty input: typing replaces it and it is never submitted; `default` remains the
+// enter-to-keep value (@inquirer/prompts input supports neither placeholders nor
+// bottom descriptions).
 
 import { createPrompt, isBackspaceKey, isEnterKey, useKeypress, usePrefix, useState } from '@inquirer/core';
 import chalk from 'chalk';
