@@ -30,7 +30,16 @@ Any valid export form loads (const arrow, function expression); the default-func
 
 ## Prompts and shared answers
 
-`prompt` supports `text`, `confirm`, `select`, `multiselect`, and `number` — each takes a stable answer key, a message, and an optional default.
+`prompt` supports `text`, `confirm`, `select`, `multiselect`, and `number` — each takes a stable answer key, a message, and an optional default. All except `confirm` also take an optional `validate` function returning `true` or an error message — interactive users get re-prompted, headless answers fail the run with your message:
+
+```ts
+const port = await prompt.number('port', 'Port', {
+  validate: value => (value >= 1024 && value <= 65535 ? true : 'port must be 1024-65535'),
+});
+const phone = await prompt.text('phone', 'Phone number', {
+  validate: value => (/^\+?[0-9 -]{7,15}$/.test(value) ? true : 'enter a valid phone number'),
+});
+```
 
 Answers are **shared across the whole composition**: sub-templates generate first, so when a deep dependency asks a question, this template (and its ancestors) reuse that answer instead of re-asking. Use the same answer key for the same concept everywhere. In headless runs (`--headless --answers file.json`) every prompt must be answered by the file or a default.
 
@@ -106,7 +115,8 @@ Users download this template and later run `cyanprint update <project> --templat
 ## Debugging
 
 - `cyanprint try <dir>` — generate into a scratch folder.
-- `cyanprint trace <dir> --headless` — per-file provenance (which template won each path and why: added / resolver-merged / lww-override), each template's isolated output, and diffs of each contribution vs the final result.
+- `cyanprint trace <dir> --headless` — per-file provenance (which template won each path and why: added / resolver-merged / lww-override), each template's isolated output, and diffs of each contribution vs the final result. Point it at a **generated project** instead and it reuses the project's recorded answers and deterministic state (`--template` overrides the recorded ref).
+- `cyanprint create` prints each generation step live (template → processors → plugins → resolvers → commands), so slow or failing artifacts are easy to spot.
 
 ## Rules
 

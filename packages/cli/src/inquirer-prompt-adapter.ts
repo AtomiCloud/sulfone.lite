@@ -25,8 +25,14 @@ export function inquirerPromptAdapter(answers: Answers, prompts: InquirerPrompts
 }
 
 async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Promise<unknown> {
+  // request.validate re-prompts inline (inquirer shares the true-or-error-message contract).
+  const validate = request.validate;
   if (request.kind === 'text') {
-    return await prompts.input({ message: request.message, default: request.default });
+    return await prompts.input({
+      message: request.message,
+      default: request.default,
+      validate: validate ? value => validate(value) : undefined,
+    });
   }
   if (request.kind === 'confirm') {
     return await prompts.confirm({ message: request.message, default: request.default });
@@ -46,7 +52,13 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
         value: option,
         checked: request.default?.includes(option),
       })),
+      validate: validate ? items => validate(items.map(item => item.value)) : undefined,
     });
   }
-  return await prompts.number({ message: request.message, default: request.default, required: true });
+  return await prompts.number({
+    message: request.message,
+    default: request.default,
+    required: true,
+    validate: validate ? value => validate(value) : undefined,
+  });
 }

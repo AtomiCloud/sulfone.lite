@@ -5,23 +5,22 @@ template:
   version: local
   source: cyanprint/all-types
 answers:
-  name: hello
-  enabled: false
-  flavor: mocha
+  name: Ernest
+  enabled: true
+  flavor: vanilla
   toppings:
-    - nuts
     - sprinkles
-  count: 5
+  count: 10
 deterministicState: {}
 files:
   - path: OUT.md
-    sha256: b013683314625dba510cb89fe3bcc67529f0624bcbaeced8cd5e8c753edb260b
+    sha256: 24c66feab43ea5f9264f4f2d85ec1c818aa7e2744f4cdcb40a04fcfad5cc2b61
     content: |
-      name=hello
-      enabled=false
-      flavor=mocha
-      toppings=nuts,sprinkles
-      count=5
+      name=Ernest
+      enabled=true
+      flavor=vanilla
+      toppings=sprinkles
+      count=10
 artifacts:
   - kind: template
     owner: cyanprint

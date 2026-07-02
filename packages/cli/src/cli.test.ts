@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sha256 } from '@cyanprint/core';
+import { createProject, sha256 } from '@cyanprint/core';
 import { artifactIntegrity } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
@@ -1384,5 +1384,21 @@ describe('trace command', () => {
     expect(Array.isArray(report.provenance)).toBe(true);
     expect(report.provenance.length).toBeGreaterThan(0);
     expect(Array.isArray(report.diffs)).toBe(true);
+  });
+
+  test('traces a generated project by reusing its recorded answers and deterministic state', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-cli-trace-project-'));
+    try {
+      const template = join(process.cwd(), 'examples/template-groups/basic');
+      await createProject({ template, outDir: dir, headless: true });
+      // The project dir (with .cyan_state.yaml) is the target; --template overrides the
+      // recorded registry ref with the local template path.
+      const logs = await captureLogs(() => traceCommand([dir, `--template=${template}`, '--headless', '--json']));
+      const report = JSON.parse(logs.at(-1) ?? '{}');
+      expect(report.tree?.ref).toBe('cyanprint/basic-group');
+      expect(report.provenance.length).toBeGreaterThan(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

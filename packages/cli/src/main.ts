@@ -115,11 +115,11 @@ Examples:
   withOptions(
     program
       .command('trace')
-      .argument('<template>', 'template path or registry reference')
+      .argument('<target>', 'template path, registry reference, or generated project directory')
       .description('trace which template/dependency contributed each file (provenance + diffs)'),
     TRACE_OPTIONS,
-  ).action(async (template: string, options: OptionValues) => {
-    await traceCommand([template, ...optionArgv(options, TRACE_OPTIONS)], { promptAdapterFactory });
+  ).action(async (target: string, options: OptionValues) => {
+    await traceCommand([target, ...optionArgv(options, TRACE_OPTIONS)], { promptAdapterFactory });
   });
 
   withOptions(
@@ -298,8 +298,12 @@ const TRY_OPTIONS: CliOptionSpec[] = [
   ...CREATE_OPTIONS.slice(1),
 ];
 
-// Same as create, minus --out (trace generates into a throwaway temp dir and reports).
-const TRACE_OPTIONS: CliOptionSpec[] = CREATE_OPTIONS.slice(1);
+// Same as create, minus --out (trace generates into a throwaway temp dir and reports),
+// plus --template to override the recorded template when tracing a generated project.
+const TRACE_OPTIONS: CliOptionSpec[] = [
+  ...CREATE_OPTIONS.slice(1),
+  { flag: 'template', value: '<template>', description: 'template override when tracing a generated project' },
+];
 
 const UPDATE_OPTIONS: CliOptionSpec[] = [
   {
