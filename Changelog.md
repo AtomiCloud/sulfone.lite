@@ -1,3 +1,17 @@
+## [4.5.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.4.0...v4.5.0) (2026-07-02)
+
+
+### ✨ Features ✨
+
+* **lite:** backdrop placeholders and defaults-based re-runs ([6f03aa7](https://github.com/AtomiCloud/sulfone.lite/commit/6f03aa7ec6e12280832b0b509df92ca865566dd5))
+* **lite:** prefill placeholders and carry answers across re-runs ([3403409](https://github.com/AtomiCloud/sulfone.lite/commit/34034096ced13f342291ac51d2b0f5f8886376af))
+* **lite:** render prompt descriptions at the bottom of list prompts ([ce11e7a](https://github.com/AtomiCloud/sulfone.lite/commit/ce11e7a2e5d3c707cc9f4b6da9ea56b56eae9d0f))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **lite:** guard re-run suggestions and correct prompt docs ([b03f024](https://github.com/AtomiCloud/sulfone.lite/commit/b03f024f20d8fabfdde36ada5343196c7dd53f3a))
+
 ## [4.4.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.3.0...v4.4.0) (2026-07-02)
 
 
