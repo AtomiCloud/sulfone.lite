@@ -1,5 +1,17 @@
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -96,24 +108,35 @@ async function materializeImportPath(path: string, cacheKey: string): Promise<st
   await cleanStaleImportDirs(importsRoot, cacheKey);
   await mkdir(targetDir, { recursive: true });
   if (isSourceRuntime(path)) {
-    const sourceRoot = await findSourceRuntimeRoot(path);
-    await copySourceRuntimeFiles(sourceRoot, targetDir);
-  } else {
-    for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
-      if (entry.name === basename(path)) {
-        continue;
-      }
-      await symlink(join(sourceDir, entry.name), join(targetDir, entry.name)).catch(() => undefined);
+    // Bundle source runtimes into a self-contained file: compiled cyanprint binaries
+    // cannot resolve bare imports (node_modules) from external files at runtime, but
+    // Bun.build's resolver works everywhere and inlines the dependencies.
+    // Always rebuild and atomically replace the bundle — the temp path is predictable,
+    // so a pre-existing file there must never be trusted as executable code.
+    const bundlePath = join(targetDir, 'bundle.js');
+    const result = await Bun.build({ entrypoints: [path], target: 'bun' });
+    if (!result.success || !result.outputs[0]) {
+      throw new Error(
+        `Failed to bundle artifact source runtime ${path}: ${result.logs.map(log => String(log)).join('\n')}`,
+      );
     }
+    const staging = `${bundlePath}.${process.pid}.tmp`;
+    await Bun.write(staging, await result.outputs[0].text());
+    await rename(staging, bundlePath);
+    return bundlePath;
+  }
+  for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
+    if (entry.name === basename(path)) {
+      continue;
+    }
+    await symlink(join(sourceDir, entry.name), join(targetDir, entry.name)).catch(() => undefined);
   }
   const nearestNodeModules = await findNearestNodeModules(sourceDir);
   if (nearestNodeModules) {
     await symlink(nearestNodeModules, join(targetDir, 'node_modules')).catch(() => undefined);
   }
   const parsed = parse(path);
-  const target = isSourceRuntime(path)
-    ? join(targetDir, relative(await findSourceRuntimeRoot(path), path))
-    : join(targetDir, `${parsed.name}-${cacheKey}${parsed.ext || '.js'}`);
+  const target = join(targetDir, `${parsed.name}-${cacheKey}${parsed.ext || '.js'}`);
   await mkdir(dirname(target), { recursive: true });
   await copyFile(path, target);
   return target;
@@ -135,14 +158,6 @@ async function cleanStaleImportDirs(importsRoot: string, keepKey: string): Promi
     if (info && info.mtimeMs < cutoff) {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
-  }
-}
-
-async function copySourceRuntimeFiles(sourceRoot: string, targetRoot: string): Promise<void> {
-  for (const path of await listSourceRuntimeFiles(sourceRoot)) {
-    const target = join(targetRoot, relative(sourceRoot, path));
-    await mkdir(dirname(target), { recursive: true });
-    await copyFile(path, target);
   }
 }
 
@@ -230,10 +245,21 @@ async function collectSourceRuntimeFiles(root: string, files: string[]): Promise
     const path = join(root, entry.name);
     if (entry.isDirectory()) {
       await collectSourceRuntimeFiles(path, files);
-    } else if (entry.isFile() && ['.ts', '.tsx', '.js', '.mjs', '.json'].includes(extname(entry.name))) {
+    } else if (entry.isFile() && isSourceRuntimeInput(entry.name)) {
       files.push(path);
     }
   }
+}
+
+// Lock files count as bundle inputs: the materialized bundle inlines dependencies, so a
+// dependency update (lock change without a source change) must produce a new cache key.
+const LOCK_FILES = new Set(['bun.lock', 'bun.lockb', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
+
+function isSourceRuntimeInput(name: string): boolean {
+  return (
+    ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json'].includes(extname(name)) ||
+    LOCK_FILES.has(name)
+  );
 }
 
 export async function invokeProcessor(

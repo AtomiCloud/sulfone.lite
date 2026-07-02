@@ -9,19 +9,61 @@ export type PromptKind = z.infer<typeof PromptKindSchema>;
  */
 export type PromptValidator = (value: unknown) => boolean | string;
 
+/**
+ * A select/multiselect option: a bare string, or an object with a display label and a
+ * description that interactive adapters render below the list for the highlighted option.
+ */
+export type PromptOption = string | { value: string; label?: string; description?: string };
+
+export function promptOptionValue(option: PromptOption): string {
+  return typeof option === 'string' ? option : option.value;
+}
+
 export type PromptRequest =
-  | { kind: 'text'; name: string; message: string; default?: string; validate?: PromptValidator }
-  | { kind: 'confirm'; name: string; message: string; default?: boolean; validate?: PromptValidator }
-  | { kind: 'select'; name: string; message: string; options: string[]; default?: string; validate?: PromptValidator }
+  | {
+      kind: 'text';
+      name: string;
+      message: string;
+      default?: string;
+      placeholder?: string;
+      description?: string;
+      validate?: PromptValidator;
+    }
+  | {
+      kind: 'confirm';
+      name: string;
+      message: string;
+      default?: boolean;
+      description?: string;
+      validate?: PromptValidator;
+    }
+  | {
+      kind: 'select';
+      name: string;
+      message: string;
+      options: PromptOption[];
+      default?: string;
+      description?: string;
+      validate?: PromptValidator;
+    }
   | {
       kind: 'multiselect';
       name: string;
       message: string;
-      options: string[];
+      options: PromptOption[];
       default?: string[];
+      description?: string;
       validate?: PromptValidator;
     }
-  | { kind: 'number'; name: string; message: string; default?: number; validate?: PromptValidator };
+  | {
+      kind: 'number';
+      name: string;
+      message: string;
+      default?: number;
+      placeholder?: string;
+      description?: string;
+      validate?: PromptValidator;
+    };
 
 export type Answers = Record<string, unknown>;
 

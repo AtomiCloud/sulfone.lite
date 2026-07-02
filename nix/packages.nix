@@ -48,30 +48,56 @@ in
 with all;
 let
   tools = atomipkgs // nix-2605 // nix-unstable;
-  cyanprint = pkgs.writeShellApplication {
-    name = "cyanprint";
-    runtimeInputs = [
+  # Runtime dependencies for the CLI, installed as a fixed-output derivation so the
+  # compile step below stays pure and offline. Dev and optional dependencies are
+  # omitted: they carry platform-specific binaries (workerd, swc) the CLI never needs,
+  # and skipping them keeps the output identical across systems.
+  cyanprint-node-modules = pkgs.stdenvNoCC.mkDerivation {
+    pname = "cyanprint-node-modules";
+    version = "0";
+    src = ../.;
+    nativeBuildInputs = [
       tools.bun
-      pkgs.coreutils
+      pkgs.cacert
     ];
-    text = ''
-      cache_base="''${XDG_CACHE_HOME:-''${HOME:-/tmp}/.cache}/cyanprint/nix-app"
-      source_dir="$cache_base/source"
-      source_marker="$cache_base/source.sha256"
-      source_store="${../.}"
-      expected_lock="${builtins.hashFile "sha256" ../bun.lock}"
-      expected_source="$source_store:$expected_lock"
-
-      if [ ! -f "$source_marker" ] || [ "$(cat "$source_marker")" != "$expected_source" ]; then
-        rm -rf "$source_dir"
-        mkdir -p "$cache_base"
-        cp -R "$source_store" "$source_dir"
-        chmod -R u+w "$source_dir"
-        bun install --cwd "$source_dir" --frozen-lockfile
-        printf '%s' "$expected_source" > "$source_marker"
-      fi
-
-      exec bun run --cwd "$source_dir" packages/cli/src/main.ts "$@"
+    dontPatch = true;
+    dontConfigure = true;
+    dontFixup = true;
+    buildPhase = ''
+      export HOME="$TMPDIR"
+      bun install --frozen-lockfile --production --omit=optional --ignore-scripts --no-progress
+    '';
+    # Production installs nest each workspace's dependencies under
+    # packages/*/node_modules — capture every node_modules dir, preserving layout.
+    installPhase = ''
+      mkdir -p "$out"
+      find . -maxdepth 3 -type d -name node_modules | while read -r dir; do
+        mkdir -p "$out/$(dirname "$dir")"
+        cp -R "$dir" "$out/$dir"
+      done
+    '';
+    outputHashAlgo = "sha256";
+    outputHashMode = "recursive";
+    outputHash = "sha256-s2gY2RdXCvJTaE2EHauq1ZwwgASY0lhFA6siXLAJzZI=";
+  };
+  # Compile the CLI into a single self-contained binary (bun embeds its runtime),
+  # matching the artifact GoReleaser ships for Homebrew/Scoop/nfpm.
+  cyanprint = pkgs.stdenvNoCC.mkDerivation {
+    pname = "cyanprint";
+    version = "4";
+    src = ../.;
+    nativeBuildInputs = [ tools.bun ];
+    dontPatch = true;
+    dontConfigure = true;
+    dontFixup = true;
+    buildPhase = ''
+      export HOME="$TMPDIR"
+      cp -R ${cyanprint-node-modules}/. .
+      find . -maxdepth 3 -type d -name node_modules -exec chmod -R u+w {} +
+      bun build packages/cli/src/main.ts --compile --outfile cyanprint
+    '';
+    installPhase = ''
+      install -Dm755 cyanprint "$out/bin/cyanprint"
     '';
   };
 in

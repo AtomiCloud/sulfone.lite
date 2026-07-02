@@ -1,5 +1,5 @@
 import { CyanError, problem } from './errors';
-import type { Answers, PromptAdapter, PromptRequest, PromptValidator } from './runtime';
+import type { Answers, PromptAdapter, PromptOption, PromptRequest, PromptValidator } from './runtime';
 
 export type CyanFileGlob = {
   glob?: string;
@@ -14,23 +14,43 @@ export type CyanPrompter = {
   text(
     name: string,
     message: string,
-    options?: { default?: string; validate?: (value: string) => boolean | string },
+    options?: {
+      default?: string;
+      placeholder?: string;
+      description?: string;
+      validate?: (value: string) => boolean | string;
+    },
   ): Promise<string>;
-  confirm(name: string, message: string, options?: { default?: boolean }): Promise<boolean>;
+  confirm(name: string, message: string, options?: { default?: boolean; description?: string }): Promise<boolean>;
   select(
     name: string,
     message: string,
-    options: { options: string[]; default?: string; validate?: (value: string) => boolean | string },
+    options: {
+      options: PromptOption[];
+      default?: string;
+      description?: string;
+      validate?: (value: string) => boolean | string;
+    },
   ): Promise<string>;
   multiselect(
     name: string,
     message: string,
-    options: { options: string[]; default?: string[]; validate?: (value: string[]) => boolean | string },
+    options: {
+      options: PromptOption[];
+      default?: string[];
+      description?: string;
+      validate?: (value: string[]) => boolean | string;
+    },
   ): Promise<string[]>;
   number(
     name: string,
     message: string,
-    options?: { default?: number; validate?: (value: number) => boolean | string },
+    options?: {
+      default?: number;
+      placeholder?: string;
+      description?: string;
+      validate?: (value: number) => boolean | string;
+    },
   ): Promise<number>;
 };
 
@@ -96,9 +116,12 @@ export function makePromptContext(
           name,
           message,
           default: options?.default,
+          placeholder: options?.placeholder,
+          description: options?.description,
           validate: options?.validate as PromptValidator | undefined,
         }),
-      confirm: (name, message, options) => ask<boolean>({ kind: 'confirm', name, message, default: options?.default }),
+      confirm: (name, message, options) =>
+        ask<boolean>({ kind: 'confirm', name, message, default: options?.default, description: options?.description }),
       select: (name, message, options) =>
         ask<string>({
           kind: 'select',
@@ -106,6 +129,7 @@ export function makePromptContext(
           message,
           options: options.options,
           default: options.default,
+          description: options.description,
           validate: options.validate as PromptValidator | undefined,
         }),
       multiselect: (name, message, options) =>
@@ -115,6 +139,7 @@ export function makePromptContext(
           message,
           options: options.options,
           default: options.default,
+          description: options.description,
           validate: options.validate as PromptValidator | undefined,
         }),
       number: (name, message, options) =>
@@ -123,6 +148,8 @@ export function makePromptContext(
           name,
           message,
           default: options?.default,
+          placeholder: options?.placeholder,
+          description: options?.description,
           validate: options?.validate as PromptValidator | undefined,
         }),
     },

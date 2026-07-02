@@ -34,9 +34,11 @@ Templates compose child templates (declared in `cyan.yaml` `templates:` or retur
 
 `create`, `try`, and `update` print each generation step live — the template being generated and every processor, plugin, resolver, and post-generation command as it starts (suppressed with `--json`).
 
-## Prompt validation
+## Prompts
 
-Template authors can attach a `validate` function to `text`, `select`, `multiselect`, and `number` prompts (return `true` or an error message). Interactive runs re-prompt until the answer passes; headless answers that fail validation abort the run with the message.
+Template authors can polish every prompt: a `description` renders as dim help text under the question, a `placeholder` shows a dim example next to free-form inputs, and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option.
+
+A `validate` function on `text`, `select`, `multiselect`, and `number` prompts (return `true` or an error message) guards answers: interactive runs re-prompt until the answer passes; headless answers that fail validation abort the run with the message.
 
 ## Trace
 

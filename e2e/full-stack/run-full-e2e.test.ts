@@ -252,6 +252,12 @@ test(
     ]) {
       await cyan(`push ${template} --registry ${registry} --json`, publish);
     }
+    // The official in-tree parity copies prove themselves the same way: push runs
+    // their cyan.test.yaml suites (staged so bundling never mutates the committed tree).
+    for (const official of ['in-tree/official/templates/new', 'in-tree/official/processors/default']) {
+      const staged = await stageFixture(official, join(tmp, 'push-stage'));
+      await cyan(`push ${staged} --registry ${registry} --json`, publish);
+    }
     const response = await fetch(`${registry}/batch-resolve`, {
       method: 'POST',
       body: JSON.stringify({ refs: [{ kind: 'template', owner: 'cyanprint', name: 'with-artifacts' }] }),
