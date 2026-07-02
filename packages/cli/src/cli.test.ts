@@ -19,6 +19,7 @@ import {
   unpackTemplateArchivePayload,
 } from './local-object-package';
 import { createProgram, main } from './main';
+import { VERSION } from './version';
 import { resolveTemplateInput } from './registry-template';
 
 const textEncoder = new TextEncoder();
@@ -98,7 +99,7 @@ describe('commander cli shell', () => {
       };
       await createProgram().parseAsync(['version'], { from: 'user' });
 
-      expect(logs).toEqual(['cyanprint 4.0.0']);
+      expect(logs).toEqual([`cyanprint ${VERSION}`]);
     } finally {
       console.log = originalLog;
     }

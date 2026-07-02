@@ -26,6 +26,12 @@ plugins:
     version: 6.0.3
     config:
       changelogFile: Changelog.md
+  # Bumps package.json's version in the release commit (no npm publish): the CLI's
+  # --version and the compiled binaries are baked from package.json at build time.
+  - module: '@semantic-release/npm'
+    version: 11.0.3
+    config:
+      npmPublish: false
   - module: '@semantic-release/git'
     version: 10.0.1
     config:
@@ -33,6 +39,7 @@ plugins:
       assets:
         - Changelog.md
         - docs/developer/CommitConventions.md
+        - package.json
   - module: '@semantic-release/github'
     version: 10.3.5
 
