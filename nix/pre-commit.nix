@@ -85,6 +85,10 @@ pre-commit-lib.run {
         # them mangles template placeholders (prettier turns __VAR__ into **VAR**).
         ".*e2e/full-stack/fixtures.*"
         ".*e2e/full-stack/expected.*"
+        # Artifact test fixtures (processor/plugin/resolver `tests/<case>/{input-N,expected}`)
+        # are compared byte-for-byte against artifact output; reformatting the JSON/text
+        # breaks the comparison (e.g. a JSON resolver's output is not prettier-canonical).
+        ".*/tests/.*/(input-[0-9]+|expected|current|target)/.*"
       ];
       package = formatter;
     };
