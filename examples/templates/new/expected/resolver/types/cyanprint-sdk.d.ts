@@ -78,25 +78,30 @@ export type PluginHelper = {
 /** A plugin. */
 export type Plugin = (input: PluginInput, helper: PluginHelper) => unknown | Promise<unknown>;
 
-/** Where a resolved file came from. */
+/** Where a resolved file variation came from. */
 export type FileOrigin = {
+  /** Contributing template as `owner/name@version`. */
   template: string;
+  /** Order within the resolution scope. */
   layer: number;
+  /** Set for processor-output (tier-1) variations: source processor ref + invocation index. */
+  processor?: { ref: string; invocation: number };
 };
 
-/** A file participating in a resolver merge. */
+/** A file variation participating in a resolver merge. */
 export type ResolvedFile = {
   path: string;
   content: string;
   origin: FileOrigin;
 };
 
-/** Input to the v4 two-file resolver: merge `current` with `next`. */
+/**
+ * Input to a v4 resolver: ONE call per conflicting path, carrying ALL variations of that
+ * path in the resolution scope at once (with origins). There is no pairwise fold.
+ */
 export type ResolverInput = {
-  path: string;
   config: Record<string, unknown>;
-  current: ResolvedFile;
-  next: ResolvedFile;
+  files: ResolvedFile[];
 };
 
 /** Output of a resolver merge. */
@@ -105,5 +110,5 @@ export type ResolverOutput = {
   content: string;
 };
 
-/** A v4 resolver: merges two files at a time. CyanPrint folds N candidates by repeated calls. */
+/** A v4 resolver: merges every variation of one path in a single call. */
 export type Resolver = (input: ResolverInput) => ResolverOutput | Promise<ResolverOutput>;

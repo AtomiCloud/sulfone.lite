@@ -44,10 +44,23 @@ export async function pushCommand(argv: string[]): Promise<void> {
       throw new ReportedCliError(`push aborted: ${testReport.failed} failing test(s). Fix them or pass --no-test.`);
     }
   }
-  const refs = [...manifest.templates, ...manifest.processors, ...manifest.plugins, ...manifest.resolvers].map(ref => ({
-    ...ref,
-    owner: ref.owner ?? manifest.owner,
-  }));
+  // The registry batch-resolve needs each ref's kind; it comes from the manifest section.
+  const withKind = (
+    kind: 'template' | 'processor' | 'plugin' | 'resolver',
+    deps: Array<{ owner?: string; name: string; version?: string }>,
+  ) =>
+    deps.map(ref => ({
+      kind,
+      owner: ref.owner ?? manifest.owner,
+      name: ref.name,
+      version: ref.version,
+    }));
+  const refs = [
+    ...withKind('template', manifest.templates),
+    ...withKind('processor', manifest.processors),
+    ...withKind('plugin', manifest.plugins),
+    ...withKind('resolver', manifest.resolvers),
+  ];
   const registry = flagString(flags, 'registry') ?? (flagBool(flags, 'dry-run') ? undefined : defaultRegistryUrl());
   const bootstrapClient = registry ? new RegistryClient(registry) : undefined;
   const resolvedPins: ResolvedDependencyPin[] = bootstrapClient

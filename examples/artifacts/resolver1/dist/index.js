@@ -1,9 +1,7 @@
 // @bun
-// examples/artifacts/resolver1/src/index.ts
-import { dirname } from 'path';
-import { mkdir } from 'fs/promises';
+// src/index.ts
 function configStrategy(config) {
-  if (!config || typeof config !== 'object' || !('arrayStrategy' in config)) {
+  if (!('arrayStrategy' in config)) {
     return 'replace';
   }
   const strategy = config.arrayStrategy;
@@ -43,38 +41,25 @@ function mergeJson(left, right, strategy) {
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
-async function resolver(input) {
+function resolver(input) {
   const strategy = configStrategy(input.config);
-  const path = configPath(input.config);
-  const sorted = [...input.inputDirs].sort(
+  const sorted = [...input.files].sort(
     (left, right) =>
       left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
   );
-  const documents = (await Promise.all(sorted.map(async entry => await readCandidate(entry.dir, path))))
+  const first = sorted[0];
+  if (!first) {
+    throw new Error('resolver1 was invoked with no variations');
+  }
+  const documents = sorted
+    .map(file => file.content)
     .filter(content => Boolean(content.trim()))
     .map(content => JSON.parse(content));
   const merged = documents.reduce((acc, document) => mergeJson(acc, document, strategy));
-  await writeOutput(
-    input.outputDir,
-    path,
-    `${JSON.stringify(merged, null, 2)}
+  return {
+    path: first.path,
+    content: `${JSON.stringify(merged, null, 2)}
 `,
-  );
-}
-async function readCandidate(dir, path) {
-  return await Bun.file(`${dir}/${path}`)
-    .text()
-    .catch(() => '');
-}
-function configPath(config) {
-  if (config && typeof config === 'object' && !Array.isArray(config) && typeof config.path === 'string') {
-    return config.path;
-  }
-  return 'output.txt';
-}
-async function writeOutput(outputDir, path, content) {
-  const outputPath = `${outputDir}/${path}`;
-  await mkdir(dirname(outputPath), { recursive: true });
-  await Bun.write(outputPath, content);
+  };
 }
 export { resolver };

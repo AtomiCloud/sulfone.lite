@@ -1,5 +1,5 @@
-# ARTIFACT PROJECT
+# Artifact Project
 
-CREATED WITH REGISTRY ARTIFACTS.
+Created with registry artifacts.
 
 Generated locally.

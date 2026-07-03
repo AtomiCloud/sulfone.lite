@@ -60,7 +60,6 @@ export async function stageFixture(fixtureDir: string, stagingDir: string): Prom
 
 // Generated bookkeeping, excluded from folder compares; asserted explicitly where relevant.
 const IGNORED_OUTPUT = new Set(['.cyan_state.yaml']);
-const IGNORED_OUTPUT_DIRS = ['.cyan_conflicts/'];
 
 async function listFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
@@ -73,7 +72,7 @@ async function listFiles(dir: string): Promise<string[]> {
         const rel = relative(dir, path)
           .split(/[\\/]+/)
           .join('/');
-        if (IGNORED_OUTPUT.has(rel) || IGNORED_OUTPUT_DIRS.some(prefix => rel.startsWith(prefix))) {
+        if (IGNORED_OUTPUT.has(rel)) {
           continue;
         }
         files.push(rel);

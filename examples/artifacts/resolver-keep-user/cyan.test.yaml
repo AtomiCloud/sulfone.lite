@@ -1,17 +1,22 @@
 cases:
-  - name: current-wins
-    prior: tests/current-wins/prior.txt
-    current: tests/current-wins/current.txt
-    target: tests/current-wins/target.txt
-    expected: tests/current-wins/expected.txt
+  - name: latest-wins
+    variations:
+      - path: tests/latest-wins/input-0
+        origin: { template: cyanprint/base, layer: 0 }
+      - path: tests/latest-wins/input-1
+        origin: { template: cyanprint/overlay, layer: 1 }
+    expected: tests/latest-wins/expected
     validations:
-      - grep -q 'user edit' output.txt
-      - "! grep -q 'template edit' output.txt"
-  - name: folder-current-wins
-    prior: tests/folder-current-wins/prior
-    current: tests/folder-current-wins/current
-    target: tests/folder-current-wins/target
-    expected: tests/folder-current-wins/expected
+      - grep -q 'overlay edit' README.md
+      - "! grep -q 'base edit' README.md"
+  - name: three-layers
+    variations:
+      - path: tests/three-layers/input-0
+        origin: { template: cyanprint/first, layer: 0 }
+      - path: tests/three-layers/input-1
+        origin: { template: cyanprint/second, layer: 1 }
+      - path: tests/three-layers/input-2
+        origin: { template: cyanprint/third, layer: 2 }
+    expected: tests/three-layers/expected
     validations:
-      - grep -q 'user folder edit' README.md
-      - "! grep -q 'template folder edit' README.md"
+      - grep -q 'layer two' notes.txt

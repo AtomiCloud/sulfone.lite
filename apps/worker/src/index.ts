@@ -336,13 +336,22 @@ function normalizePackagePath(path: string): string {
   return normalizeArchivePath(path);
 }
 
+// The registry needs each dependency's kind for identity keys; declarations don't carry
+// it, so it is attached here from the manifest section each ref came from.
 function declaredArtifactDependencies(manifest: {
   templates: ArtifactDependency[];
   processors: ArtifactDependency[];
   plugins: ArtifactDependency[];
   resolvers: ArtifactDependency[];
-}): ArtifactDependency[] {
-  return [...manifest.templates, ...manifest.processors, ...manifest.plugins, ...manifest.resolvers];
+}): Array<ArtifactDependency & { kind: string }> {
+  const withKind = (refs: ArtifactDependency[], kind: string): Array<ArtifactDependency & { kind: string }> =>
+    refs.map(ref => ({ kind, owner: ref.owner, name: ref.name, version: ref.version }));
+  return [
+    ...withKind(manifest.templates, 'template'),
+    ...withKind(manifest.processors, 'processor'),
+    ...withKind(manifest.plugins, 'plugin'),
+    ...withKind(manifest.resolvers, 'resolver'),
+  ];
 }
 
 function dependencyIdentityKey(

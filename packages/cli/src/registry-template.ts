@@ -12,9 +12,37 @@ import {
   sha256,
 } from '@cyanprint/core';
 import { artifactIntegrity, type ArtifactVersion, type ObjectRef } from '@cyanprint/contracts';
+import { defaultRegistryUrl } from './registry-defaults';
 import { unpackLocalObjectPayload, unpackTemplateArchivePayload } from './local-object-package';
 
 const textEncoder = new TextEncoder();
+
+/**
+ * A registry-aware resolver for installed templates' recorded sources: local paths pass
+ * through; registry refs hydrate the requested version (or latest when none is given).
+ * Used by create-into-existing-project and update to re-execute installed templates.
+ */
+export function registryTemplateSourceResolver(
+  flags: Record<string, string | boolean>,
+): (args: { source: string; version?: string }) => Promise<string> {
+  return async ({ source, version }) => {
+    const flagStr = (name: string): string | undefined => {
+      const value = flags[name];
+      return typeof value === 'string' ? value : undefined;
+    };
+    const ref = version && version !== 'local' && !source.includes('@') ? `${source}@${version}` : source;
+    const resolved = await resolveTemplateInput({
+      template: (await Bun.file(join(source, 'cyan.yaml')).exists()) ? source : ref,
+      registry: flagStr('registry') ?? defaultRegistryUrl(),
+      cacheDir: flagStr('cache-dir'),
+      bypassCache: flags['bypass-cache'] === true,
+      trusted: flags.trust === true,
+      trustFixture: flagStr('trust-fixture'),
+      trustDir: flagStr('trust-dir'),
+    });
+    return resolved.templateDir;
+  };
+}
 
 export async function resolveTemplateInput(args: {
   template: string;
@@ -24,7 +52,13 @@ export async function resolveTemplateInput(args: {
   trusted?: boolean;
   trustFixture?: string;
   trustDir?: string;
-}): Promise<{ templateDir: string; cacheHydrated: boolean; registryHydrated: boolean }> {
+}): Promise<{
+  templateDir: string;
+  cacheHydrated: boolean;
+  registryHydrated: boolean;
+  /** Registry-assigned version of the resolved artifact (registry-hydrated only). */
+  version?: string;
+}> {
   const isLocalTemplate = await Bun.file(join(args.template, 'cyan.yaml')).exists();
   if (isLocalTemplate) {
     if (!args.cacheDir) {
@@ -64,7 +98,7 @@ export async function resolveTemplateInput(args: {
   }
   const cacheDir = resolveCyanCacheDir(args.cacheDir);
   const cachePath = await hydrateRegistryArtifactWithPins(client, artifact, cacheDir, args.bypassCache, new Set());
-  return { templateDir: cachePath, cacheHydrated: true, registryHydrated: true };
+  return { templateDir: cachePath, cacheHydrated: true, registryHydrated: true, version: artifact.version };
 }
 
 type ArtifactBundleIndexEntry = {
@@ -72,7 +106,6 @@ type ArtifactBundleIndexEntry = {
   dependency: { kind: string; owner: string; name: string; version?: string };
   runtimeFile: string;
   integrity?: string;
-  api?: 1 | 2;
 };
 
 async function hydrateRegistryArtifactWithPins(
@@ -118,7 +151,6 @@ async function hydrateRegistryArtifactWithPins(
       dependency: { kind: pin.kind, owner: pin.owner, name: pin.name, version: pin.version },
       runtimeFile,
       integrity: sha256(await Bun.file(runtimeFile).text()),
-      api: manifest.api,
     });
   }
   await writeFile(

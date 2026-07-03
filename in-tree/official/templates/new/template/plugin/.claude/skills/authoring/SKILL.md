@@ -5,9 +5,11 @@ description: Use when writing or editing this CyanPrint plugin (post-processing 
 
 # Authoring a CyanPrint plugin
 
-A plugin runs over a template's merged output **after its processors** and may add or modify files and run shell commands. Local-first, in a sandboxed temp directory.
+**Search the registry before designing** — `cyanprint search <term> --kind plugin` — and reuse an existing plugin when one fits. Design for discoverability too: name, describe (`cyan.yaml` `description`), and document this plugin so others searching for the need can find it.
 
-Where it runs in the pipeline: **templates** describe output, **processors** (like the official default processor `cyan/default`) render scoped template files, then plugins post-process the result before it merges with sibling templates. Templates can also hand a plugin its own archive files via `files:` scopes on the plugin use. This project was scaffolded by the meta template `cyan/new`; `cyanprint update . --template cyan/new` refreshes the scaffolding later.
+A plugin runs over a template's own layer **after its processor outputs are merged** (tier-1 resolution) and may add or modify files and run shell commands. Local-first, in a sandboxed temp directory.
+
+Where it runs in the pipeline: **templates** describe output, **processors** (like the official default processor `cyan/default`) render scoped template files, tier-1 resolution merges the processor outputs into one own layer, then plugins transform that layer before it merges with dependency and sibling layers (tiers 2 and 3). Templates can also hand a plugin its own archive files via `files:` scopes on the plugin use. This project was scaffolded by the meta template `cyan/new`; `cyanprint update . --template cyan/new` refreshes the scaffolding later.
 
 ## Signature
 
@@ -33,6 +35,5 @@ Any valid export form loads (const arrow, function expression, re-export); the n
 ## Rules
 
 - Commands must be **idempotent** — safe to run again on an already-generated project (users re-run through `cyanprint update`).
-- Keep effects **deterministic** and documented: same input + config ⇒ same output. Update's three-way merge treats your output as template-owned.
-- Document any files a user is expected to edit afterwards, so templates can attach resolvers to those paths.
+- Keep effects **deterministic** and documented: same input + config ⇒ same output. Update's three-way merge treats your output as template-owned, and regenerates its base from recorded inputs.
 - Add a fixture under `tests/` (see the testing skill).

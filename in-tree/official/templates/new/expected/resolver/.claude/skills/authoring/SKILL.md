@@ -1,16 +1,13 @@
 ---
 name: cyanprint-resolver-authoring
-description: Use when writing or editing this CyanPrint two-file resolver. Covers every resolver feature, including update conflict handling.
+description: Use when writing or editing this CyanPrint resolver's merge logic. Covers every resolver feature.
 ---
 
-# Authoring a CyanPrint resolver (v4 two-file merge)
+# Authoring a CyanPrint resolver
 
-A resolver merges two files at a time. It is used in **two places**:
+**Search the registry before designing** — `cyanprint search <term> --kind resolver` — and reuse an existing resolver when one fits. Design for discoverability too: name, describe (`cyan.yaml` `description`), and document this resolver so others searching for the need can find it.
 
-1. **Create time** — when sibling templates in a composition emit the same path and both sides declare this resolver (identical config), CyanPrint folds the candidates instead of last-writer-wins.
-2. **Update time** — when `cyanprint update` finds a file the user edited AND the template changed, a resolver scoped to that path merges the change instead of dumping a conflict into `.cyan_conflicts/`.
-
-That second role makes resolvers the key to **update-friendly templates**: templates attach a resolver (like `cyanprint/keep-user`) to user-editable paths so downstream updates merge cleanly. This project was scaffolded by the meta template `cyan/new`; `cyanprint update . --template cyan/new` refreshes the scaffolding later.
+A resolver merges every variation of one conflicting path in a **single call**. It runs during layering, whenever multiple layers emit the same path, at three tiers: a template's **processor** outputs, the **dependency** tree, and **sibling** installations in a multi-install project. Resolvers never run during `cyanprint update`'s three-way merge — git handles _user_ edits there; you merge _template-vs-template_ output only. This project was scaffolded by the meta template `cyan/new`; `cyanprint update . --template cyan/new` refreshes the scaffolding later.
 
 ## Signature
 
@@ -20,28 +17,45 @@ Import the types you use from `@cyanprint/sdk` (type-only, vendored — nothing 
 import type { ResolverInput, ResolverOutput } from '@cyanprint/sdk';
 
 export async function resolver(input: ResolverInput): Promise<ResolverOutput> {
-  // input is { path, config, current, next }; current/next are { path, content, origin }
-  return { path: input.next.path, content: merge(input.current.content, input.next.content) };
+  // input.files: ALL variations of one path, ordered by layer (last = highest)
+  const latest = input.files[input.files.length - 1];
+  return { path: latest.path, content: latest.content };
 }
 ```
 
-Any valid export form loads (const arrow, function expression, re-export); the named function declaration is the convention. Declaring more than one parameter is rejected — the runtime only passes `(input)`.
+The vendored contract:
 
-## Fold semantics
+```ts
+type FileOrigin = {
+  template: string; // "owner/name@version"
+  layer: number; // order within the resolution scope
+  processor?: { ref: string; invocation: number }; // set for tier-1 (processor-output) variations
+};
+type ResolvedFile = { path: string; content: string; origin: FileOrigin };
+type ResolverInput = { config: Record<string, unknown>; files: ResolvedFile[] };
+type ResolverOutput = { path: string; content: string };
+```
 
-- CyanPrint folds N conflicting candidates by calling you repeatedly in a deterministic order (layer ascending, then template name). The output of step N becomes `current` for step N+1; `next` is always the higher layer.
-- Set `api: 2` in `cyan.yaml` to select this two-file API (the legacy folder-fold API is `api: 1`).
-- If your merge is order-independent, declare `commutative: true` in `cyan.yaml` — `cyanprint test` then enforces it over every candidate pair.
-- Resolvers are **text-only**; binary collisions fall back to last-writer-wins with a recorded conflict.
+Any valid export form loads (const arrow, function expression, re-export); the named function declaration is the convention. Declaring more than one parameter is rejected — the runtime only passes `(input)`. There is no `api:` version or `commutative:` flag in `cyan.yaml` — this single-call contract is the only resolver API.
 
-## How templates use you
+## How templates nominate you
 
-- Unscoped use applies to every colliding path; `config: { paths: ['README.md'] }` scopes it.
-- A create-time merge only happens when BOTH colliding sides declare exactly this resolver with identical config — otherwise last-writer-wins.
-- `input.config` carries the template's config plus the current `path`.
+Templates declare resolvers in `cyan.yaml` as entries with config and the file globs they merge:
+
+```yaml
+resolvers:
+  - ref: acme/keep-latest@2
+    config: { strategy: deep }
+    files: ['package.json', '**/*.json']
+```
+
+For each path with more than one variation, every contributing template nominates the first `resolvers:` entry whose `files:` globs match. **Consensus** — all contributors nominate the same ref with identical config — means one call to you with all variations; anything else (none, disagreement) falls back to last-writer-wins by highest layer, recorded as an `lww-override`. Binary collisions always fall back to LWW.
+
+- `input.config` is the agreed config from those declarations.
+- `origin` tells you where each variation came from: template ref, layer, and — in the `processor` segment — the source processor's ref + invocation index. Use layers for deterministic ordering, never randomness or clocks.
 
 ## Rules
 
-- **Deterministic and side-effect free** — no filesystem, network, or global state.
-- Design merges that respect user intent (keep user content, take template structure) — you are the update-conflict story.
-- Cover normal merges (and commutativity, if declared) in `cyan.test.yaml` (see the testing skill).
+- **Deterministic and side-effect free** — no filesystem, network, or global state. Same variations + config ⇒ byte-identical output; update's base regeneration depends on it.
+- Handle any number of variations (2+), text only.
+- Cover merges with `variations:` cases in `cyan.test.yaml` (see the testing skill).

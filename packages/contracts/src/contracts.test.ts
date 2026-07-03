@@ -13,9 +13,67 @@ describe('manifest and cyan script contracts', () => {
       processors: ['cyanprint/uppercase'],
       legacy: { docker: { image: 'old' } },
     });
-    expect(parsed.manifest.processors[0]).toMatchObject({ kind: 'processor', owner: 'cyanprint', name: 'uppercase' });
+    // Declarations carry no kind — the processors: section implies it.
+    expect(parsed.manifest.processors[0]).toMatchObject({ owner: 'cyanprint', name: 'uppercase' });
     expect(parsed.manifest.processors[0]?.version).toBeUndefined();
+    expect(parsed.manifest.processors[0]).not.toHaveProperty('kind');
     expect(parsed.warnings[0]?.code).toBe('legacy_docker_ignored');
+  });
+
+  test('templates: is a dictionary with embedded per-dependency config', () => {
+    const parsed = parseCyanManifest({
+      cyanprint: 4,
+      kind: 'template-group',
+      name: 'group',
+      bundledEntry: 'cyan.ts',
+      templates: {
+        'cyanprint/tri-a@5': {},
+        'cyanprint/tri-b': {
+          answers: { flavor: 'batteries' },
+          deterministicState: { port: 4180 },
+        },
+        'cyanprint/tri-c': null,
+      },
+    });
+    expect(parsed.manifest.templates).toEqual([
+      { owner: 'cyanprint', name: 'tri-a', version: '5', answers: {}, deterministicState: {} },
+      {
+        owner: 'cyanprint',
+        name: 'tri-b',
+        version: undefined,
+        answers: { flavor: 'batteries' },
+        deterministicState: { port: 4180 },
+      },
+      { owner: 'cyanprint', name: 'tri-c', version: undefined, answers: {}, deterministicState: {} },
+    ]);
+  });
+
+  test('resolvers: entries carry config and files globs', () => {
+    const parsed = parseCyanManifest({
+      cyanprint: 4,
+      kind: 'template',
+      name: 'demo',
+      bundledEntry: 'cyan.ts',
+      resolvers: [
+        { ref: 'cyanprint/json-merge@2', config: { strategy: 'deep' }, files: ['package.json', '**/*.json'] },
+      ],
+    });
+    expect(parsed.manifest.resolvers[0]).toEqual({
+      owner: 'cyanprint',
+      name: 'json-merge',
+      version: '2',
+      config: { strategy: 'deep' },
+      files: ['package.json', '**/*.json'],
+    });
+  });
+
+  test('manifest rejects removed fields: presets, api, commutative', () => {
+    const base = { cyanprint: 4, kind: 'template', name: 'demo', bundledEntry: 'cyan.ts' };
+    expect(() => parseCyanManifest({ ...base, presets: { templates: {} } })).toThrow('presets: has been removed');
+    expect(() => parseCyanManifest({ ...base, kind: 'resolver', api: 2 })).toThrow('api: has been removed');
+    expect(() => parseCyanManifest({ ...base, kind: 'resolver', commutative: true })).toThrow(
+      'commutative: has been removed',
+    );
   });
 
   test('manifest rejects generic object dependency declarations', () => {

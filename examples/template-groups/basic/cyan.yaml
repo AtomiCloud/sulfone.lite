@@ -6,13 +6,9 @@ bundledEntry: cyan.ts
 processors:
   - cyan/default
 templates:
-  - cyanprint/hello
-  - cyanprint/with-artifacts
-presets:
-  templates:
-    cyanprint/hello:
-      answers:
-        name: Group Hello
-    cyanprint/with-artifacts:
-      answers:
-        name: Artifact Project
+  cyanprint/hello:
+    answers:
+      name: Group Hello
+  cyanprint/with-artifacts:
+    answers:
+      name: Artifact Project

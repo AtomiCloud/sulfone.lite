@@ -5,4 +5,4 @@ name: dup-y
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/dup-leaf
+  cyanprint/dup-leaf: {}

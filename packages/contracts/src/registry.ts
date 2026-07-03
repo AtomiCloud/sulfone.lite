@@ -23,6 +23,14 @@ export const ResolvedDependencyPinSchema = z.object({
   integrity: z.string(),
 });
 
+/**
+ * A dependency as the registry API carries it. Registry endpoints need the kind for
+ * lookups and storage; it is attached from the manifest section a ref came from —
+ * authored declarations themselves never carry it.
+ */
+export const RegistryDependencySchema = ArtifactDependencySchema.extend({ kind: ArtifactKindSchema });
+export type RegistryDependency = z.infer<typeof RegistryDependencySchema>;
+
 export const ArtifactVersionSchema = z.object({
   id: z.string(),
   kind: ArtifactKindSchema,
@@ -31,7 +39,7 @@ export const ArtifactVersionSchema = z.object({
   version: z.string().regex(/^\d+$/),
   publishedAt: z.string().datetime().optional(),
   readme: z.string().default(''),
-  dependencies: z.array(ArtifactDependencySchema).default([]),
+  dependencies: z.array(RegistryDependencySchema).default([]),
   resolvedPins: z.array(ResolvedDependencyPinSchema).default([]),
   object: ObjectRefSchema.optional(),
   artifactObjects: ArtifactObjectsSchema.optional(),

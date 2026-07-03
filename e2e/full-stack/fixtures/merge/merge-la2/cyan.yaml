@@ -8,4 +8,5 @@ processors:
   - cyan/default
 
 resolvers:
-  - cyanprint/merge-a
+  - ref: cyanprint/merge-a
+    files: ["shared.txt"]

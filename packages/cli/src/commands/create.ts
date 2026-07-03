@@ -1,10 +1,10 @@
 import { join } from 'node:path';
-import { createProject, loadGeneratedState } from '@cyanprint/core';
+import { createProject, loadGeneratedState, mergedStateAnswers } from '@cyanprint/core';
 import type { Answers, PromptAdapter } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString, readAnswersFile } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
-import { resolveTemplateInput } from '../registry-template';
-import { info, kv, pathLabel, printJson, printSection, progressLine, success } from '../ui';
+import { registryTemplateSourceResolver, resolveTemplateInput } from '../registry-template';
+import { failure, info, kv, pathLabel, printJson, printSection, progressLine, success } from '../ui';
 
 type CliRuntime = {
   promptAdapter?: PromptAdapter;
@@ -49,11 +49,30 @@ export async function createCommand(argv: string[], runtime: CliRuntime = {}): P
     localFallback: !resolvedTemplate.registryHydrated,
     promptAdapter: effectiveHeadless ? undefined : promptAdapter,
     onProgress: json || runtime.silent ? undefined : event => console.log(progressLine(event)),
+    // Recorded so update can float this template later: the registry ref (unpinned) or
+    // the local template path, plus the registry-assigned version (hydrated manifests
+    // are versionless) so update's base regeneration can pin the old version.
+    templateSource: resolvedTemplate.registryHydrated ? (template.split('@')[0] ?? template) : undefined,
+    templateVersion: resolvedTemplate.version,
+    resolveTemplateSource: registryTemplateSourceResolver(flags),
+    cacheDir: flagString(flags, 'cache-dir'),
+    bypassCache: flagBool(flags, 'bypass-cache'),
   });
   if (json) {
     printJson({ ...result, cacheHydrated: resolvedTemplate.cacheHydrated });
+    if (result.status === 'conflict') {
+      process.exitCode = 1;
+    }
   } else if (!runtime.silent) {
-    console.log(success(`created ${pathLabel(result.outputPath)}`));
+    if (result.status === 'conflict') {
+      console.error(failure(`created with conflicts in ${pathLabel(result.outputPath)}`));
+      for (const path of result.conflicts) {
+        console.error(`- ${path} (in-file conflict markers)`);
+      }
+      process.exitCode = 1;
+    } else {
+      console.log(success(`created ${pathLabel(result.outputPath)}`));
+    }
     printSection('Summary', [
       kv('files', result.files.length),
       kv('cache hydrated', resolvedTemplate.cacheHydrated),
@@ -67,5 +86,5 @@ async function readPriorAnswers(outDir: string): Promise<Answers | undefined> {
     return undefined;
   }
   const state = await loadGeneratedState(outDir).catch(() => undefined);
-  return state?.answers;
+  return state ? mergedStateAnswers(state) : undefined;
 }

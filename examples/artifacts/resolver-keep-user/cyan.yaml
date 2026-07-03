@@ -4,4 +4,3 @@ owner: cyanprint
 name: keep-user
 entry: src/index.ts
 bundledEntry: dist/index.js
-api: 1

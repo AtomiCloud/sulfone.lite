@@ -5,12 +5,8 @@ name: cascade-a
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/cascade-b
-
-presets:
-  templates:
-    cyanprint/cascade-c:
-      answers:
-        grand: FROM_A
-      deterministic:
-        seed: A_SEED
+  cyanprint/cascade-b:
+    answers:
+      grand: FROM_A
+    deterministicState:
+      seed: A_SEED

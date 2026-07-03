@@ -5,7 +5,7 @@ name: merge-groups
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/merge-la1
-  - cyanprint/merge-la2
-  - cyanprint/merge-lb1
-  - cyanprint/merge-lb2
+  cyanprint/merge-la1: {}
+  cyanprint/merge-la2: {}
+  cyanprint/merge-lb1: {}
+  cyanprint/merge-lb2: {}

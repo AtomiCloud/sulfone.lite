@@ -1,3 +1,0 @@
-# Template
-
-template folder edit

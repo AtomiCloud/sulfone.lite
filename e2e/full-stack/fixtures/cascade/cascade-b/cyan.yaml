@@ -5,10 +5,6 @@ name: cascade-b
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/cascade-c
-
-presets:
-  templates:
-    cyanprint/cascade-c:
-      answers:
-        grand: FROM_B
+  cyanprint/cascade-c:
+    answers:
+      parent: FROM_B

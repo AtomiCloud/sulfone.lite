@@ -26,7 +26,7 @@ export default async function cyan(prompt: CyanPrompter, ctx: CyanPromptContext)
       { value: 'template', description: 'Asks questions and generates a project from template files.' },
       { value: 'processor', description: 'Transforms generated files, like variable rendering or formatting.' },
       { value: 'plugin', description: 'Post-processes the merged output and can run commands.' },
-      { value: 'resolver', description: 'Merges same-path files at create time and during updates.' },
+      { value: 'resolver', description: 'Merges same-path template output while layering at create time.' },
     ],
     default: 'template',
   });

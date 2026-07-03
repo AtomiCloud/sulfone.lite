@@ -34,11 +34,19 @@ export async function plugin(input: PluginInput, helper: PluginHelper) {
 }
 
 export async function resolver(input: ResolverInput): Promise<ResolverOutput> {
-  return { path: input.next.path, content: `${input.current.content}\n${input.next.content}` };
+  // One call per conflicting path; input.files holds EVERY variation with its origin.
+  const winner = input.files[input.files.length - 1];
+  return { path: winner.path, content: winner.content };
 }
 ```
 
-Processors receive `(input, fs)`: `fs.read()` returns the input folder as a VFS, `fs.write(files)` writes the transformed tree to `outputDir`. Plugins receive `(input, helper)` after processor outputs have been merged, with `read()`/`write()`/`exec()`. Resolvers receive `{ path, config, current, next }` and merge two files at a time; the CLI folds N candidates by repeated calls (declare `api: 2` in `cyan.yaml`). Raw `input.inputDir`/`input.outputDir` stay available as an escape hatch.
+Processors receive `(input, fs)`: `fs.read()` returns the input folder as a VFS, `fs.write(files)` writes the transformed tree to `outputDir`. Processors must be **hermetic** — output is a pure function of (artifact version + integrity, config, input file set); no network, clock, randomness, or machine state. Hermetic outputs are cached content-addressed under `~/.cyan/cache/processor-output/`, and a cache hit skips the invocation.
+
+Plugins receive `(input, helper)` after the template's processor outputs have been resolved into a single layer, with `read()`/`write()`/`exec()`.
+
+Resolvers receive `{ config, files }` — **all variations of one conflicting path in a single call**, each variation `{ path, content, origin: { template, layer, processor? } }` — and return `{ path, content }`. There is no pairwise fold, no `current`/`next` pair, no `api:` field, and no `commutative` flag; manifests that still declare `api:` or `commutative:` are rejected. Resolvers are declared in a template's `cyan.yaml` as `{ ref, config, files }` entries, where `files:` globs decide which paths the entry nominates for.
+
+Raw `input.inputDir`/`input.outputDir` stay available to processors and plugins as an escape hatch.
 
 ```yaml
 cyanprint: 4
@@ -62,13 +70,20 @@ Processor and plugin test cases use folders:
 - `tests/<case>/expected/` contains the expected output file tree.
 - `tests/<case>/config.json` is optional.
 
-Resolver test cases use files or folders:
+Resolver test cases use `variations:` in `cyan.test.yaml` — a list of `{ path, origin }` entries; every variation of a path reaches the resolver in one call:
 
-- `tests/<case>/prior.txt` is optional.
-- `tests/<case>/current.txt` is optional.
-- `tests/<case>/target.txt` is optional.
-- `tests/<case>/expected.txt` contains the expected resolved text.
-- `tests/<case>/prior/`, `current/`, `target/`, and `expected/` are also supported for tree-based resolver tests.
+```yaml
+cases:
+  - name: merge
+    variations:
+      - { path: tests/merge/left, origin: { template: cyan/a@1, layer: 0 } }
+      - { path: tests/merge/right, origin: { template: cyan/b@2, layer: 1 } }
+    expected: tests/merge/expected
+```
+
+- Each `path` may be a file or a folder tree.
+- `origin` carries `template` and `layer`, plus optional `processor: { ref, invocation }` for tier-1 conflicts.
+- Convention-based fixtures also work: `tests/<case>/input-1`, `input-2`, ... become variations layered by number, with `tests/<case>/expected/` as the expected output.
 - `tests/<case>/config.json` is optional.
 
 Ketone-style resolver fixtures are also supported through `test.cyan.yaml` with `resolver_inputs`.

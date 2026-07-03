@@ -15,47 +15,16 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { assertRuntimeExportArity, type ArtifactDependency, type VfsFile } from '@cyanprint/contracts';
-import { overlayFiles, readVfsFiles, safeJoin, writeVfsFiles } from './fs-utils';
+import { assertRuntimeExportArity, type KindedArtifactRef, type VfsFile } from '@cyanprint/contracts';
+import { overlayFiles, readVfsFiles, writeVfsFiles } from './fs-utils';
 import { createPluginHelper, createProcessorFsHelper } from './helpers';
-import { foldResolverCandidates } from './resolver-fold';
-import { assertResolverCommutative } from './testing';
-import type { Plugin, Processor, ResolvedFile, Resolver } from './sdk-types';
+import type { Plugin, Processor, ResolvedFile, Resolver, ResolverOutput } from './sdk-types';
 
-type MaybePromise<T> = T | Promise<T>;
-
-/** Candidate file passed by the runtime into a resolver merge. */
-export type ResolverFile = {
-  path: string;
-  content: string;
-  origin: {
-    template: string;
-    layer: number;
-  };
-  files?: VfsFile[];
-};
-
-// Legacy (api: 1) folder-fold resolver shapes. New resolvers use the SDK two-file API.
-type LegacyResolverFolderInput = {
-  inputDirs: Array<{
-    dir: string;
-    origin: {
-      template: string;
-      layer: number;
-    };
-  }>;
-  outputDir: string;
-  files: ResolverFile[];
-  config?: unknown;
-};
-
-type LegacyResolverOutput = void | string | { path?: string; content: string };
-
-type LegacyResolver = (input: LegacyResolverFolderInput) => MaybePromise<LegacyResolverOutput>;
+export type { FileOrigin, ResolvedFile, ResolverInput, ResolverOutput } from './sdk-types';
+export { overlayFiles } from './fs-utils';
 
 const resolverSymbol = Symbol.for('cyanprint.resolver');
 const runtimeExportCache = new Map<string, unknown>();
-const legacyResolverExports = new WeakSet<Function>();
 
 function resolverGlobal(): Record<PropertyKey, unknown> {
   return globalThis as unknown as Record<PropertyKey, unknown>;
@@ -94,9 +63,6 @@ export async function loadArtifactExport<T>(path: string, exportName: string, ca
     isRegisteredLegacyResolver,
     label: `Artifact bundle ${path}`,
   });
-  if (isRegisteredLegacyResolver) {
-    legacyResolverExports.add(exported);
-  }
   runtimeExportCache.set(runtimeExportCacheKey, exported);
   return exported as T;
 }
@@ -177,11 +143,9 @@ async function findNearestNodeModules(start: string): Promise<string | undefined
 }
 
 export type ArtifactBundleRef = {
-  dependency: ArtifactDependency;
+  dependency: KindedArtifactRef;
   runtimeFile: string;
   integrity?: string;
-  /** Resolver runtime API version: 1 = legacy folder-fold (default), 2 = two-file merge. */
-  api?: 1 | 2;
 };
 
 async function verifyBundleIntegrity(bundle: ArtifactBundleRef): Promise<string> {
@@ -301,108 +265,28 @@ export async function invokePlugin(
   });
 }
 
+/**
+ * Invoke a resolver once with every variation of one conflicting path. The resolver
+ * receives all variations (with origins) in a single call and returns the merged file.
+ */
 export async function invokeResolver(
   bundle: ArtifactBundleRef,
-  input: { files: ResolverFile[]; config?: unknown },
-): Promise<string> {
-  const cacheKey = await verifyBundleIntegrity(bundle);
-  if ((bundle.api ?? 1) === 2) {
-    return await invokeTwoFileResolver(bundle, input, cacheKey);
-  }
-  return await invokeLegacyFolderResolver(bundle, input, cacheKey);
-}
-
-async function invokeTwoFileResolver(
-  bundle: ArtifactBundleRef,
-  input: { files: ResolverFile[]; config?: unknown },
-  cacheKey: string,
-): Promise<string> {
-  const resolver = await loadArtifactExport<Resolver>(bundle.runtimeFile, 'resolver', cacheKey);
-  const candidates: ResolvedFile[] = input.files.map(file => ({
-    path: file.path,
-    content: file.content,
-    origin: file.origin,
-  }));
-  const output = await foldResolverCandidates(resolver, {
-    path: readConfigPath(input.config),
-    config: readConfigRecord(input.config),
-    candidates,
-  });
-  return output.content;
-}
-
-/**
- * Enforce a resolver's declared commutativity (api: 2 only). Loads the resolver and
- * verifies that merging every candidate pair is order-independent. Throws on divergence.
- */
-export async function assertResolverCommutativity(
-  bundle: ArtifactBundleRef,
-  args: { path: string; config: Record<string, unknown>; candidates: ResolvedFile[] },
-): Promise<void> {
+  input: { config: Record<string, unknown>; files: ResolvedFile[] },
+): Promise<ResolverOutput> {
   const cacheKey = await verifyBundleIntegrity(bundle);
   const resolver = await loadArtifactExport<Resolver>(bundle.runtimeFile, 'resolver', cacheKey);
-  await assertResolverCommutative(resolver, args);
-}
-
-async function invokeLegacyFolderResolver(
-  bundle: ArtifactBundleRef,
-  input: { files: ResolverFile[]; config?: unknown },
-  cacheKey: string,
-): Promise<string> {
-  const resolver = await loadArtifactExport<LegacyResolver>(bundle.runtimeFile, 'resolver', cacheKey);
-  const { container, root } = await mkTempRoot('cyanprint-resolver-');
-  const containerGuard = await captureTempRoot(container);
-  const rootGuard = await captureTempRoot(root);
-  try {
-    const inputDirs = [];
-    for (const [index, file] of input.files.entries()) {
-      const dir = join(root, `input-${index}`);
-      await writeVfsFiles(dir, file.files ?? [{ path: file.path, content: file.content }]);
-      inputDirs.push({ dir, origin: file.origin });
-    }
-    const outputDir = join(root, 'output');
-    await mkdir(outputDir, { recursive: true });
-    const result = await resolver({ inputDirs, outputDir, files: input.files, config: input.config });
-    const acceptsLegacyReturn = legacyResolverExports.has(resolver);
-    if (typeof result === 'string') {
-      if (!acceptsLegacyReturn) {
-        throw new Error(`Resolver ${bundle.dependency.name} must write output files instead of returning content`);
-      }
-      await assertResolverSandbox({ containerGuard, rootGuard, container, root, outputDir });
-      return result;
-    }
-    if (result && typeof result === 'object' && 'content' in result && typeof result.content === 'string') {
-      if (!acceptsLegacyReturn) {
-        throw new Error(`Resolver ${bundle.dependency.name} must write output files instead of returning content`);
-      }
-      await assertResolverSandbox({ containerGuard, rootGuard, container, root, outputDir });
-      return result.content;
-    }
-    const path = readConfigPath(input.config);
-    await assertResolverSandbox({ containerGuard, rootGuard, container, root, outputDir });
-    const outputPath = safeJoin(outputDir, path);
-    const bytes = await readFile(outputPath).catch(() => undefined);
-    if (!bytes) {
-      throw new Error(`Resolver ${bundle.dependency.name} did not write output file: ${path}`);
-    }
-    return new TextDecoder().decode(bytes);
-  } finally {
-    await rm(container, { recursive: true, force: true });
+  const first = input.files[0];
+  if (!first) {
+    throw new Error(`Resolver ${bundle.dependency.name} invoked with no file variations`);
   }
-}
-
-async function assertResolverSandbox(args: {
-  containerGuard: TempRootGuard;
-  rootGuard: TempRootGuard;
-  container: string;
-  root: string;
-  outputDir: string;
-}): Promise<void> {
-  await assertTempRoot(args.containerGuard);
-  await assertTempRoot(args.rootGuard);
-  await assertNoSandboxEscapes(args.container, entryName => entryName === 'work');
-  await assertNoSandboxEscapes(args.root, entryName => entryName === 'output' || /^input-\d+$/.test(entryName));
-  await assertManagedDirectory(args.root, args.outputDir, 'output');
+  const output = await resolver({ config: input.config, files: input.files });
+  if (!output || typeof output !== 'object' || typeof (output as { content?: unknown }).content !== 'string') {
+    throw new Error(`Resolver ${bundle.dependency.name} must return { path, content }`);
+  }
+  return {
+    path: typeof output.path === 'string' && output.path.length > 0 ? output.path : first.path,
+    content: output.content,
+  };
 }
 
 async function invokeFolderArtifact(args: {
@@ -488,22 +372,6 @@ async function assertManagedDirectory(root: string, path: string, label: string)
   if (rel.startsWith('..') || rel === '' || rel.split(/[\\/]+/).includes('..')) {
     throw new Error(`unsafe ${label} directory`);
   }
-}
-
-function readConfigPath(config: unknown): string {
-  if (
-    config &&
-    typeof config === 'object' &&
-    !Array.isArray(config) &&
-    typeof (config as { path?: unknown }).path === 'string'
-  ) {
-    return (config as { path: string }).path;
-  }
-  return 'output.txt';
-}
-
-function readConfigRecord(config: unknown): Record<string, unknown> {
-  return config && typeof config === 'object' && !Array.isArray(config) ? (config as Record<string, unknown>) : {};
 }
 
 function errorMessage(error: unknown): string {

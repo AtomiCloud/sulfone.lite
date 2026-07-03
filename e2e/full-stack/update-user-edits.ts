@@ -1,6 +1,13 @@
-import { rm } from 'node:fs/promises';
-import { writeFile } from 'node:fs/promises';
+// Standalone driver for the "user edits survive a version move" story (bun run
+// e2e:update:user-edits). Local projects move to a new template version by RE-CREATING
+// the new template dir into the existing project: same owner/name upserts into
+// `.cyan_state.yaml`, and a real git three-way merge (base = old source with saved
+// answers, theirs = the new dir, ours = disk) leaves genuine divergence as standard
+// in-file `<<<<<<<` conflict markers with a non-zero exit.
+
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import YAML from 'yaml';
 
 const out = join(process.cwd(), '.tmp/e2e/update-project');
 await rm(out, { recursive: true, force: true });
@@ -24,33 +31,80 @@ if (!result.success) {
 }
 await writeFile(join(out, 'README.md'), '# User Edit\n\nKeep me.\n', 'utf8');
 
+// Re-create with the new template version (same owner/name ⇒ upsert + three-way merge).
 result = Bun.spawnSync([
   'bun',
   'run',
   'cyan',
   '--',
-  'update',
-  out,
-  '--template',
+  'create',
   'examples/templates/update-v2',
+  '--out',
+  out,
   '--headless',
   '--answers',
   'examples/templates/update-v2/answers.json',
   '--json',
 ]);
 if (result.success) {
-  throw new Error('update conflict unexpectedly exited successfully');
+  throw new Error('conflicting re-create unexpectedly exited successfully');
 }
-const updateReport = JSON.parse(result.stdout.toString()) as { status: string };
-if (updateReport.status !== 'conflict') {
-  throw new Error('update did not report a conflict');
+const report = JSON.parse(result.stdout.toString()) as { status: string; conflicts: string[] };
+if (report.status !== 'conflict') {
+  throw new Error('re-create did not report a conflict');
+}
+if (!report.conflicts.includes('README.md')) {
+  throw new Error('README.md was not listed as conflicted');
 }
 
 const readme = await Bun.file(join(out, 'README.md')).text();
-if (!readme.includes('User Edit')) {
-  throw new Error('user edit was overwritten');
+for (const piece of ['<<<<<<<', 'Keep me.', 'Version two.']) {
+  if (!readme.includes(piece)) {
+    throw new Error(`README.md conflict markers are missing: ${piece}`);
+  }
 }
-if (!(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).exists())) {
-  throw new Error('conflict target was not written');
+
+// With conflicts pending, state must NOT advance — the retry below re-merges from the
+// original base rather than treating the half-accepted incoming tree as the baseline.
+const pending = YAML.parse(await Bun.file(join(out, '.cyan_state.yaml')).text()) as {
+  templates: Array<{ name: string; history: unknown[] }>;
+};
+if (pending.templates.length !== 1 || pending.templates[0]?.history.length !== 1) {
+  throw new Error('conflicted upsert advanced .cyan_state.yaml before conflicts were resolved');
 }
-console.log(JSON.stringify({ status: 'done', userEditedFileRetained: true, conflict: true }));
+
+// Resolve the markers (accept incoming) and re-run: only now install #2 is recorded.
+await writeFile(join(out, 'README.md'), '# Update Project\n\nUpdated with pinned answers.\n\nVersion two.\n', 'utf8');
+result = Bun.spawnSync([
+  'bun',
+  'run',
+  'cyan',
+  '--',
+  'create',
+  'examples/templates/update-v2',
+  '--out',
+  out,
+  '--headless',
+  '--answers',
+  'examples/templates/update-v2/answers.json',
+  '--json',
+]);
+if (!result.success) {
+  throw new Error(result.stderr.toString());
+}
+const state = YAML.parse(await Bun.file(join(out, '.cyan_state.yaml')).text()) as {
+  templates: Array<{ name: string; history: unknown[] }>;
+};
+if (state.templates.length !== 1 || state.templates[0]?.history.length !== 2) {
+  throw new Error('resolved re-create did not record a second history entry for the template');
+}
+
+console.log(
+  JSON.stringify({
+    status: 'done',
+    userEditRetainedInMarkers: true,
+    conflict: true,
+    statePendingUntilResolved: true,
+    historyLengthAfterResolve: 2,
+  }),
+);

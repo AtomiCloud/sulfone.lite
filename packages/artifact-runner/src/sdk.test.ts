@@ -3,9 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPluginHelper, createProcessorFsHelper, exec } from './helpers';
-import { foldResolverCandidates } from './resolver-fold';
-import { assertResolverCommutative } from './testing';
-import type { ResolvedFile, ResolverInput, ResolverOutput } from './sdk-types';
+import type { ResolvedFile, Resolver, ResolverInput, ResolverOutput } from './sdk-types';
 
 describe('processor fs helper', () => {
   let dir: string;
@@ -71,55 +69,38 @@ describe('plugin helper exec', () => {
   });
 });
 
-describe('two-file resolver fold', () => {
-  const origin = (template: string, layer: number) => ({ template, layer });
-  const candidate = (template: string, layer: number, content: string): ResolvedFile => ({
+describe('global resolver contract', () => {
+  const variation = (template: string, layer: number, content: string): ResolvedFile => ({
     path: 'shared.txt',
     content,
-    origin: origin(template, layer),
+    origin: { template, layer },
   });
 
-  const concat = async (input: ResolverInput): Promise<ResolverOutput> => ({
-    path: input.next.path,
-    content: `${input.current.content}\n${input.next.content}`,
+  // One call, all variations in scope — the resolver sees every origin at once.
+  const concatAll: Resolver = (input: ResolverInput): ResolverOutput => ({
+    path: input.files[0]?.path ?? 'shared.txt',
+    content: input.files
+      .slice()
+      .sort((a, b) => a.origin.layer - b.origin.layer)
+      .map(file => file.content)
+      .join('\n'),
   });
 
-  test('folds N candidates deterministically by ascending layer', async () => {
-    const candidates = [candidate('c', 2, 'c'), candidate('a', 0, 'a'), candidate('b', 1, 'b')];
-    const output = await foldResolverCandidates(concat, { path: 'shared.txt', config: {}, candidates });
+  test('receives every variation with its origin in a single call', async () => {
+    const output = await concatAll({
+      config: {},
+      files: [variation('c', 2, 'c'), variation('a', 0, 'a'), variation('b', 1, 'b')],
+    });
     expect(output.content).toBe('a\nb\nc');
   });
 
-  test('returns a single candidate untouched', async () => {
-    const output = await foldResolverCandidates(concat, {
+  test('processor-origin variations carry the source processor ref and invocation', () => {
+    const file: ResolvedFile = {
       path: 'shared.txt',
-      config: {},
-      candidates: [candidate('only', 0, 'solo')],
-    });
-    expect(output.content).toBe('solo');
-  });
-
-  test('assertResolverCommutative passes for a commutative merge', async () => {
-    const sortedConcat = async (input: ResolverInput): Promise<ResolverOutput> => ({
-      path: input.next.path,
-      content: [input.current.content, input.next.content].sort().join(','),
-    });
-    await expect(
-      assertResolverCommutative(sortedConcat, {
-        path: 'shared.txt',
-        config: {},
-        candidates: [candidate('a', 0, 'x'), candidate('b', 1, 'y')],
-      }),
-    ).resolves.toBeUndefined();
-  });
-
-  test('assertResolverCommutative throws for a non-commutative merge', async () => {
-    await expect(
-      assertResolverCommutative(concat, {
-        path: 'shared.txt',
-        config: {},
-        candidates: [candidate('a', 0, 'x'), candidate('b', 1, 'y')],
-      }),
-    ).rejects.toThrow('commutative');
+      content: 'x',
+      origin: { template: 'local/tpl@1', layer: 0, processor: { ref: 'cyan/default', invocation: 1 } },
+    };
+    expect(file.origin.processor?.ref).toBe('cyan/default');
+    expect(file.origin.processor?.invocation).toBe(1);
   });
 });

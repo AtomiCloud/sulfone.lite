@@ -2,7 +2,7 @@
 
 A CyanPrint v4 resolver.
 
-This resolver merges two files at a time. It receives `{ path, config, current, next }` and returns `{ path, content }`. CyanPrint folds N conflicting candidates by calling it repeatedly in a deterministic order. Set `api: 2` in `cyan.yaml`; if your merge is order-independent, set `commutative: true`.
+This resolver is invoked once per conflicting path with every variation of that path at once. It receives `{ config, files }` — each `files` entry carries `path`, `content`, and its `origin` (the contributing `template`, its `layer`, and the source `processor` for processor-output merges) — and returns the merged `{ path, content }`. This scaffold keeps the highest layer's content (latest-wins).
 
 ## Test
 

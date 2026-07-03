@@ -1,6 +1,7 @@
 export type ResolverFileOrigin = {
   template: string;
   layer: number;
+  processor?: { ref: string; invocation: number };
 };
 
 export type ResolverFile = {
