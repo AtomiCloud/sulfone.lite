@@ -1,14 +1,14 @@
 cases:
   - name: latest-wins
-    resolverInputs:
-      - path: tests/latest-wins/current
+    variations:
+      - path: tests/latest-wins/input-0
         origin:
-          template: current
+          template: cyanprint/base
+          layer: 0
+      - path: tests/latest-wins/input-1
+        origin:
+          template: cyanprint/overlay
           layer: 1
-      - path: tests/latest-wins/target
-        origin:
-          template: target
-          layer: 2
     expected: tests/latest-wins/expected
     validations:
-      - grep -q target shared.txt
+      - grep -q latest shared.txt

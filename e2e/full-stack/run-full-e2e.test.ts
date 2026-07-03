@@ -11,8 +11,9 @@
 // features) and later cases build on earlier pushes.
 
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import YAML from 'yaml';
 import app from '../../apps/worker/src/index';
 import { cyan, cyanExpectingFailure, diffAgainstExpected, resetDir, stageFixture } from './helpers';
 
@@ -50,6 +51,35 @@ afterAll(() => {
 
 async function readState(outDir: string): Promise<string> {
   return await Bun.file(join(outDir, '.cyan_state.yaml')).text();
+}
+
+// Structured view of `.cyan_state.yaml`: installed templates (with history) plus the
+// persisted provenance set — every merge decision of the last generation.
+type StateProvenance = {
+  path: string;
+  source: string;
+  decision: 'added' | 'resolver-merged' | 'lww-override';
+  segment?: 'processor' | 'dependency' | 'sibling';
+  resolver?: string;
+  contributors?: Array<{ template: string; layer: number; processor?: { ref: string; invocation: number } }>;
+};
+type ParsedState = {
+  cyanprint: number;
+  templates: Array<{
+    owner: string;
+    name: string;
+    version: string;
+    source: string;
+    active: boolean;
+    history: Array<{ version: string; answers: Record<string, unknown> }>;
+    artifacts: Array<{ kind: string; owner: string; name: string; version: string }>;
+  }>;
+  files: Array<{ path: string; sha256: string }>;
+  provenance: StateProvenance[];
+};
+
+async function parseState(outDir: string): Promise<ParsedState> {
+  return YAML.parse(await readState(outDir)) as ParsedState;
 }
 
 async function latestVersion(kind: string, owner: string, name: string): Promise<number> {
@@ -131,6 +161,14 @@ test(
     await resetDir(out);
     await cyan(`create ${fixtures}/processors/scoped --out ${out} --headless --json`);
     expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('value=second\n');
+    // Tier 1 (processor outputs): both hermetic invocations wrote OUT.md, no resolver was
+    // nominated, so the later invocation wins LWW — persisted as provenance in state.
+    const state = await parseState(out);
+    const decision = state.provenance.find(entry => entry.path === 'OUT.md');
+    expect(decision?.decision).toBe('lww-override');
+    expect(decision?.segment).toBe('processor');
+    expect(decision?.contributors).toHaveLength(2);
+    expect(decision?.contributors?.[1]?.processor).toEqual({ ref: 'cyan/default', invocation: 1 });
   },
   T,
 );
@@ -206,20 +244,29 @@ test(
 );
 
 test(
-  'case 6: templates update with a three-way merge (nested resolver keeps the user edit)',
+  'case 6: templates update with a three-way merge (user edits survive; local sources re-execute identically)',
   async () => {
+    // Local-path sources re-execute the SAME directory for base and theirs, so update is
+    // a no-op for template content — the three-way merge keeps the user's edit (ours)
+    // because base == theirs. Moving a local project to a NEW template version is a
+    // re-create instead (case 7).
     const out = join(tmp, 'group-local-update');
     await resetDir(out);
     await cyan(`create examples/template-groups/basic --out ${out} --headless --json`);
-    await writeFile(join(out, 'README.md'), '# User Group Edit\n\nKeep this nested resolver edit.\n', 'utf8');
-    await cyan(`update ${out} --template examples/template-groups/basic --headless --json`);
+    await writeFile(join(out, 'README.md'), '# User Group Edit\n\nKeep this local update edit.\n', 'utf8');
+    await cyan(`update ${out} --headless --json`);
     expect(await diffAgainstExpected(out, `${expected}/group-update`)).toEqual([]);
+    // State stays readable and unbumped: same version ⇒ no new history entry.
+    const state = await parseState(out);
+    expect(state.templates[0]?.name).toBe('basic-group');
+    expect(state.templates[0]?.active).toBe(true);
+    expect(state.templates[0]?.history).toHaveLength(1);
   },
   T,
 );
 
 test(
-  'case 7: templates update with conflict (user edit lands in .cyan_conflicts)',
+  'case 7: templates update with conflict (re-create upsert leaves in-file git markers)',
   async () => {
     const out = join(tmp, 'local-update');
     await resetDir(out);
@@ -227,10 +274,40 @@ test(
       `create examples/templates/update-v1 --out ${out} --headless --answers examples/templates/update-v1/answers.json --json`,
     );
     await writeFile(join(out, 'README.md'), '# User Edit\n\nKeep me.\n', 'utf8');
-    await cyanExpectingFailure(
-      `update ${out} --template examples/templates/update-v2 --headless --answers examples/templates/update-v2/answers.json --json`,
+    // The local "move to a new template version" flow: create the new template dir into
+    // the existing project. Same owner/name (cyanprint/update-example) ⇒ UPSERT — base is
+    // the old source re-executed with saved answers, theirs the new dir, ours the disk.
+    // The wholesale user edit genuinely diverges from both ⇒ in-file conflict markers,
+    // non-zero exit, result.status 'conflict'.
+    const failure = await cyanExpectingFailure(
+      `create examples/templates/update-v2 --out ${out} --headless --answers examples/templates/update-v2/answers.json --json`,
     );
-    expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).exists()).toBe(true);
+    const report = JSON.parse(failure) as { status: string; conflicts: string[] };
+    expect(report.status).toBe('conflict');
+    expect(report.conflicts).toContain('README.md');
+    const readme = await Bun.file(join(out, 'README.md')).text();
+    expect(readme).toContain('<<<<<<<');
+    expect(readme).toContain('Keep me.');
+    expect(readme).toContain('Version two.');
+    // With conflicts pending, state must NOT advance: the retry after resolving merges
+    // from the original base, not from the half-accepted incoming tree.
+    const state = await parseState(out);
+    expect(state.templates).toHaveLength(1);
+    expect(state.templates[0]?.history).toHaveLength(1);
+    expect(await Bun.file(join(out, '.cyan_conflicts')).exists()).toBe(false);
+    // Resolving the markers (accepting incoming) and re-running the upsert completes it
+    // and only then records install #2.
+    await writeFile(
+      join(out, 'README.md'),
+      '# Update Project\n\nUpdated with pinned answers.\n\nVersion two.\n',
+      'utf8',
+    );
+    await cyan(
+      `create examples/templates/update-v2 --out ${out} --headless --answers examples/templates/update-v2/answers.json --json`,
+    );
+    const resolved = await parseState(out);
+    expect(resolved.templates).toHaveLength(1);
+    expect(resolved.templates[0]?.history).toHaveLength(2);
   },
   T,
 );
@@ -246,9 +323,11 @@ test(
       `create cyanprint/with-artifacts --registry ${registry} --trust-fixture local-registry --out ${out} --headless --answers examples/templates/with-artifacts/answers.json --json`,
     );
     expect(await diffAgainstExpected(out, `${expected}/with-artifacts-create`)).toEqual([]);
-    const state = await readState(out);
-    for (const dependency of ['name: default', 'name: uppercase', 'name: footer', 'name: keep-user']) {
-      expect(state).toContain(dependency);
+    // Dependency pins live under the installed template's `artifacts:` in the state.
+    const state = await parseState(out);
+    const artifactNames = (state.templates[0]?.artifacts ?? []).map(artifact => artifact.name);
+    for (const dependency of ['default', 'uppercase', 'footer', 'keep-user']) {
+      expect(artifactNames).toContain(dependency);
     }
   },
   T,
@@ -357,6 +436,10 @@ test(
 
 // ── same-path merge semantics (fixtures/merge, via the registry) ─────────────
 // Leaves all write shared.txt; groups compose them with different resolver setups.
+// Consensus (same resolver ref + identical config across ALL contributors) ⇒ one global
+// resolver call; anything else (AllNone / NoConsensus / Ambiguous) ⇒ LWW, persisted as an
+// `lww-override` provenance entry in `.cyan_state.yaml` (the old `conflicts:` reason
+// strings no_resolver / different_resolver / same_resolver_different_config are gone).
 
 async function pushMergeFixtures(names: string[]): Promise<void> {
   for (const name of names) {
@@ -365,12 +448,16 @@ async function pushMergeFixtures(names: string[]): Promise<void> {
   }
 }
 
-async function createMergeGroup(group: string, out: string): Promise<string> {
+async function createMergeGroup(group: string, out: string): Promise<ParsedState> {
   await resetDir(out);
   await cyan(
     `create cyanprint/${group} --registry ${registry} --trust-fixture local-registry --out ${out} --headless --json`,
   );
-  return await readState(out);
+  return await parseState(out);
+}
+
+function sharedDecision(state: ParsedState): StateProvenance | undefined {
+  return state.provenance.find(entry => entry.path === 'shared.txt');
 }
 
 test(
@@ -380,7 +467,13 @@ test(
     const out = join(tmp, 'merge-same');
     const state = await createMergeGroup('merge-same', out);
     expect(await diffAgainstExpected(out, `${expected}/merge-same`)).toEqual([]);
-    expect(state).not.toContain('reason:');
+    // Consensus on cyanprint/merge-a ⇒ ONE resolver-merged decision, no LWW anywhere.
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('resolver-merged');
+    expect(decision?.resolver).toBe('cyanprint/merge-a');
+    expect(decision?.segment).toBe('dependency');
+    expect(decision?.contributors).toHaveLength(2);
+    expect(state.provenance.some(entry => entry.decision === 'lww-override')).toBe(false);
   },
   T,
 );
@@ -398,36 +491,49 @@ test(
 );
 
 test(
-  'case 13: same-path templates without a resolver record a no_resolver LWW conflict',
+  'case 13: same-path templates without any resolver fall back to LWW (AllNone override recorded)',
   async () => {
     await pushMergeFixtures(['merge-ln1', 'merge-ln2', 'merge-none']);
     const out = join(tmp, 'merge-none');
     const state = await createMergeGroup('merge-none', out);
     expect(await Bun.file(join(out, 'shared.txt')).text()).toBe('ln2\n');
-    expect(state).toContain('no_resolver');
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('lww-override');
+    expect(decision?.segment).toBe('dependency');
+    expect(decision?.source).toBe('cyanprint/merge-ln2@local');
+    expect(decision?.contributors).toHaveLength(2);
   },
   T,
 );
 
 test(
-  'case 14: same-path templates with different resolvers record a different_resolver LWW conflict',
+  'case 14: same-path templates with different resolvers fall back to LWW (no consensus)',
   async () => {
     await pushMergeFixtures(['merge-lb1', 'merge-mixed']);
     const out = join(tmp, 'merge-mixed');
     const state = await createMergeGroup('merge-mixed', out);
+    // merge-la1 nominates cyanprint/merge-a, merge-lb1 nominates cyanprint/merge-b —
+    // no consensus, so no resolver runs and the highest layer wins.
     expect(await Bun.file(join(out, 'shared.txt')).text()).toBe('lb1\n');
-    expect(state).toContain('different_resolver');
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('lww-override');
+    expect(decision?.resolver).toBeUndefined();
+    expect(state.provenance.some(entry => entry.decision === 'resolver-merged')).toBe(false);
   },
   T,
 );
 
 test(
-  'case 15: same resolver with different config records a same_resolver_different_config LWW conflict',
+  'case 15: same resolver with different config falls back to LWW (ambiguous nomination)',
   async () => {
     await pushMergeFixtures(['merge-la3', 'merge-config']);
     const out = join(tmp, 'merge-config');
     const state = await createMergeGroup('merge-config', out);
-    expect(state).toContain('same_resolver_different_config');
+    // Both nominate cyanprint/merge-a but with different config — not a consensus.
+    expect(await Bun.file(join(out, 'shared.txt')).text()).toBe('la3\n');
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('lww-override');
+    expect(state.provenance.some(entry => entry.decision === 'resolver-merged')).toBe(false);
   },
   T,
 );
@@ -439,19 +545,29 @@ test(
     const out = join(tmp, 'merge-subset');
     const state = await createMergeGroup('merge-subset', out);
     expect(await Bun.file(join(out, 'shared.txt')).text()).toBe('ln1\n');
-    expect(state).toContain('no_resolver');
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('lww-override');
+    expect(decision?.contributors).toHaveLength(3);
+    expect(state.provenance.some(entry => entry.decision === 'resolver-merged')).toBe(false);
   },
   T,
 );
 
 test(
-  'case 18: different resolver groups merge internally but fall back to LWW across groups',
+  'case 18: split resolver nominations fall back to LWW across every contributor',
   async () => {
     await pushMergeFixtures(['merge-lb2', 'merge-groups']);
     const out = join(tmp, 'merge-groups');
     const state = await createMergeGroup('merge-groups', out);
+    // Helium-exact global semantics: resolution is one call per path with ALL variations
+    // in scope — there is no partial per-group merging. Two nomination camps (merge-a vs
+    // merge-b) ⇒ no consensus ⇒ pure LWW: the last layer (merge-lb2) wins outright.
     expect(await diffAgainstExpected(out, `${expected}/merge-groups`)).toEqual([]);
-    expect(state).toContain('different_resolver');
+    expect(await Bun.file(join(out, 'shared.txt')).text()).toBe('lb2\n');
+    const decision = sharedDecision(state);
+    expect(decision?.decision).toBe('lww-override');
+    expect(decision?.contributors).toHaveLength(4);
+    expect(state.provenance.some(entry => entry.decision === 'resolver-merged')).toBe(false);
   },
   T,
 );
@@ -471,48 +587,114 @@ test(
 test(
   'case 5: templates update normally (registry update applies the new version)',
   async () => {
+    // Version numbers are relative: case 28 already published the update-v2 folder as an
+    // earlier cyanprint/update-example version; pushing update-v1 now makes "old" = v1
+    // content and the next update-v2 push "new" = v2 content.
+    await cyan(`push examples/templates/update-v1 --registry ${registry} --json`, publish);
+    const oldVersion = await latestVersion('template', 'cyanprint', 'update-example');
     const out = join(tmp, 'registry-update');
     await resetDir(out);
     await cyan(
-      `create examples/templates/update-v1 --out ${out} --headless --answers examples/templates/update-v1/answers.json --json`,
+      `create cyanprint/update-example@${oldVersion} --registry ${registry} --trust-fixture local-registry --out ${out} --headless --answers examples/templates/update-v1/answers.json --json`,
+    );
+    // The CLI records the unpinned source ('cyanprint/update-example') so update can
+    // float, plus the registry-assigned version so base regeneration can pin it.
+    expect(await Bun.file(join(out, 'README.md')).text()).toContain('Version one.');
+    const createdState = await parseState(out);
+    expect(createdState.templates.find(template => template.name === 'update-example')?.version).toBe(
+      String(oldVersion),
+    );
+
+    await pushExpectingVersionBump('examples/templates/update-v2', 'template', 'cyanprint', 'update-example');
+    const newVersion = oldVersion + 1;
+    const updateOutput = await cyan(
+      `update ${out} --template cyanprint/update-example@${newVersion} --registry ${registry} --trust-fixture local-registry --headless --answers examples/templates/update-v2/answers.json --json`,
+    );
+    const updateReport = JSON.parse(updateOutput) as {
+      status: string;
+      conflicts: string[];
+      updated: Array<{ ref: string; from: string; to: string }>;
+    };
+    expect(updateReport.status).toBe('done');
+    expect(updateReport.conflicts).toEqual([]);
+    expect(updateReport.updated).toEqual([
+      { ref: 'cyanprint/update-example', from: String(oldVersion), to: String(newVersion) },
+    ]);
+    expect(await diffAgainstExpected(out, `${expected}/registry-update`)).toEqual([]);
+    // The version move persists (iridium parity): the entry floats to the new version
+    // and gains a history entry, while the source stays the unpinned ref.
+    const state = await parseState(out);
+    const entry = state.templates.find(template => template.name === 'update-example');
+    expect(entry?.source).toBe('cyanprint/update-example');
+    expect(entry?.version).toBe(String(newVersion));
+    expect(entry?.history).toHaveLength(2);
+
+    // Unpinned float: `update <dir>` resolves the recorded source to LATEST, applies the
+    // new content, and persists the resolved version the same way.
+    const floatOut = join(tmp, 'registry-update-float');
+    await resetDir(floatOut);
+    await cyan(
+      `create cyanprint/update-example@${oldVersion} --registry ${registry} --trust-fixture local-registry --out ${floatOut} --headless --answers examples/templates/update-v1/answers.json --json`,
     );
     await cyan(
-      `update ${out} --template cyanprint/update-example --registry ${registry} --trust-fixture local-registry --headless --answers examples/templates/update-v2/answers.json --json`,
+      `update ${floatOut} --registry ${registry} --trust-fixture local-registry --headless --answers examples/templates/update-v2/answers.json --json`,
     );
-    expect(await diffAgainstExpected(out, `${expected}/registry-update`)).toEqual([]);
+    expect(await Bun.file(join(floatOut, 'README.md')).text()).toContain('Version two.');
+    const floatState = await parseState(floatOut);
+    expect(floatState.templates.find(template => template.name === 'update-example')?.version).toBe(String(newVersion));
   },
   T,
 );
 
 test(
-  'case 8: templates update when the new version deletes files (and conflicts are preserved)',
+  'case 8: templates update when the new version deletes files (and conflicts stay in-file)',
   async () => {
+    // Stage a modified template-resolver-1 and push it under the SAME name: the bumped
+    // version deletes from-1.txt and rewrites force_conflict.txt.
+    const oldVersion = await latestVersion('template', 'cyanprint', 'template-resolver-1');
+    const staged = await stageFixture('examples/templates/template-resolver-1', join(tmp, 'push-stage'));
+    await rm(join(staged, 'template/from-1.txt'));
+    await writeFile(join(staged, 'template/force_conflict.txt'), 'conflict updated\n', 'utf8');
+    await cyan(`push ${staged} --registry ${registry} --json`, publish);
+    const newVersion = oldVersion + 1;
+
+    // Clean project: the update applies the deletion and the rewrite without conflicts.
     const out = join(tmp, 'resolver-update');
     await resetDir(out);
     await cyan(
-      `create cyanprint/template-resolver-1 --registry ${registry} --trust-fixture local-registry --out ${out} --headless --json`,
+      `create cyanprint/template-resolver-1@${oldVersion} --registry ${registry} --trust-fixture local-registry --out ${out} --headless --json`,
     );
+    expect(await Bun.file(join(out, 'from-1.txt')).exists()).toBe(true);
     await cyan(
-      `update ${out} --template cyanprint/template-resolver-2 --registry ${registry} --trust-fixture local-registry --headless --json`,
+      `update ${out} --template cyanprint/template-resolver-1@${newVersion} --registry ${registry} --trust-fixture local-registry --headless --json`,
     );
     expect(await diffAgainstExpected(out, `${expected}/resolver-update`)).toEqual([]);
+    expect(await Bun.file(join(out, 'from-1.txt')).exists()).toBe(false);
 
+    // User-edited project: the genuine conflict stays IN-FILE; the deletion still applies.
     const conflictOut = join(tmp, 'resolver-conflict');
     await resetDir(conflictOut);
     await cyan(
-      `create cyanprint/template-resolver-1 --registry ${registry} --trust-fixture local-registry --out ${conflictOut} --headless --json`,
+      `create cyanprint/template-resolver-1@${oldVersion} --registry ${registry} --trust-fixture local-registry --out ${conflictOut} --headless --json`,
     );
     await writeFile(join(conflictOut, 'force_conflict.txt'), 'user edit\n', 'utf8');
-    await cyanExpectingFailure(
-      `update ${conflictOut} --template cyanprint/template-resolver-2 --registry ${registry} --trust-fixture local-registry --headless --json`,
+    const failure = await cyanExpectingFailure(
+      `update ${conflictOut} --template cyanprint/template-resolver-1@${newVersion} --registry ${registry} --trust-fixture local-registry --headless --json`,
     );
-    expect(await Bun.file(join(conflictOut, '.cyan_conflicts/force_conflict.txt.target')).exists()).toBe(true);
+    const report = JSON.parse(failure) as { status: string; conflicts: string[] };
+    expect(report.status).toBe('conflict');
+    expect(report.conflicts).toEqual(['force_conflict.txt']);
+    const conflicted = await Bun.file(join(conflictOut, 'force_conflict.txt')).text();
+    expect(conflicted).toContain('<<<<<<<');
+    expect(conflicted).toContain('user edit');
+    expect(conflicted).toContain('conflict updated');
+    expect(await Bun.file(join(conflictOut, 'from-1.txt')).exists()).toBe(false);
   },
   T,
 );
 
 test(
-  'case 10: templates pass forced answers to dependencies (group presets prefill child answers)',
+  'case 10: templates pass forced answers to dependencies (embedded answers prefill child prompts)',
   async () => {
     const out = join(tmp, 'group-create');
     await resetDir(out);
@@ -520,7 +702,8 @@ test(
       `create cyanprint/basic-group --registry ${registry} --trust-fixture local-registry --out ${out} --headless --json`,
     );
     expect(await diffAgainstExpected(out, `${expected}/group-create`)).toEqual([]);
-    // The group's presets answered the children's prompts; the shared answer persists in state.
+    // The `templates:` dictionary's embedded answers seeded the children's prompts; the
+    // shared answer bubbles up and persists in state.
     expect(await readState(out)).toContain('name: Group Hello');
   },
   T,
@@ -532,6 +715,7 @@ test(
 
 const triStage = join(tmp, 'tri-artifacts');
 const triOut = join(tmp, 'tri-output');
+let triSuiteV1 = 0;
 
 async function pushTri(version: 'v1' | 'v2'): Promise<void> {
   await resetDir(triStage);
@@ -549,20 +733,33 @@ test(
   'case 9: multiple templates update with a three-way merge after a same-layer merge',
   async () => {
     await pushTri('v1');
+    triSuiteV1 = await latestVersion('template', 'cyanprint', 'tri-suite');
     await resetDir(triOut);
     await cyan(
-      `create cyanprint/tri-suite@1 --registry ${registry} --trust-fixture local-registry --out ${triOut} --headless --json`,
+      `create cyanprint/tri-suite@${triSuiteV1} --registry ${registry} --trust-fixture local-registry --out ${triOut} --headless --json`,
     );
     expect(await diffAgainstExpected(triOut, `${expected}/tri-create`)).toEqual([]);
-    await writeFile(join(triOut, 'shared.txt'), 'user shared edit\n', 'utf8');
+    // keep.txt is identical in v1 and v2 (base == theirs), so the git three-way merge
+    // keeps the user's edit; every other file floats to v2. shared.txt itself is a
+    // SAME-LAYER merge inside each generation: tri-a/b/c all write it and consensus on
+    // cyanprint/tri-merge folds their lines into one file.
+    await writeFile(join(triOut, 'keep.txt'), 'tri keep\nuser keep edit\n', 'utf8');
     await pushTri('v2');
-    await cyan(
-      `update ${triOut} --template cyanprint/tri-suite --registry ${registry} --trust-fixture local-registry --headless --json`,
+    const updateOutput = await cyan(
+      `update ${triOut} --template cyanprint/tri-suite@${triSuiteV1 + 1} --registry ${registry} --trust-fixture local-registry --headless --json`,
     );
-    const shared = await Bun.file(join(triOut, 'shared.txt')).text();
-    for (const line of ['user shared edit', 'a2', 'b2', 'c2']) {
-      expect(shared).toContain(line);
-    }
+    const updateReport = JSON.parse(updateOutput) as {
+      status: string;
+      conflicts: string[];
+      updated: Array<{ ref: string; from: string; to: string }>;
+    };
+    expect(updateReport.status).toBe('done');
+    expect(updateReport.conflicts).toEqual([]);
+    expect(updateReport.updated).toEqual([
+      { ref: 'cyanprint/tri-suite', from: String(triSuiteV1), to: String(triSuiteV1 + 1) },
+    ]);
+    expect(await Bun.file(join(triOut, 'shared.txt')).text()).toBe('a2\nb2\nc2\n');
+    expect(await Bun.file(join(triOut, 'keep.txt')).text()).toBe('tri keep\nuser keep edit\n');
   },
   T,
 );
@@ -570,22 +767,40 @@ test(
 test(
   'case 36: three templates with upgraded resolver merge previous VFS, updated VFS, removals, conflicts, and clean output',
   async () => {
-    // Continues from case 9: full output tree, removal of remove-a.txt, and the upgraded pin.
+    // Continues from case 9: full output tree (clean.txt / conflict.txt at v2, the user's
+    // keep.txt edit intact), removal of remove-a.txt applied, and the upgraded pins.
     expect(await diffAgainstExpected(triOut, `${expected}/tri-update`)).toEqual([]);
-    const state = await readState(triOut);
-    expect(state).toContain('name: tri-merge');
-    expect(state).toContain('version: "2"');
+    expect(await Bun.file(join(triOut, 'remove-a.txt')).exists()).toBe(false);
+    // State files + provenance reflect the updated (theirs) generation: the same-layer
+    // shared.txt merge ran through the consensus resolver at the new version.
+    const state = await parseState(triOut);
+    const shared = state.provenance.find(entry => entry.path === 'shared.txt');
+    expect(shared?.decision).toBe('resolver-merged');
+    expect(shared?.resolver).toBe('cyanprint/tri-merge');
+    expect(shared?.contributors).toHaveLength(3);
+    expect(state.files.some(file => file.path === 'remove-a.txt')).toBe(false);
 
+    // A wholesale user rewrite of shared.txt genuinely diverges from base AND theirs:
+    // the update exits non-zero and leaves standard in-file markers carrying both sides,
+    // while the non-conflicting changes (removal, v2 files) still apply.
     const conflictOut = join(tmp, 'tri-conflict-output');
     await resetDir(conflictOut);
     await cyan(
-      `create cyanprint/tri-suite@1 --registry ${registry} --trust-fixture local-registry --out ${conflictOut} --headless --json`,
+      `create cyanprint/tri-suite@${triSuiteV1} --registry ${registry} --trust-fixture local-registry --out ${conflictOut} --headless --json`,
     );
-    await writeFile(join(conflictOut, 'conflict.txt'), 'user conflict edit\n', 'utf8');
-    await cyanExpectingFailure(
-      `update ${conflictOut} --template cyanprint/tri-suite --registry ${registry} --trust-fixture local-registry --headless --json`,
+    await writeFile(join(conflictOut, 'shared.txt'), 'user shared edit\n', 'utf8');
+    const failure = await cyanExpectingFailure(
+      `update ${conflictOut} --template cyanprint/tri-suite@${triSuiteV1 + 1} --registry ${registry} --trust-fixture local-registry --headless --json`,
     );
-    expect(await Bun.file(join(conflictOut, '.cyan_conflicts/conflict.txt.target')).exists()).toBe(true);
+    const report = JSON.parse(failure) as { status: string; conflicts: string[] };
+    expect(report.status).toBe('conflict');
+    expect(report.conflicts).toEqual(['shared.txt']);
+    const conflicted = await Bun.file(join(conflictOut, 'shared.txt')).text();
+    for (const piece of ['<<<<<<<', 'user shared edit', 'a2', 'b2', 'c2']) {
+      expect(conflicted).toContain(piece);
+    }
+    expect(await Bun.file(join(conflictOut, 'remove-a.txt')).exists()).toBe(false);
+    expect(await Bun.file(join(conflictOut, 'conflict.txt')).text()).toBe('generated conflict v2\n');
   },
   T,
 );
@@ -593,7 +808,7 @@ test(
 // ── composition features ──────────────────────────────────────────────────────
 
 test(
-  'case 37: parent presets cascade answers and deterministic state to descendants; outermost ancestor wins',
+  'case 37: embedded dependency config seeds direct children; deep influence flows via shared answer keys',
   async () => {
     for (const template of ['cascade-c', 'cascade-b', 'cascade-a']) {
       const staged = await stageFixture(`${fixtures}/cascade/${template}`, join(tmp, 'push-stage'));
@@ -604,8 +819,12 @@ test(
     await cyan(
       `create cyanprint/cascade-a --registry ${registry} --trust-fixture local-registry --out ${out} --headless --json`,
     );
-    // Root A's preset beats B's for the grandchild, and A's deterministic seed reached state.
+    // A configures ONLY its direct child B (answers.grand + deterministicState.seed);
+    // B configures ONLY its direct child C (answers.parent). C's `grand` prompt is
+    // answered anyway because A's answer entered the shared bag and flowed down — deep
+    // influence happens via shared answer keys, not direct grandchild targeting.
     expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('grand=FROM_A\n');
+    expect(await Bun.file(join(out, 'PARENT.md')).text()).toBe('parent=FROM_B\n');
     expect(await readState(out)).toContain('seed: A_SEED');
   },
   T,
@@ -634,13 +853,18 @@ test(
     const output = await cyan(`trace examples/template-groups/basic --headless --json`);
     const trace = JSON.parse(output) as {
       tree: { ref: string; children: unknown[] };
-      provenance: Array<{ path: string; source: string; decision: string }>;
+      provenance: Array<{ path: string; source: string; decision: string; segment?: string }>;
       diffs: unknown[];
     };
     expect(trace.tree.ref).toBe('cyanprint/basic-group');
     expect(trace.tree.children).toHaveLength(2);
     expect(trace.provenance.length).toBeGreaterThan(0);
-    expect(trace.provenance.some(entry => entry.decision === 'lww-override')).toBe(true);
+    // Exactly one merge conflict in the composition: hello and with-artifacts both write
+    // README.md with no consensus resolver — a tier-2 (dependency) LWW override.
+    const overrides = trace.provenance.filter(entry => entry.decision === 'lww-override');
+    expect(overrides).toHaveLength(1);
+    expect(overrides[0]?.path).toBe('README.md');
+    expect(overrides[0]?.segment).toBe('dependency');
     expect(trace.diffs.length).toBeGreaterThan(0);
   },
   T,

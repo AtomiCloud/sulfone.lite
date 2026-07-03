@@ -1,3 +1,4 @@
 # Resolver2 - Line Merger
 
-Merges conflicting text by preserving prior, current, and target content in order.
+Concatenates every variation of a conflicting path in one call, preserving layer
+order (lowest layer first).

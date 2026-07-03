@@ -1,3 +1,3 @@
 # Merge a Resolver
 
-Folds candidate lines into one deduplicated file.
+Merges every candidate's lines into one deduplicated, sorted file in a single call.

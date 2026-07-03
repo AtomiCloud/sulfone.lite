@@ -84,25 +84,68 @@ export type VfsFile = {
  */
 export const CYAN_METADATA_PATHS = {
   stateFile: '.cyan_state.yaml',
-  conflictsPrefix: '.cyan_conflicts/',
 } as const;
 
 export function isCyanMetadataPath(relativePath: string): boolean {
   const normalized = relativePath.split(/[\\/]+/).join('/');
-  return normalized === CYAN_METADATA_PATHS.stateFile || normalized.startsWith(CYAN_METADATA_PATHS.conflictsPrefix);
+  return normalized === CYAN_METADATA_PATHS.stateFile;
 }
 
-export type GeneratedState = {
-  cyanprint: 4;
-  template: {
-    owner: string;
-    name: string;
-    version: string;
-    source: string;
-  };
+/** Where a merged file variation came from. */
+export type FileOrigin = {
+  /** Contributing template as `owner/name@version`. */
+  template: string;
+  /** Order within the resolution scope. */
+  layer: number;
+  /** Set for tier-1 (processor) variations: the source processor and its invocation index. */
+  processor?: { ref: string; invocation: number };
+};
+
+export type ProvenanceDecision = 'added' | 'resolver-merged' | 'lww-override';
+export type ProvenanceSegment = 'processor' | 'dependency' | 'sibling';
+
+/** One merge decision for a path — the durable record of the three-tier resolution. */
+export type Provenance = {
+  path: string;
+  /** Winning template ref. */
+  source: string;
+  decision: ProvenanceDecision;
+  /** Absent for 'added'. */
+  segment?: ProvenanceSegment;
+  /** Resolver ref actually invoked (resolver-merged only). */
+  resolver?: string;
+  /** Every contributing variation's origin. Absent for 'added'. */
+  contributors?: FileOrigin[];
+};
+
+export type TemplateHistoryEntry = {
+  version: string;
+  time: string;
   answers: Answers;
   deterministicState: Record<string, unknown>;
-  files: Array<{ path: string; sha256: string; content?: string; bytesBase64?: string }>;
+};
+
+/** One installed template in a project. Projects track N templates (multi-install). */
+export type InstalledTemplate = {
+  owner: string;
+  name: string;
+  version: string;
+  source: string;
+  active: boolean;
+  installedAt: string;
+  /** Version history, oldest first; the last entry is the current install. */
+  history: TemplateHistoryEntry[];
   artifacts: Array<{ kind: string; owner: string; name: string; version: string; integrity: string }>;
-  conflicts?: Array<{ path: string; reason: string }>;
+};
+
+/**
+ * The `.cyan_state.yaml` shape. Stores answers + versions + deterministic state per
+ * template — never old output. `files` records paths + hashes of the last generation;
+ * `provenance` is the persisted record of every three-tier merge decision.
+ */
+export type GeneratedState = {
+  cyanprint: 4;
+  templates: InstalledTemplate[];
+  files: Array<{ path: string; sha256: string }>;
+  provenance: Provenance[];
 };

@@ -6,5 +6,14 @@ bundledEntry: cyan.ts
 processors:
   - cyan/default
 resolvers:
-  - cyanprint/resolver1
-  - cyanprint/resolver2
+  - ref: cyanprint/resolver2
+    files: ['.gitignore']
+  - ref: cyanprint/resolver1
+    config: { arrayStrategy: concat }
+    files: ['c1.json']
+  - ref: cyanprint/resolver1
+    config: { arrayStrategy: replace }
+    files: ['c2.json']
+  - ref: cyanprint/resolver1
+    config: { arrayStrategy: distinct }
+    files: ['c3.json']

@@ -1,49 +1,30 @@
-import { dirname } from 'node:path';
-import { mkdir } from 'node:fs/promises';
-
-type ResolverInput = {
-  inputDirs: Array<{ dir: string; origin: { template: string; layer: number } }>;
-  outputDir: string;
-  config?: unknown;
+// Matches the vendored @cyanprint/sdk resolver contract: one call per conflicting
+// path, carrying every variation of that path (with origins) at once.
+type FileOrigin = {
+  template: string;
+  layer: number;
+  processor?: { ref: string; invocation: number };
 };
 
-export async function resolver(input: ResolverInput): Promise<void> {
-  const path = configPath(input.config);
-  const parts = (
-    await Promise.all(
-      [...input.inputDirs]
-        .sort(
-          (left, right) =>
-            left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
-        )
-        .map(async entry => await readCandidate(entry.dir, path)),
-    )
-  )
-    .filter((content): content is string => Boolean(content?.trim()))
-    .map(content => content.trimEnd());
-  await writeOutput(input.outputDir, path, `${parts.join('\n')}\n`);
-}
+type ResolvedFile = { path: string; content: string; origin: FileOrigin };
 
-async function readCandidate(dir: string, path: string): Promise<string> {
-  return await Bun.file(`${dir}/${path}`)
-    .text()
-    .catch(() => '');
-}
+type ResolverInput = { config: Record<string, unknown>; files: ResolvedFile[] };
 
-function configPath(config: unknown): string {
-  if (
-    config &&
-    typeof config === 'object' &&
-    !Array.isArray(config) &&
-    typeof (config as { path?: unknown }).path === 'string'
-  ) {
-    return (config as { path: string }).path;
+type ResolverOutput = { path: string; content: string };
+
+/** Concatenates every non-empty variation of the conflicting path in layer order. */
+export function resolver(input: ResolverInput): ResolverOutput {
+  const sorted = [...input.files].sort(
+    (left, right) =>
+      left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
+  );
+  const first = sorted[0];
+  if (!first) {
+    throw new Error('resolver2 was invoked with no variations');
   }
-  return 'output.txt';
-}
-
-async function writeOutput(outputDir: string, path: string, content: string): Promise<void> {
-  const outputPath = `${outputDir}/${path}`;
-  await mkdir(dirname(outputPath), { recursive: true });
-  await Bun.write(outputPath, content);
+  const parts = sorted
+    .map(file => file.content)
+    .filter(content => Boolean(content.trim()))
+    .map(content => content.trimEnd());
+  return { path: first.path, content: `${parts.join('\n')}\n` };
 }

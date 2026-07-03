@@ -5,5 +5,5 @@ name: dup-group
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/dup-x
-  - cyanprint/dup-y
+  cyanprint/dup-x: {}
+  cyanprint/dup-y: {}

@@ -5,4 +5,3 @@ name: __NAME__
 description: __DESCRIPTION__
 entry: src/index.ts
 bundledEntry: dist/index.js
-api: 2

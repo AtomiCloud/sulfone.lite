@@ -129,8 +129,38 @@ export async function executeCyanScript(
     const ctx = makePromptContext(recordingPromptAdapter(answers, promptAdapter), answers, deterministicState, {
       sessionPath: session.path,
     });
-    return await script(ctx.prompt, ctx);
+    const output = await script(ctx.prompt, ctx);
+    assertStaticComposition(output);
+    return output;
   });
+}
+
+// Composition is static: dependencies are declared only in cyan.yaml. Old scripts that
+// return `templates` (dynamic composition) or `resolvers` (use-time resolver config)
+// must fail loudly, not be silently ignored.
+function assertStaticComposition(output: unknown): void {
+  if (!output || typeof output !== 'object') {
+    return;
+  }
+  const record = output as Record<string, unknown>;
+  if (record.templates !== undefined) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'dynamic_templates_removed',
+        'templates cannot be returned from cyan.ts; declare them in cyan.yaml',
+      ),
+    );
+  }
+  if (record.resolvers !== undefined) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'script_resolvers_removed',
+        'resolvers cannot be returned from cyan.ts; declare them (with config and files globs) in cyan.yaml under resolvers:',
+      ),
+    );
+  }
 }
 
 type TemplateFileGlobOptions = {

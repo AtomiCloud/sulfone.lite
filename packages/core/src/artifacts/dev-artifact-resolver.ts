@@ -3,26 +3,28 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import type { ArtifactBundleRef } from '@cyanprint/artifact-runner';
-import type { ArtifactDependency, CyanArtifactUse } from '@cyanprint/contracts';
+import type { ArtifactDependency, ArtifactKind } from '@cyanprint/contracts';
 import { parseCyanManifest } from '@cyanprint/contracts';
 import { sha256 } from '../util';
 
 export async function resolveDevArtifactBundle(args: {
   workspaceRoot: string;
   templateDir?: string;
-  dependency: ArtifactDependency | CyanArtifactUse;
+  /** The artifact kind, implied by the declaration context the dependency came from. */
+  kind: ArtifactKind;
+  dependency: ArtifactDependency;
   defaultOwner?: string;
   localFallback?: boolean;
 }): Promise<ArtifactBundleRef> {
   if (args.templateDir) {
-    const cached = await readCachedArtifactBundle(args.templateDir, args.dependency, args.defaultOwner);
+    const cached = await readCachedArtifactBundle(args.templateDir, args.kind, args.dependency, args.defaultOwner);
     if (cached) {
       return cached;
     }
   }
   if (args.localFallback === false || process.env.CYANPRINT_DISABLE_LOCAL_ARTIFACT_FALLBACK === '1') {
     throw new Error(
-      `Local artifact fallback is disabled and no cached bundle was found for ${args.dependency.kind}:${args.dependency.owner ?? args.defaultOwner ?? 'local'}:${args.dependency.name}`,
+      `Local artifact fallback is disabled and no cached bundle was found for ${args.kind} ${args.dependency.owner ?? args.defaultOwner ?? 'local'}/${args.dependency.name}`,
     );
   }
   const artifactsRoot = await findArtifactsRoot(
@@ -38,7 +40,7 @@ export async function resolveDevArtifactBundle(args: {
     const artifactDir = join(artifactsRoot, entry.name);
     const manifest = parseCyanManifest(YAML.parse(await readFile(join(artifactDir, 'cyan.yaml'), 'utf8'))).manifest;
     if (
-      manifest.kind === args.dependency.kind &&
+      manifest.kind === args.kind &&
       manifest.name === args.dependency.name &&
       manifest.owner === (args.dependency.owner ?? args.defaultOwner ?? manifest.owner) &&
       (!args.dependency.version || manifest.version === args.dependency.version)
@@ -48,12 +50,11 @@ export async function resolveDevArtifactBundle(args: {
         dependency: { kind: manifest.kind, owner: manifest.owner, name: manifest.name, version: manifest.version },
         runtimeFile,
         integrity: sha256(await readFile(runtimeFile)),
-        api: manifest.api,
       };
     }
   }
   throw new Error(
-    `Unable to resolve dev artifact bundle for ${args.dependency.kind}:${args.dependency.owner ?? 'local'}:${args.dependency.name}`,
+    `Unable to resolve dev artifact bundle for ${args.kind} ${args.dependency.owner ?? 'local'}/${args.dependency.name}`,
   );
 }
 
@@ -85,7 +86,8 @@ async function findArtifactsRoot(...starts: Array<string | undefined>): Promise<
 
 async function readCachedArtifactBundle(
   templateDir: string,
-  dependency: ArtifactDependency | CyanArtifactUse,
+  kind: ArtifactKind,
+  dependency: ArtifactDependency,
   defaultOwner = 'local',
 ): Promise<ArtifactBundleRef | undefined> {
   const indexPath = join(templateDir, '.cyan_artifact_bundles.json');
@@ -96,15 +98,16 @@ async function readCachedArtifactBundle(
   const index = JSON.parse(raw) as {
     bundles?: Array<{
       key: string;
-      dependency: ArtifactDependency;
+      dependency: ArtifactBundleRef['dependency'];
       runtimeFile: string;
       integrity?: string;
-      api?: 1 | 2;
     }>;
   };
   const owner = dependency.owner ?? defaultOwner;
-  const exactKey = `${dependency.kind}:${owner}:${dependency.name}:${dependency.version ?? ''}`;
-  const unversionedKey = `${dependency.kind}:${owner}:${dependency.name}`;
+  // Bundle index keys are registry-internal and keep the kind prefix; the kind here comes
+  // from the declaration context, never from the dependency itself.
+  const exactKey = `${kind}:${owner}:${dependency.name}:${dependency.version ?? ''}`;
+  const unversionedKey = `${kind}:${owner}:${dependency.name}`;
   const match = index.bundles?.find(bundle => {
     if (bundle.key === exactKey || (!dependency.version && bundle.key === unversionedKey)) {
       return true;
@@ -112,8 +115,8 @@ async function readCachedArtifactBundle(
     if (dependency.version) {
       return false;
     }
-    const [kind, bundleOwner, name] = bundle.key.split(':');
-    return kind === dependency.kind && bundleOwner === owner && name === dependency.name;
+    const [bundleKind, bundleOwner, name] = bundle.key.split(':');
+    return bundleKind === kind && bundleOwner === owner && name === dependency.name;
   });
   if (!match) {
     return undefined;
@@ -122,6 +125,5 @@ async function readCachedArtifactBundle(
     dependency: match.dependency,
     runtimeFile: match.runtimeFile,
     integrity: match.integrity,
-    api: match.api,
   };
 }

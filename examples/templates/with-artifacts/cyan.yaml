@@ -9,4 +9,5 @@ processors:
 plugins:
   - cyanprint/footer
 resolvers:
-  - cyanprint/keep-user
+  - ref: cyanprint/keep-user
+    files: ['README.md']

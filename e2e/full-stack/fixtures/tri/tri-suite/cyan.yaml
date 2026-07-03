@@ -5,6 +5,6 @@ name: tri-suite
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/tri-a
-  - cyanprint/tri-b
-  - cyanprint/tri-c
+  cyanprint/tri-a: {}
+  cyanprint/tri-b: {}
+  cyanprint/tri-c: {}

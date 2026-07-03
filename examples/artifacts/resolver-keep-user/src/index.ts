@@ -1,40 +1,29 @@
-import { dirname } from 'node:path';
-import { mkdir } from 'node:fs/promises';
-
-type ResolverInput = {
-  inputDirs: Array<{ dir: string; origin: { template: string; layer: number } }>;
-  outputDir: string;
-  config?: unknown;
+// Matches the vendored @cyanprint/sdk resolver contract: one call per conflicting
+// path, carrying every variation of that path (with origins) at once.
+type FileOrigin = {
+  template: string;
+  layer: number;
+  processor?: { ref: string; invocation: number };
 };
 
-export async function resolver(input: ResolverInput): Promise<void> {
-  const path = configPath(input.config);
-  const current = input.inputDirs.find(entry => entry.origin.template === 'current');
-  const selected = current ?? [...input.inputDirs].sort((left, right) => right.origin.layer - left.origin.layer)[0];
-  const content = selected ? await readCandidate(selected.dir, path) : '';
-  await writeOutput(input.outputDir, path, content);
-}
+type ResolvedFile = { path: string; content: string; origin: FileOrigin };
 
-async function readCandidate(dir: string, path: string): Promise<string> {
-  return await Bun.file(`${dir}/${path}`)
-    .text()
-    .catch(() => '');
-}
+type ResolverInput = { config: Record<string, unknown>; files: ResolvedFile[] };
 
-function configPath(config: unknown): string {
-  if (
-    config &&
-    typeof config === 'object' &&
-    !Array.isArray(config) &&
-    typeof (config as { path?: unknown }).path === 'string'
-  ) {
-    return (config as { path: string }).path;
+type ResolverOutput = { path: string; content: string };
+
+/**
+ * Keeps the highest layer's content. Resolvers only merge template-vs-template
+ * output during layering — updates use a git three-way merge for user edits, so
+ * "keep user" now simply means the most recent layer wins.
+ */
+export function resolver(input: ResolverInput): ResolverOutput {
+  const winner = [...input.files].sort(
+    (left, right) =>
+      right.origin.layer - left.origin.layer || right.origin.template.localeCompare(left.origin.template),
+  )[0];
+  if (!winner) {
+    throw new Error('keep-user was invoked with no variations');
   }
-  return 'output.txt';
-}
-
-async function writeOutput(outputDir: string, path: string, content: string): Promise<void> {
-  const outputPath = `${outputDir}/${path}`;
-  await mkdir(dirname(outputPath), { recursive: true });
-  await Bun.write(outputPath, content);
+  return { path: winner.path, content: winner.content };
 }

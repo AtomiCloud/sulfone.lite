@@ -1,1 +1,0 @@
-{"name":"app","list":[1],"nested":{"a":1}}

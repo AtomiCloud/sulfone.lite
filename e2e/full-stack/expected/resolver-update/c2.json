@@ -1,16 +1,15 @@
 {
   "nodes": {
     "a": {
-      "val": [3],
+      "val": [1],
       "edges": {
-        "b": 0.5,
-        "c": -1
+        "b": 0.5
       }
     },
-    "c": {
-      "val": "target",
+    "b": {
+      "val": null,
       "edges": {}
     }
   },
-  "list": [3]
+  "list": [1]
 }

@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { artifactIntegrity, type ArtifactVersion, type ResolvedDependencyPin } from '@cyanprint/contracts';
+import { isRecord } from '../util';
 
 export type TrustScope = 'organization' | 'template' | 'version';
 
@@ -215,8 +216,4 @@ function isTrustVersion(value: unknown): value is TrustStore['versions'][number]
     isString(value.integrity) &&
     isString(value.pinsFingerprint)
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

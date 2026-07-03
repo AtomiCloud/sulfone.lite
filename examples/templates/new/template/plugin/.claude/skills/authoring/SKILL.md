@@ -5,7 +5,9 @@ description: Use when writing or editing this CyanPrint plugin (post-processing 
 
 # Authoring a CyanPrint plugin
 
-A plugin runs over the merged output folder and may run shell commands. Local-first, in a temp directory.
+Search the registry before designing — `cyanprint search <term>` — reuse what exists, and name/describe this plugin so others searching for the need can find it.
+
+A plugin runs over the template's own layer after its processor outputs are merged (tier-1 resolution) and may run shell commands. Local-first, in a temp directory.
 
 ## Signature
 

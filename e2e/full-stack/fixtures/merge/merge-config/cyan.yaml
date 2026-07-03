@@ -5,5 +5,5 @@ name: merge-config
 bundledEntry: cyan.ts
 
 templates:
-  - cyanprint/merge-la1
-  - cyanprint/merge-la3
+  cyanprint/merge-la1: {}
+  cyanprint/merge-la3: {}

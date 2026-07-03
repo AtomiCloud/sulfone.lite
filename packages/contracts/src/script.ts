@@ -66,8 +66,11 @@ export type CyanPromptContext = {
   };
 };
 
+/**
+ * A processor or plugin use returned from cyan.ts. The artifact kind is implied by the
+ * list the use sits in (`processors` or `plugins`) — there is no `kind` field.
+ */
 export type CyanArtifactUse = {
-  kind?: 'processor' | 'plugin' | 'resolver' | 'template';
   owner?: string;
   name: string;
   version?: string;
@@ -81,11 +84,14 @@ export type CyanCommandIntent = {
   allow?: boolean;
 };
 
+/**
+ * The cyan.ts return shape. Composition is static: templates are declared only in
+ * cyan.yaml's `templates:` dictionary, and resolvers only in its `resolvers:` list —
+ * returning either from cyan.ts is a hard error.
+ */
 export type CyanOutput = {
   processors?: CyanArtifactUse[];
   plugins?: CyanArtifactUse[];
-  resolvers?: CyanArtifactUse[];
-  templates?: CyanArtifactUse[];
   commands?: CyanCommandIntent[];
 };
 

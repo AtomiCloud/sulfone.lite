@@ -159,21 +159,16 @@ describe('pin integrity cache bundled artifact', () => {
     }
   });
 
-  test('lets resolvers fold input directories and write the resolved output file', async () => {
+  test('invokes a resolver ONCE with every variation of the conflicting path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
     const runtimeFile = join(dir, 'resolver.ts');
     try {
       await writeFile(
         runtimeFile,
         [
-          'export async function resolver(input) {',
-          '  const parts = [];',
-          '  for (const source of input.inputDirs) {',
-          '    const main = await Bun.file(source.dir + "/" + input.config.path).text();',
-          '    const sidecar = await Bun.file(source.dir + "/" + source.origin.template + ".txt").text();',
-          '    parts.push(main + ":" + sidecar);',
-          '  }',
-          '  await Bun.write(input.outputDir + "/" + input.config.path, parts.join("|"));',
+          'export function resolver(input) {',
+          '  const parts = input.files.map(file => file.origin.template + ":" + file.content);',
+          '  return { path: input.files[0].path, content: parts.join(input.config.separator ?? "|") };',
           '}',
           '',
         ].join('\n'),
@@ -181,35 +176,19 @@ describe('pin integrity cache bundled artifact', () => {
       );
       const output = await invokeResolver(
         {
-          dependency: { kind: 'resolver', owner: 'cyanprint', name: 'folder-fold', version: '1' },
+          dependency: { kind: 'resolver', owner: 'cyanprint', name: 'concat-all', version: '1' },
           runtimeFile,
           integrity: sha256(await Bun.file(runtimeFile).text()),
         },
         {
           files: [
-            {
-              path: 'shared.txt',
-              content: 'left',
-              origin: { template: 'a', layer: 0 },
-              files: [
-                { path: 'shared.txt', content: 'left' },
-                { path: 'a.txt', content: 'side-a' },
-              ],
-            },
-            {
-              path: 'shared.txt',
-              content: 'right',
-              origin: { template: 'b', layer: 1 },
-              files: [
-                { path: 'shared.txt', content: 'right' },
-                { path: 'b.txt', content: 'side-b' },
-              ],
-            },
+            { path: 'shared.txt', content: 'left', origin: { template: 'a', layer: 0 } },
+            { path: 'shared.txt', content: 'right', origin: { template: 'b', layer: 1 } },
           ],
-          config: { path: 'shared.txt' },
+          config: { separator: '|' },
         },
       );
-      expect(output).toBe('left:side-a|right:side-b');
+      expect(output).toEqual({ path: 'shared.txt', content: 'a:left|b:right' });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -398,66 +377,7 @@ describe('pin integrity cache bundled artifact', () => {
     }
   });
 
-  test('rejects legacy resolver returns after sandbox escapes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
-    const runtimeFile = join(dir, 'resolver.ts');
-    try {
-      await writeFile(
-        runtimeFile,
-        [
-          'Object.defineProperty(globalThis, Symbol.for("cyanprint.resolver"), {',
-          '  configurable: true,',
-          '  value: async input => {',
-          '  await Bun.write(input.outputDir + "/../escaped.txt", "escape");',
-          '  return "resolved";',
-          '  },',
-          '});',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await expect(
-        invokeResolver(
-          {
-            dependency: { kind: 'resolver', owner: 'cyanprint', name: 'legacy-escape', version: '1' },
-            runtimeFile,
-            integrity: sha256(await Bun.file(runtimeFile).text()),
-          },
-          {
-            files: [{ path: 'shared.txt', content: 'input', origin: { template: 'a', layer: 0 } }],
-            config: { path: 'shared.txt' },
-          },
-        ),
-      ).rejects.toThrow('unsafe output path');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('requires void resolvers to write the configured output file', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
-    const runtimeFile = join(dir, 'resolver.ts');
-    try {
-      await writeFile(runtimeFile, 'export function resolver(input) {}\n', 'utf8');
-      await expect(
-        invokeResolver(
-          {
-            dependency: { kind: 'resolver', owner: 'cyanprint', name: 'missing-output', version: '1' },
-            runtimeFile,
-            integrity: sha256(await Bun.file(runtimeFile).text()),
-          },
-          {
-            files: [{ path: 'shared.txt', content: 'fallback', origin: { template: 'a', layer: 0 } }],
-            config: { path: 'shared.txt' },
-          },
-        ),
-      ).rejects.toThrow('did not write output file: shared.txt');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects normal exported resolvers that return content instead of writing output', async () => {
+  test('rejects resolvers that do not return { path, content }', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
     const runtimeFile = join(dir, 'resolver.ts');
     try {
@@ -471,119 +391,50 @@ describe('pin integrity cache bundled artifact', () => {
           },
           {
             files: [{ path: 'shared.txt', content: 'fallback', origin: { template: 'a', layer: 0 } }],
-            config: { path: 'shared.txt' },
+            config: {},
           },
         ),
-      ).rejects.toThrow('must write output files instead of returning content');
+      ).rejects.toThrow('must return { path, content }');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test('rejects resolver output files that escape the output directory', async () => {
+  test('supports resolvers registered through the cyan-sdk global hook', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
     const runtimeFile = join(dir, 'resolver.ts');
     try {
       await writeFile(
         runtimeFile,
         [
-          'export async function resolver(input) {',
-          '  await Bun.write(input.outputDir + "/../escaped.txt", "bad");',
-          '}',
+          'Object.defineProperty(globalThis, Symbol.for("cyanprint.resolver"), {',
+          '  configurable: true,',
+          '  value: input => ({',
+          '    path: input.files[0].path,',
+          '    content: input.files.map(file => file.content).join("+"),',
+          '  }),',
+          '});',
           '',
         ].join('\n'),
         'utf8',
       );
-      await expect(
-        invokeResolver(
-          {
-            dependency: { kind: 'resolver', owner: 'cyanprint', name: 'escape-file', version: '1' },
-            runtimeFile,
-            integrity: sha256(await Bun.file(runtimeFile).text()),
-          },
-          {
-            files: [{ path: 'shared.txt', content: 'fallback', origin: { template: 'a', layer: 0 } }],
-            config: { path: '../escaped.txt' },
-          },
-        ),
-      ).rejects.toThrow('unsafe output path');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects resolver temp root replacement before reading folder output', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
-    const escapeDir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-escape-'));
-    const runtimeFile = join(dir, 'resolver.ts');
-    try {
-      await writeFile(
-        runtimeFile,
-        [
-          'import { dirname } from "node:path";',
-          'import { rm, symlink } from "node:fs/promises";',
-          'export async function resolver(input) {',
-          '  const root = dirname(input.outputDir);',
-          `  await rm(root, { recursive: true, force: true });`,
-          `  await symlink(${JSON.stringify(escapeDir)}, root);`,
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
+      const output = await invokeResolver(
+        {
+          dependency: { kind: 'resolver', owner: 'cyanprint', name: 'registered', version: '1' },
+          runtimeFile,
+          integrity: sha256(await Bun.file(runtimeFile).text()),
+        },
+        {
+          files: [
+            { path: 'shared.txt', content: 'a', origin: { template: 'a', layer: 0 } },
+            { path: 'shared.txt', content: 'b', origin: { template: 'b', layer: 1 } },
+          ],
+          config: {},
+        },
       );
-      await expect(
-        invokeResolver(
-          {
-            dependency: { kind: 'resolver', owner: 'cyanprint', name: 'root-escape', version: '1' },
-            runtimeFile,
-            integrity: sha256(await Bun.file(runtimeFile).text()),
-          },
-          {
-            files: [{ path: 'shared.txt', content: 'fallback', origin: { template: 'a', layer: 0 } }],
-            config: { path: 'shared.txt' },
-          },
-        ),
-      ).rejects.toThrow('unsafe temp root');
+      expect(output).toEqual({ path: 'shared.txt', content: 'a+b' });
     } finally {
       await rm(dir, { recursive: true, force: true });
-      await rm(escapeDir, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects resolver output directory symlink escapes before reading folder output', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
-    const escapeDir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-escape-'));
-    const runtimeFile = join(dir, 'resolver.ts');
-    try {
-      await mkdir(escapeDir, { recursive: true });
-      await writeFile(
-        runtimeFile,
-        [
-          'import { rm, symlink } from "node:fs/promises";',
-          'export async function resolver(input) {',
-          `  await rm(input.outputDir, { recursive: true, force: true });`,
-          `  await symlink(${JSON.stringify(escapeDir)}, input.outputDir);`,
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await expect(
-        invokeResolver(
-          {
-            dependency: { kind: 'resolver', owner: 'cyanprint', name: 'escape', version: '1' },
-            runtimeFile,
-            integrity: sha256(await Bun.file(runtimeFile).text()),
-          },
-          {
-            files: [{ path: 'shared.txt', content: 'fallback', origin: { template: 'a', layer: 0 } }],
-            config: { path: 'shared.txt' },
-          },
-        ),
-      ).rejects.toThrow('unsafe output directory');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-      await rm(escapeDir, { recursive: true, force: true });
     }
   });
 

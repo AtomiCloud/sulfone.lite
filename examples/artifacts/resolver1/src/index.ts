@@ -1,19 +1,24 @@
-import { dirname } from 'node:path';
-import { mkdir } from 'node:fs/promises';
-
 type Strategy = 'concat' | 'replace' | 'distinct';
 
-type ResolverInput = {
-  inputDirs: Array<{ dir: string; origin: { template: string; layer: number } }>;
-  outputDir: string;
-  config?: unknown;
+// Matches the vendored @cyanprint/sdk resolver contract: one call per conflicting
+// path, carrying every variation of that path (with origins) at once.
+type FileOrigin = {
+  template: string;
+  layer: number;
+  processor?: { ref: string; invocation: number };
 };
 
-function configStrategy(config: unknown): Strategy {
-  if (!config || typeof config !== 'object' || !('arrayStrategy' in config)) {
+type ResolvedFile = { path: string; content: string; origin: FileOrigin };
+
+type ResolverInput = { config: Record<string, unknown>; files: ResolvedFile[] };
+
+type ResolverOutput = { path: string; content: string };
+
+function configStrategy(config: Record<string, unknown>): Strategy {
+  if (!('arrayStrategy' in config)) {
     return 'replace';
   }
-  const strategy = (config as { arrayStrategy?: unknown }).arrayStrategy;
+  const strategy = config.arrayStrategy;
   if (strategy === 'concat' || strategy === 'replace' || strategy === 'distinct') {
     return strategy;
   }
@@ -53,40 +58,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export async function resolver(input: ResolverInput): Promise<void> {
+/** Deep-merges every JSON variation of the conflicting path in layer order. */
+export function resolver(input: ResolverInput): ResolverOutput {
   const strategy = configStrategy(input.config);
-  const path = configPath(input.config);
-  const sorted = [...input.inputDirs].sort(
+  const sorted = [...input.files].sort(
     (left, right) =>
       left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template),
   );
-  const documents = (await Promise.all(sorted.map(async entry => await readCandidate(entry.dir, path))))
+  const first = sorted[0];
+  if (!first) {
+    throw new Error('resolver1 was invoked with no variations');
+  }
+  const documents = sorted
+    .map(file => file.content)
     .filter(content => Boolean(content.trim()))
     .map(content => JSON.parse(content) as unknown);
   const merged = documents.reduce((acc, document) => mergeJson(acc, document, strategy));
-  await writeOutput(input.outputDir, path, `${JSON.stringify(merged, null, 2)}\n`);
-}
-
-async function readCandidate(dir: string, path: string): Promise<string> {
-  return await Bun.file(`${dir}/${path}`)
-    .text()
-    .catch(() => '');
-}
-
-function configPath(config: unknown): string {
-  if (
-    config &&
-    typeof config === 'object' &&
-    !Array.isArray(config) &&
-    typeof (config as { path?: unknown }).path === 'string'
-  ) {
-    return (config as { path: string }).path;
-  }
-  return 'output.txt';
-}
-
-async function writeOutput(outputDir: string, path: string, content: string): Promise<void> {
-  const outputPath = `${outputDir}/${path}`;
-  await mkdir(dirname(outputPath), { recursive: true });
-  await Bun.write(outputPath, content);
+  return { path: first.path, content: `${JSON.stringify(merged, null, 2)}\n` };
 }

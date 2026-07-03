@@ -119,26 +119,11 @@ if (mode === 'all' || mode === 'update') {
     '--json',
   ]);
   await writeFile(join(updateOut, 'README.md'), '# User Edit\n\nKeep me.\n', 'utf8');
-  timings.push(
-    await timed(
-      'update',
-      [
-        'bun',
-        'run',
-        'cyan',
-        '--',
-        'update',
-        updateOut,
-        '--template',
-        'examples/templates/update-v2',
-        '--headless',
-        '--answers',
-        'examples/templates/update-v2/answers.json',
-        '--json',
-      ],
-      { expectFailure: true },
-    ),
-  );
+  // Times the full update machinery: base + theirs regeneration from saved answers plus
+  // the git three-way merge. Local sources re-execute identically, so the run succeeds
+  // and the user edit survives (moving to a new local version is a re-create instead —
+  // see update-user-edits.ts).
+  timings.push(await timed('update', ['bun', 'run', 'cyan', '--', 'update', updateOut, '--headless', '--json']));
 }
 
 const coldMs = timings.find(entry => entry.name === 'create:cold')?.ms;

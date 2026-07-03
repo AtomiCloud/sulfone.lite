@@ -1,10 +1,11 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { Answers } from '@cyanprint/contracts';
+import type { Answers, Provenance } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { createProject } from '../create/create-project';
-import { STATE_FILE } from '../state/generated-state';
-import { comparePaths, exists, mapWithConcurrency, readText, safeJoin, writeText } from '../util';
+import { STATE_FILE, loadGeneratedState } from '../state/generated-state';
+import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, writeText } from '../util';
+import { parseGitignore } from './gitignore';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
 export type TemplateTestReport = {
@@ -67,11 +68,24 @@ export async function runTemplateTest(args: {
   };
 }
 
+/** A per-path merge-decision assertion: every conflict is intentional. */
+type MergeAssertion = {
+  path: string;
+  decision: 'resolver' | 'lww';
+  resolver?: string;
+  segment?: 'processor' | 'dependency' | 'sibling';
+};
+
 type TemplateCase = {
   name: string;
   answers?: string | Answers;
   deterministicState?: string | Record<string, unknown>;
   expected?: string;
+  /** Globs excluded from the folder compare (discouraged; document why per entry). */
+  ignore: string[];
+  merges: MergeAssertion[];
+  /** Escape hatch: accept lww-overrides that are not asserted in merges. Discouraged. */
+  allowUnassertedLww: boolean;
   validations: CommandValidation[];
 };
 
@@ -120,15 +134,22 @@ async function runTemplateCase(
       'deterministicState',
     );
     await createProject({ template: args.template, outDir, headless: true, answers, deterministicState });
+
+    const mergeFailure = await checkMergeAssertions(outDir, testCase);
+    if (mergeFailure) {
+      return { case: { name: testCase.name, status: 'failed', message: mergeFailure }, snapshotUpdated: false };
+    }
+
     if (!testCase.expected) {
       return {
         case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
         snapshotUpdated: false,
       };
     }
-    const actual = await readFileTree(outDir);
+    const excluded = await buildExclusionFilter(outDir, testCase.ignore);
+    const actual = await readFileTree(outDir, excluded);
     if (!args.updateSnapshots) {
-      const diff = compareFileTrees(await readFileTree(testCase.expected), actual);
+      const diff = compareFileTrees(await readFileTree(testCase.expected, excluded), actual);
       if (diff) {
         return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
       }
@@ -145,6 +166,67 @@ async function runTemplateCase(
   } catch (error) {
     return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
   }
+}
+
+/**
+ * Assert the generation's persisted merge decisions (spec: strict by default). Every
+ * `merges:` entry must match a recorded decision, and every `lww-override` in the
+ * persisted provenance must be asserted — an unasserted LWW fails the test unless the
+ * discouraged per-case `allowUnassertedLww` escape hatch is set.
+ */
+async function checkMergeAssertions(outDir: string, testCase: TemplateCase): Promise<string | undefined> {
+  const state = await loadGeneratedState(outDir);
+  const events = state.provenance.filter(event => event.decision !== 'added');
+  for (const assertion of testCase.merges) {
+    if (!events.some(event => assertionMatches(assertion, event))) {
+      return (
+        `merges assertion not satisfied: ${assertion.path} expected ${assertion.decision}` +
+        `${assertion.resolver ? ` via ${assertion.resolver}` : ''}${assertion.segment ? ` in ${assertion.segment}` : ''}`
+      );
+    }
+  }
+  if (!testCase.allowUnassertedLww) {
+    const unasserted = events.filter(
+      event =>
+        event.decision === 'lww-override' && !testCase.merges.some(assertion => assertionMatches(assertion, event)),
+    );
+    if (unasserted.length > 0) {
+      const first = unasserted[0];
+      return (
+        `unasserted lww-override on ${first?.path} (segment: ${first?.segment ?? 'unknown'}). ` +
+        'Attach a resolver or assert the LWW in merges: — every conflict must be intentional.'
+      );
+    }
+  }
+  return undefined;
+}
+
+function assertionMatches(assertion: MergeAssertion, event: Provenance): boolean {
+  if (assertion.path !== event.path) {
+    return false;
+  }
+  const expectedDecision = assertion.decision === 'resolver' ? 'resolver-merged' : 'lww-override';
+  if (event.decision !== expectedDecision) {
+    return false;
+  }
+  if (assertion.segment && event.segment !== assertion.segment) {
+    return false;
+  }
+  if (assertion.resolver) {
+    const actual = event.resolver ?? '';
+    if (actual !== assertion.resolver && !actual.startsWith(`${assertion.resolver}@`)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Exclusion filter: `ignore:` globs plus the output's own root `.gitignore`. */
+async function buildExclusionFilter(outDir: string, ignore: string[]): Promise<(path: string) => boolean> {
+  const ignoreGlobs = ignore.map(pattern => new Bun.Glob(pattern));
+  const gitignorePath = join(outDir, '.gitignore');
+  const gitignore = (await exists(gitignorePath)) ? parseGitignore(await readText(gitignorePath)) : () => false;
+  return (path: string): boolean => ignoreGlobs.some(glob => glob.match(path)) || gitignore(path);
 }
 
 async function readAnswersRecord(path: string): Promise<Record<string, unknown>> {
@@ -187,8 +269,55 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
       `cases[${index}].deterministicState`,
     ),
     expected: readOptionalPath(template, record.expected),
+    ignore: readStringList(record.ignore, `cases[${index}].ignore`),
+    merges: readMergeAssertions(record.merges, `cases[${index}].merges`),
+    allowUnassertedLww: record.allowUnassertedLww === true,
     validations: readCommandValidations(record.validations, `cases[${index}].validations`),
   };
+}
+
+function readStringList(value: unknown, label: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw new Error(`${label} must be a list of non-empty strings.`);
+  }
+  return value as string[];
+}
+
+function readMergeAssertions(value: unknown, label: string): MergeAssertion[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a list.`);
+  }
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== 'object') {
+      throw new Error(`${label}[${index}] must be a mapping.`);
+    }
+    const record = raw as Record<string, unknown>;
+    const path = readRequiredString(record.path, `${label}[${index}].path`);
+    const decision = record.decision;
+    if (decision !== 'resolver' && decision !== 'lww') {
+      throw new Error(`${label}[${index}].decision must be "resolver" or "lww".`);
+    }
+    const segment = record.segment;
+    if (segment !== undefined && segment !== 'processor' && segment !== 'dependency' && segment !== 'sibling') {
+      throw new Error(`${label}[${index}].segment must be processor, dependency, or sibling.`);
+    }
+    const resolver = record.resolver;
+    if (resolver !== undefined && (typeof resolver !== 'string' || resolver.length === 0)) {
+      throw new Error(`${label}[${index}].resolver must be a non-empty string.`);
+    }
+    return {
+      path,
+      decision,
+      resolver: resolver as string | undefined,
+      segment: segment as MergeAssertion['segment'],
+    };
+  });
 }
 
 function rejectRemovedTestField(record: Record<string, unknown>, field: string, label: string): void {
@@ -248,20 +377,16 @@ async function readCaseRecord<T extends Record<string, unknown>>(
   return structuredClone(value) as T;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 type TemplateTestFile = {
   path: string;
   bytes: Uint8Array;
 };
 
-async function readFileTree(root: string): Promise<TemplateTestFile[]> {
+async function readFileTree(root: string, excluded?: (path: string) => boolean): Promise<TemplateTestFile[]> {
   const files: TemplateTestFile[] = [];
   await walk(root, async path => {
     const relativePath = path.slice(root.length + 1);
-    if (relativePath === STATE_FILE) {
+    if (relativePath === STATE_FILE || excluded?.(relativePath)) {
       return;
     }
     files.push({ path: relativePath, bytes: new Uint8Array(await Bun.file(path).arrayBuffer()) });
@@ -288,6 +413,7 @@ async function walk(root: string, visit: (path: string) => Promise<void>): Promi
   }
 }
 
+// Byte-for-byte compare: tree shape AND exact bytes (text and binary).
 function compareFileTrees(expected: TemplateTestFile[], actual: TemplateTestFile[]): string | undefined {
   const expectedMap = new Map(expected.map(file => [file.path, file.bytes]));
   const actualMap = new Map(actual.map(file => [file.path, file.bytes]));

@@ -3,3 +3,9 @@ cases:
     answers:
       name: Basic Group
     expected: expected
+    merges:
+      # hello and with-artifacts both emit README.md; neither declares a resolver,
+      # so the later child (with-artifacts) intentionally wins LWW.
+      - path: README.md
+        decision: lww
+        segment: dependency

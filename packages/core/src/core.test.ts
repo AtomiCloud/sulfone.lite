@@ -1,91 +1,302 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import YAML from 'yaml';
 import {
+  applyMergedTree,
   artifactCacheKey,
   artifactCachePath,
+  buildGeneratedState,
   createProject,
   createTempSession,
   evaluateTrust,
   executeCyanScript,
   exists,
-  mergeFile,
+  gitThreeWayMerge,
+  loadGeneratedState,
+  migrateGeneratedState,
+  resolveCyanCacheDir,
+  resolveLayers,
   runArtifactTests,
   runTemplateTest,
-  resolveCyanCacheDir,
   safeJoin,
   sha256,
   traceProject,
   updateProject,
+  writeGeneratedState,
 } from './index';
 
 const root = process.cwd();
+
+/** Create a FIFO (named pipe) at `path`; used to prove the write guard rejects special files. */
+async function mkfifo(path: string): Promise<void> {
+  const proc = Bun.spawn(['mkfifo', path], { stdout: 'ignore', stderr: 'pipe' });
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`mkfifo failed (${code}): ${await new Response(proc.stderr).text()}`);
+  }
+}
+
+// Keep processor-output cache writes out of the developer's real ~/.cyan cache.
+process.env.CYANPRINT_CACHE_DIR = await mkdtemp(join(tmpdir(), 'cyanprint-test-global-cache-'));
+
+const LONG = 120_000;
+
+// ---------------------------------------------------------------------------
+// Inline artifact runtimes (entry === bundledEntry .ts files)
+// ---------------------------------------------------------------------------
+
+/** Substitutes `__KEY__` markers from `config.vars` over every scoped text file. */
+const varsProcessorRuntime = [
+  "import { mkdir } from 'node:fs/promises';",
+  "import { dirname } from 'node:path';",
+  'export async function processor(input) {',
+  '  const vars = (input.config && input.config.vars) || {};',
+  "  const glob = new Bun.Glob('**/*');",
+  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true, dot: true })) {',
+  "    let text = await Bun.file(input.inputDir + '/' + path).text();",
+  '    for (const [key, value] of Object.entries(vars)) {',
+  "      text = text.replaceAll('__' + key + '__', String(value));",
+  '    }',
+  "    await mkdir(dirname(input.outputDir + '/' + path), { recursive: true });",
+  "    await Bun.write(input.outputDir + '/' + path, text);",
+  '  }',
+  '}',
+  '',
+].join('\n');
+
 const identityProcessorRuntime = [
   "import { mkdir } from 'node:fs/promises';",
   "import { dirname } from 'node:path';",
-  'async function put(path, content) { await mkdir(dirname(path), { recursive: true }); await Bun.write(path, content); }',
   'export async function processor(input) {',
-  '  const glob = new Bun.Glob("**/*");',
-  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true })) {',
-  '    await put(input.outputDir + "/" + path, await Bun.file(input.inputDir + "/" + path).text());',
+  "  const glob = new Bun.Glob('**/*');",
+  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true, dot: true })) {',
+  "    await mkdir(dirname(input.outputDir + '/' + path), { recursive: true });",
+  "    await Bun.write(input.outputDir + '/' + path, await Bun.file(input.inputDir + '/' + path).text());",
   '  }',
   '}',
   '',
 ].join('\n');
-const appendProcessorRuntime = (suffix: string) =>
+
+/** Appends `config.suffix` to every scoped file. */
+const appendProcessorRuntime = [
+  "import { mkdir } from 'node:fs/promises';",
+  "import { dirname } from 'node:path';",
+  'export async function processor(input) {',
+  "  const suffix = (input.config && input.config.suffix) || '';",
+  "  const glob = new Bun.Glob('**/*');",
+  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true, dot: true })) {',
+  "    const text = await Bun.file(input.inputDir + '/' + path).text();",
+  "    await mkdir(dirname(input.outputDir + '/' + path), { recursive: true });",
+  "    await Bun.write(input.outputDir + '/' + path, text + suffix);",
+  '  }',
+  '}',
+  '',
+].join('\n');
+
+const uppercaseProcessorRuntime = [
+  "import { mkdir } from 'node:fs/promises';",
+  "import { dirname } from 'node:path';",
+  'export async function processor(input) {',
+  "  const glob = new Bun.Glob('**/*');",
+  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true, dot: true })) {',
+  "    const text = await Bun.file(input.inputDir + '/' + path).text();",
+  "    await mkdir(dirname(input.outputDir + '/' + path), { recursive: true });",
+  "    await Bun.write(input.outputDir + '/' + path, text.toUpperCase());",
+  '  }',
+  '}',
+  '',
+].join('\n');
+
+const renameProcessorRuntime = [
+  "import { mkdir } from 'node:fs/promises';",
+  "import { dirname } from 'node:path';",
+  'export async function processor(input) {',
+  "  const text = await Bun.file(input.inputDir + '/docs/note.md').text();",
+  "  await mkdir(dirname(input.outputDir + '/docs/renamed.md'), { recursive: true });",
+  "  await Bun.write(input.outputDir + '/docs/renamed.md', text + 'R');",
+  '}',
+  '',
+].join('\n');
+
+const escapeProcessorRuntime =
+  'export async function processor(input) { await Bun.write(input.outputDir + "/../README.md", "bad"); }\n';
+
+const footerPluginRuntime = [
+  'export async function plugin(input) {',
+  "  const readme = await Bun.file(input.outputDir + '/README.md').text();",
+  "  await Bun.write(input.outputDir + '/README.md', readme + 'Generated locally.\\n');",
+  '}',
+  '',
+].join('\n');
+
+/** New resolver API: one call per path with every variation; returns the merged file. */
+const concatResolverRuntime = [
+  'export function resolver(input) {',
+  '  const sorted = [...input.files].sort((left, right) => left.origin.layer - right.origin.layer);',
+  "  return { path: sorted[0].path, content: sorted.map(file => file.content).join('') };",
+  '}',
+  '',
+].join('\n');
+
+/** Echoes every variation's origin (template, layer, processor ref + invocation). */
+const originResolverRuntime = [
+  'export function resolver(input) {',
+  '  const sorted = [...input.files].sort((left, right) => left.origin.layer - right.origin.layer);',
+  '  const lines = sorted.map(',
+  '    file =>',
+  "      file.origin.template + ':' + file.origin.layer +",
+  "      (file.origin.processor ? ':' + file.origin.processor.ref + '#' + file.origin.processor.invocation : ''),",
+  '  );',
+  "  return { path: sorted[0].path, content: lines.join('\\n') + '\\n' };",
+  '}',
+  '',
+].join('\n');
+
+/** Hermetic-cache probe: appends a marker to an absolute side-channel counter file. */
+const counterProcessorRuntime = (counterFile: string): string =>
   [
-    "import { mkdir } from 'node:fs/promises';",
-    "import { dirname } from 'node:path';",
-    'async function put(path, content) { await mkdir(dirname(path), { recursive: true }); await Bun.write(path, content); }',
+    `const counterFile = ${JSON.stringify(counterFile)};`,
     'export async function processor(input) {',
-    '  const glob = new Bun.Glob("**/*");',
-    '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true })) {',
-    `    await put(input.outputDir + "/" + path, (await Bun.file(input.inputDir + "/" + path).text()) + ${JSON.stringify(suffix)});`,
-    '  }',
+    "  const current = await Bun.file(counterFile).text().catch(() => '');",
+    "  await Bun.write(counterFile, current + 'x');",
+    "  await Bun.write(input.outputDir + '/GENERATED.md', 'generated\\n');",
     '}',
     '',
   ].join('\n');
-const folderResolverPrelude = [
-  "import { mkdir } from 'node:fs/promises';",
-  "import { dirname } from 'node:path';",
-  'function configPath(config) { return config && typeof config === "object" && typeof config.path === "string" ? config.path : "output.txt"; }',
-  'async function read(entry, path) { return await Bun.file(entry.dir + "/" + path).text().catch(() => ""); }',
-  'async function put(outputDir, path, content) { const target = outputDir + "/" + path; await mkdir(dirname(target), { recursive: true }); await Bun.write(target, content); }',
-  '',
-].join('\n');
-const folderConcatResolverRuntime = [
-  folderResolverPrelude,
-  'export async function resolver(input) {',
-  '  const path = configPath(input.config);',
-  '  const sorted = [...input.inputDirs].sort((left, right) => left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template));',
-  '  const parts = await Promise.all(sorted.map(entry => read(entry, path)));',
-  '  await put(input.outputDir, path, parts.filter(Boolean).join(""));',
+
+// ---------------------------------------------------------------------------
+// Fixture helpers: temp workspace with examples/templates + examples/artifacts
+// ---------------------------------------------------------------------------
+
+type Fixture = {
+  root: string;
+  templates: string;
+  artifacts: string;
+  out: string;
+  cleanup: () => Promise<void>;
+};
+
+async function makeFixture(prefix: string): Promise<Fixture> {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), `cyanprint-test-${prefix}-`));
+  const templates = join(fixtureRoot, 'examples/templates');
+  const artifacts = join(fixtureRoot, 'examples/artifacts');
+  await mkdir(templates, { recursive: true });
+  await mkdir(artifacts, { recursive: true });
+  return {
+    root: fixtureRoot,
+    templates,
+    artifacts,
+    out: join(fixtureRoot, 'out'),
+    cleanup: async () => {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    },
+  };
+}
+
+async function writeArtifact(
+  fixture: Fixture,
+  args: { kind: 'processor' | 'plugin' | 'resolver'; name: string; owner?: string; version?: string; runtime: string },
+): Promise<string> {
+  const dir = join(fixture.artifacts, `${args.kind}-${args.owner ?? 'cyanprint'}-${args.name}`);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, 'cyan.yaml'),
+    YAML.stringify({
+      cyanprint: 4,
+      kind: args.kind,
+      owner: args.owner ?? 'cyanprint',
+      name: args.name,
+      ...(args.version ? { version: args.version } : {}),
+      entry: 'index.ts',
+      bundledEntry: 'index.ts',
+    }),
+    'utf8',
+  );
+  await writeFile(join(dir, 'index.ts'), args.runtime, 'utf8');
+  return dir;
+}
+
+const emptyCyan = 'export default function cyan() { return {}; }\n';
+const renderCyan = [
+  'export default function cyan() {',
+  "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }] };",
   '}',
   '',
 ].join('\n');
-const latestFolderResolverRuntime = [
-  folderResolverPrelude,
-  'export async function resolver(input) {',
-  '  const path = configPath(input.config);',
-  '  const sorted = [...input.inputDirs].sort((left, right) => left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template));',
-  '  const latest = sorted.at(-1);',
-  '  await put(input.outputDir, path, latest ? await read(latest, path) : "");',
-  '}',
-  '',
-].join('\n');
-const configAppendProcessorRuntime = [
-  "import { mkdir } from 'node:fs/promises';",
-  "import { dirname } from 'node:path';",
-  'async function put(path, content) { await mkdir(dirname(path), { recursive: true }); await Bun.write(path, content); }',
-  'export async function processor(input) {',
-  '  const glob = new Bun.Glob("**/*");',
-  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true })) {',
-  '    await put(input.outputDir + "/" + path, (await Bun.file(input.inputDir + "/" + path).text()) + input.config.suffix);',
-  '  }',
-  '}',
-  '',
-].join('\n');
+
+type TemplateSpec = {
+  name: string;
+  owner?: string;
+  version?: string;
+  kind?: 'template' | 'template-group';
+  /** Directory name override (defaults to the template name). */
+  dir?: string;
+  /** Files under `template/` rendered through the `cyanprint/vars` processor by default. */
+  files?: Record<string, string>;
+  templates?: Record<
+    string,
+    { answers?: Record<string, unknown>; deterministicState?: Record<string, unknown> } | null
+  >;
+  processors?: string[];
+  plugins?: string[];
+  resolvers?: Array<{ ref: string; config?: Record<string, unknown>; files: string[] }>;
+  cyanTs?: string;
+};
+
+async function writeTemplate(fixture: Fixture, spec: TemplateSpec): Promise<string> {
+  const dir = join(fixture.templates, spec.dir ?? spec.name);
+  await mkdir(dir, { recursive: true });
+  const hasFiles = Boolean(spec.files && Object.keys(spec.files).length > 0);
+  const processors = spec.processors ?? (hasFiles ? ['cyanprint/vars'] : []);
+  const manifest: Record<string, unknown> = {
+    cyanprint: 4,
+    kind: spec.kind ?? 'template',
+    owner: spec.owner ?? 'cyanprint',
+    name: spec.name,
+    bundledEntry: 'cyan.ts',
+  };
+  if (spec.version) {
+    manifest.version = spec.version;
+  }
+  if (spec.templates) {
+    manifest.templates = spec.templates;
+  }
+  if (processors.length > 0) {
+    manifest.processors = processors;
+  }
+  if (spec.plugins?.length) {
+    manifest.plugins = spec.plugins;
+  }
+  if (spec.resolvers?.length) {
+    manifest.resolvers = spec.resolvers.map(entry => ({
+      ref: entry.ref,
+      config: entry.config ?? {},
+      files: entry.files,
+    }));
+  }
+  await writeFile(join(dir, 'cyan.yaml'), YAML.stringify(manifest), 'utf8');
+  for (const [path, content] of Object.entries(spec.files ?? {})) {
+    const target = join(dir, 'template', path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, content, 'utf8');
+  }
+  await writeFile(join(dir, 'cyan.ts'), spec.cyanTs ?? (hasFiles ? renderCyan : emptyCyan), 'utf8');
+  return dir;
+}
+
+async function writeVarsProcessor(fixture: Fixture): Promise<void> {
+  await writeArtifact(fixture, { kind: 'processor', name: 'vars', runtime: varsProcessorRuntime });
+}
+
+async function readOut(out: string, path: string): Promise<string> {
+  return await Bun.file(join(out, path)).text();
+}
+
+function lwwEntries(provenance: Array<{ decision: string }>): number {
+  return provenance.filter(entry => entry.decision === 'lww-override').length;
+}
 
 describe('cache', () => {
   test('cache path is stable and disposable', async () => {
@@ -192,3171 +403,3184 @@ describe('temp session', () => {
   });
 });
 
-describe('manifest and cyan script', () => {
-  test('headless create writes expected output and state', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-create-'));
+describe('static composition guardrails', () => {
+  test('cyan.ts returning templates is a hard error', async () => {
+    const scriptDir = await mkdtemp(join(tmpdir(), 'cyanprint-script-dyn-'));
     try {
-      const result = await createProject({
-        template: join(root, 'examples/templates/hello'),
-        outDir: out,
-        answers: { name: 'Hello Lite' },
-        headless: true,
-      });
-      expect(result.status).toBe('done');
-      expect(await Bun.file(join(out, 'README.md')).text()).toContain('# Hello Lite');
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).exists()).toBe(true);
+      const scriptPath = join(scriptDir, 'cyan.ts');
+      await writeFile(scriptPath, 'export default function cyan() { return { templates: [] }; }\n');
+      await expect(executeCyanScript(scriptPath, {}, {}, false)).rejects.toThrow(
+        'templates cannot be returned from cyan.ts; declare them in cyan.yaml',
+      );
     } finally {
-      await rm(out, { recursive: true, force: true });
+      await rm(scriptDir, { recursive: true, force: true });
     }
   });
-});
 
-describe('undeclared artifact', () => {
-  test('rejects returned artifacts not declared in cyan.yaml', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-undeclared-template-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-undeclared-'));
+  test('cyan.ts returning resolvers is a hard error', async () => {
+    const scriptDir = await mkdtemp(join(tmpdir(), 'cyanprint-script-res-'));
     try {
+      const scriptPath = join(scriptDir, 'cyan.ts');
       await writeFile(
-        join(templateDir, 'cyan.yaml'),
+        scriptPath,
+        'export default function cyan() { return { resolvers: [{ name: "cyanprint/x" }] }; }\n',
+      );
+      await expect(executeCyanScript(scriptPath, {}, {}, false)).rejects.toThrow(
+        'resolvers cannot be returned from cyan.ts',
+      );
+    } finally {
+      await rm(scriptDir, { recursive: true, force: true });
+    }
+  });
+
+  test(
+    'createProject rejects templates returned from cyan.ts end to end',
+    async () => {
+      const fixture = await makeFixture('dyn-create');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, { name: 'child', files: { 'CHILD.md': '# Child\n' } });
+        const parent = await writeTemplate(fixture, {
+          name: 'parent',
+          templates: { 'cyanprint/child': {} },
+          cyanTs: [
+            'export default function cyan() {',
+            "  return { templates: [{ owner: 'cyanprint', name: 'child' }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await expect(createProject({ template: parent, outDir: fixture.out, headless: true })).rejects.toThrow(
+          'templates cannot be returned from cyan.ts',
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'rejects removed manifest fields (presets, api, commutative) with clear errors',
+    async () => {
+      const fixture = await makeFixture('removed-fields');
+      try {
+        const cases: Array<{ field: string; yaml: string; message: string }> = [
+          {
+            field: 'presets',
+            yaml: 'presets:\n  templates:\n    cyanprint/child:\n      answers:\n        name: X\n',
+            message: 'presets: has been removed',
+          },
+          { field: 'api', yaml: 'api: 1\n', message: 'api: has been removed' },
+          { field: 'commutative', yaml: 'commutative: true\n', message: 'commutative: has been removed' },
+        ];
+        for (const testCase of cases) {
+          const dir = join(fixture.templates, `removed-${testCase.field}`);
+          await mkdir(dir, { recursive: true });
+          await writeFile(
+            join(dir, 'cyan.yaml'),
+            [
+              'cyanprint: 4',
+              'kind: template',
+              'owner: cyanprint',
+              `name: removed-${testCase.field}`,
+              'bundledEntry: cyan.ts',
+              testCase.yaml,
+            ].join('\n'),
+            'utf8',
+          );
+          await writeFile(join(dir, 'cyan.ts'), emptyCyan, 'utf8');
+          await expect(
+            createProject({ template: dir, outDir: join(fixture.out, testCase.field), headless: true }),
+          ).rejects.toThrow(testCase.message);
+        }
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test('rejects the legacy list form of the templates section', async () => {
+    const fixture = await makeFixture('templates-list');
+    try {
+      const dir = join(fixture.templates, 'legacy-list');
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, 'cyan.yaml'),
         [
           'cyanprint: 4',
           'kind: template',
           'owner: cyanprint',
-          'name: undeclared-artifact',
+          'name: legacy-list',
           'bundledEntry: cyan.ts',
+          'templates:',
+          '  - cyanprint/child',
           '',
         ].join('\n'),
+        'utf8',
       );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default function cyan(prompt, ctx) {
-          return {
-            processors: [{ kind: "processor", owner: "cyanprint", name: "uppercase" }]
-          };
-        }`,
+      await writeFile(join(dir, 'cyan.ts'), emptyCyan, 'utf8');
+      await expect(createProject({ template: dir, outDir: fixture.out, headless: true })).rejects.toThrow(
+        'cyan.yaml is invalid',
       );
-      await expect(
-        createProject({
-          template: templateDir,
-          outDir: out,
-          answers: { name: 'Bad' },
-        }),
-      ).rejects.toThrow('does not declare it');
     } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
+      await fixture.cleanup();
+    }
+  });
+});
+
+describe('create basics', () => {
+  test(
+    'headless create writes expected output and persisted state shape',
+    async () => {
+      const fixture = await makeFixture('create-basic');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'hello',
+          files: { 'README.md': '# __NAME__\n' },
+          cyanTs: [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Project name');",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { NAME: name } } }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        const result = await createProject({
+          template,
+          outDir: fixture.out,
+          answers: { name: 'Hello Lite' },
+          headless: true,
+        });
+        expect(result.status).toBe('done');
+        expect(result.conflicts).toEqual([]);
+        expect(result.files.map(file => file.path)).toEqual(['README.md']);
+        expect(await readOut(fixture.out, 'README.md')).toBe('# Hello Lite\n');
+
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.cyanprint).toBe(4);
+        expect(state.templates.length).toBe(1);
+        const installed = state.templates[0];
+        expect(installed?.owner).toBe('cyanprint');
+        expect(installed?.name).toBe('hello');
+        expect(installed?.version).toBe('local');
+        expect(installed?.active).toBe(true);
+        expect(installed?.source).toBe(resolve(template));
+        expect(installed?.history.length).toBe(1);
+        expect(installed?.history[0]?.answers).toEqual({ name: 'Hello Lite' });
+        // files carry only path + sha256 — never content.
+        expect(state.files).toEqual([{ path: 'README.md', sha256: sha256('# Hello Lite\n') }]);
+        const readme = state.provenance.find(entry => entry.path === 'README.md');
+        expect(readme?.decision).toBe('added');
+        expect(readme?.source).toBe('cyanprint/hello@local');
+        expect(readme?.segment).toBeUndefined();
+        expect(readme?.contributors).toBeUndefined();
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'does not record pre-existing output files as generated state',
+    async () => {
+      const fixture = await makeFixture('create-existing-files');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'keep', files: { 'README.md': '# Generated\n' } });
+        await mkdir(fixture.out, { recursive: true });
+        await writeFile(join(fixture.out, 'KEEP.md'), '# Keep\n', 'utf8');
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+        expect(result.files.map(file => file.path)).toEqual(['README.md']);
+        expect(await readOut(fixture.out, 'KEEP.md')).toBe('# Keep\n');
+        expect(await Bun.file(join(fixture.out, '.cyan_state.yaml')).text()).not.toContain('KEEP.md');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test('rejects returned artifacts not declared in cyan.yaml', async () => {
+    const fixture = await makeFixture('undeclared');
+    try {
+      const template = await writeTemplate(fixture, {
+        name: 'undeclared-artifact',
+        processors: [],
+        cyanTs: [
+          'export default function cyan() {',
+          "  return { processors: [{ owner: 'cyanprint', name: 'uppercase' }] };",
+          '}',
+          '',
+        ].join('\n'),
+      });
+      await expect(createProject({ template, outDir: fixture.out, headless: true })).rejects.toThrow(
+        'does not declare it',
+      );
+    } finally {
+      await fixture.cleanup();
     }
   });
 
   test('rejects returned artifact versions not declared in cyan.yaml', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-versioned-artifact-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-versioned-artifact-out-'));
+    const fixture = await makeFixture('undeclared-version');
     try {
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: versioned-artifact',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/uppercase@4',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default function cyan(prompt, ctx) {
-          return {
-            processors: [{ kind: "processor", owner: "cyanprint", name: "uppercase", version: "5" }]
-          };
-        }`,
-      );
-      await expect(
-        createProject({
-          template: templateDir,
-          outDir: out,
-          answers: { name: 'Bad Version' },
-        }),
-      ).rejects.toThrow('processor:cyanprint:uppercase@5');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('normalizes unversioned returned artifacts to a single pinned manifest version', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-pinned-artifact-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-pinned-artifact-out-'));
-    try {
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const runtimeFile = join(templateDir, 'dist', 'identity-processor.js');
-      const runtime = identityProcessorRuntime;
-      await writeFile(runtimeFile, runtime);
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:identity:4',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'identity', version: '4' },
-              runtimeFile,
-              integrity: sha256(runtime),
-            },
-          ],
-        }),
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: pinned-artifact',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/identity@4',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default function cyan(prompt, ctx) {
-          return {
-            processors: [{ kind: "processor", owner: "cyanprint", name: "identity" }]
-          };
-        }`,
-      );
-      const result = await createProject({
-        template: templateDir,
-        outDir: out,
-        answers: { name: 'Pinned' },
-        localFallback: false,
-      });
-      expect(result.artifactUses.processors).toEqual([
-        { kind: 'processor', owner: 'cyanprint', name: 'identity', version: '4' },
-      ]);
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('artifact output layering', () => {
-  test('applies declared processor and plugin output in order', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifacts-'));
-    try {
-      const result = await createProject({
-        template: join(root, 'examples/templates/with-artifacts'),
-        outDir: out,
-        answers: { name: 'Artifact Project' },
-        headless: true,
-      });
-      expect(
-        result.artifactBundles
-          .map(bundle => bundle.dependency)
-          .filter(dependency => dependency.kind !== 'template')
-          .map(dependency => `${dependency.kind}:${dependency.owner}/${dependency.name}`)
-          .sort(),
-      ).toEqual([
-        'plugin:cyanprint/footer',
-        'processor:cyan/default',
-        'processor:cyanprint/uppercase',
-        'resolver:cyanprint/keep-user',
-      ]);
-      const readme = await Bun.file(join(out, 'README.md')).text();
-      expect(readme).toContain('# ARTIFACT PROJECT');
-      expect(readme).toContain('Generated locally.');
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('merges multiple scoped processor outputs as independent layers', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-multiple-processors-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-multiple-processors-out-'));
-    try {
-      await mkdir(join(templateDir, 'template/docs'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const firstRuntime = join(templateDir, 'dist/append-a.js');
-      const secondRuntime = join(templateDir, 'dist/append-b.js');
-      const first = appendProcessorRuntime('A');
-      const second = appendProcessorRuntime('B');
-      await writeFile(firstRuntime, first, 'utf8');
-      await writeFile(secondRuntime, second, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:append-a',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append-a' },
-              runtimeFile: firstRuntime,
-              integrity: sha256(first),
-            },
-            {
-              key: 'processor:cyanprint:append-b',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append-b' },
-              runtimeFile: secondRuntime,
-              integrity: sha256(second),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: multiple-processors',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/append-a',
-          '  - cyanprint/append-b',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template/docs/note.md'), 'start', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
-              { name: 'cyanprint/append-a', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-              { name: 'cyanprint/append-b', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-            ],
-          };
-        }\n`,
-      );
-
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
-
-      expect(await Bun.file(join(out, 'docs/note.md')).text()).toBe('startB');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('loads scoped plugin files into the merged output folder', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-scoped-plugin-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-scoped-plugin-out-'));
-    try {
-      await mkdir(join(templateDir, 'template/app'), { recursive: true });
-      await mkdir(join(templateDir, 'template/plugin-assets'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const processorRuntime = join(templateDir, 'dist/identity.js');
-      const pluginRuntime = join(templateDir, 'dist/scoped-plugin.js');
-      const plugin = [
-        "import { mkdir } from 'node:fs/promises';",
-        "import { dirname } from 'node:path';",
-        'async function put(path, content) { await mkdir(dirname(path), { recursive: true }); await Bun.write(path, content); }',
-        'export async function plugin(input) {',
-        '  const readme = await Bun.file(input.inputDir + "/README.md").text();',
-        '  const asset = await Bun.file(input.inputDir + "/plugin-assets/message.txt").text();',
-        '  await put(input.outputDir + "/PLUGIN_OUTPUT.txt", readme.trim() + "\\n" + asset.trim() + "\\n");',
-        '}',
-        '',
-      ].join('\n');
-      await writeFile(processorRuntime, identityProcessorRuntime, 'utf8');
-      await writeFile(pluginRuntime, plugin, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:identity',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'identity' },
-              runtimeFile: processorRuntime,
-              integrity: sha256(identityProcessorRuntime),
-            },
-            {
-              key: 'plugin:cyanprint:scoped-plugin',
-              dependency: { kind: 'plugin', owner: 'cyanprint', name: 'scoped-plugin' },
-              runtimeFile: pluginRuntime,
-              integrity: sha256(plugin),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: scoped-plugin',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/identity',
-          'plugins:',
-          '  - cyanprint/scoped-plugin',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template/app/README.md'), '# App\n', 'utf8');
-      await writeFile(join(templateDir, 'template/plugin-assets/message.txt'), 'plugin asset\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
-              { name: 'cyanprint/identity', files: [{ root: 'template/app', glob: '**/*', type: 'Copy' }] },
-            ],
-            plugins: [
-              { name: 'cyanprint/scoped-plugin', files: [{ root: 'template', glob: 'plugin-assets/**/*', type: 'Copy' }] },
-            ],
-          };
-        }\n`,
-      );
-
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
-
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('# App\n');
-      expect(await Bun.file(join(out, 'plugin-assets/message.txt')).text()).toBe('plugin asset\n');
-      expect(await Bun.file(join(out, 'PLUGIN_OUTPUT.txt')).text()).toBe('# App\nplugin asset\n');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('merges same-path scoped processor outputs with a matching resolver', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-resolver-merge-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-resolver-merge-out-'));
-    try {
-      await mkdir(join(templateDir, 'template/docs'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const firstRuntime = join(templateDir, 'dist/append-a.js');
-      const secondRuntime = join(templateDir, 'dist/append-b.js');
-      const resolverRuntime = join(templateDir, 'dist/concat.js');
-      const first = appendProcessorRuntime('A');
-      const second = appendProcessorRuntime('B');
-      const resolver = [
-        folderResolverPrelude,
-        'export async function resolver(input) {',
-        '  const path = configPath(input.config);',
-        '  const sorted = [...input.inputDirs].sort((left, right) => left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template));',
-        '  const parts = await Promise.all(sorted.map(entry => read(entry, path)));',
-        '  await put(input.outputDir, path, parts.join("\\n") + "\\n");',
-        '}',
-        '',
-      ].join('\n');
-      await writeFile(firstRuntime, first, 'utf8');
-      await writeFile(secondRuntime, second, 'utf8');
-      await writeFile(resolverRuntime, resolver, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:append-a',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append-a' },
-              runtimeFile: firstRuntime,
-              integrity: sha256(first),
-            },
-            {
-              key: 'processor:cyanprint:append-b',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append-b' },
-              runtimeFile: secondRuntime,
-              integrity: sha256(second),
-            },
-            {
-              key: 'resolver:cyanprint:concat',
-              dependency: { kind: 'resolver', owner: 'cyanprint', name: 'concat' },
-              runtimeFile: resolverRuntime,
-              integrity: sha256(resolver),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: processor-resolver-merge',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/append-a',
-          '  - cyanprint/append-b',
-          'resolvers:',
-          '  - cyanprint/concat',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template/docs/note.md'), 'start', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
-              { name: 'cyanprint/append-a', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-              { name: 'cyanprint/append-b', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-            ],
-            resolvers: [{ name: 'cyanprint/concat', config: { paths: ['docs/note.md'] } }],
-          };
-        }\n`,
-      );
-
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
-
-      expect(await Bun.file(join(out, 'docs/note.md')).text()).toBe('startA\nstartB\n');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('keeps different archive roots separate when scoped processors emit the same path', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-root-collision-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-root-collision-out-'));
-    try {
-      await mkdir(join(templateDir, 'template-a'), { recursive: true });
-      await mkdir(join(templateDir, 'template-b'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const runtimeFile = join(templateDir, 'dist/append.js');
-      const runtime = configAppendProcessorRuntime;
-      await writeFile(runtimeFile, runtime, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:append',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append' },
-              runtimeFile,
-              integrity: sha256(runtime),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: processor-root-collision',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/append',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template-a/README.md'), 'first', 'utf8');
-      await writeFile(join(templateDir, 'template-b/README.md'), 'second', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        [
-          'export default function cyan(prompt, ctx) {',
-          '  return {',
-          '    processors: [',
-          "      { name: 'cyanprint/append', files: [{ root: 'template-a', glob: '**/*', type: 'Template' }], config: { suffix: 'A' } },",
-          "      { name: 'cyanprint/append', files: [{ root: 'template-b', glob: '**/*', type: 'Template' }], config: { suffix: 'B' } },",
-          '    ],',
-          '  };',
+      const template = await writeTemplate(fixture, {
+        name: 'versioned-artifact',
+        processors: ['cyanprint/uppercase@4'],
+        cyanTs: [
+          'export default function cyan() {',
+          "  return { processors: [{ owner: 'cyanprint', name: 'uppercase', version: '5' }] };",
           '}',
           '',
         ].join('\n'),
+      });
+      await expect(createProject({ template, outDir: fixture.out, headless: true })).rejects.toThrow(
+        'cyanprint:uppercase@5',
       );
-
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
-
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('secondB');
     } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
+      await fixture.cleanup();
     }
   });
 
-  test('merges renamed scoped processor output beside independent processor output', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-rename-pipeline-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-rename-pipeline-out-'));
-    try {
-      await mkdir(join(templateDir, 'template/docs'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const renameRuntime = join(templateDir, 'dist/rename.js');
-      const appendRuntime = join(templateDir, 'dist/append.js');
-      const rename = [
-        "import { mkdir } from 'node:fs/promises';",
-        "import { dirname } from 'node:path';",
-        'export async function processor(input) {',
-        '  await mkdir(dirname(input.outputDir + "/docs/renamed.md"), { recursive: true });',
-        '  const text = await Bun.file(input.inputDir + "/docs/note.md").text();',
-        '  await Bun.write(input.outputDir + "/docs/renamed.md", text + "R");',
-        '}',
-        '',
-      ].join('\n');
-      const append = appendProcessorRuntime('A');
-      await writeFile(renameRuntime, rename, 'utf8');
-      await writeFile(appendRuntime, append, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:rename',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'rename' },
-              runtimeFile: renameRuntime,
-              integrity: sha256(rename),
-            },
-            {
-              key: 'processor:cyanprint:append',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'append' },
-              runtimeFile: appendRuntime,
-              integrity: sha256(append),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: processor-rename-pipeline',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/rename',
-          '  - cyanprint/append',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template/docs/note.md'), 'start', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
-              { name: 'cyanprint/rename', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-              { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-            ],
-          };
-        }\n`,
-      );
-
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
-
-      expect(await Bun.file(join(out, 'docs/note.md')).text()).toBe('startA');
-      expect(await Bun.file(join(out, 'docs/renamed.md')).text()).toBe('startR');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects scoped processor output outside its scope root', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-scope-escape-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-processor-scope-escape-out-'));
-    try {
-      await mkdir(join(templateDir, 'template/docs'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const runtimeFile = join(templateDir, 'dist/escape.js');
-      const runtime = `export async function processor(input) { await Bun.write(input.outputDir + "/../README.md", "bad"); }\n`;
-      await writeFile(runtimeFile, runtime, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:escape',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'escape' },
-              runtimeFile,
-              integrity: sha256(runtime),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: processor-scope-escape',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/escape',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template/docs/note.md'), 'safe', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
-              { name: 'cyanprint/escape', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },
-            ],
-          };
-        }\n`,
-      );
-
-      await expect(
-        createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false }),
-      ).rejects.toThrow('unsafe output path');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('loads distinct archive scopes with the same output path independently', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-distinct-scope-paths-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-distinct-scope-paths-out-'));
-    try {
-      await mkdir(join(templateDir, 'template-a'), { recursive: true });
-      await mkdir(join(templateDir, 'template-b'), { recursive: true });
-      await mkdir(join(templateDir, 'dist'), { recursive: true });
-      const runtimeFile = join(templateDir, 'dist/identity.js');
-      const runtime = identityProcessorRuntime;
-      await writeFile(runtimeFile, runtime, 'utf8');
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:identity',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'identity' },
-              runtimeFile,
-              integrity: sha256(runtime),
-            },
-          ],
-        }),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: distinct-scope-paths',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/identity',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(join(templateDir, 'template-a/README.md'), 'from a\n', 'utf8');
-      await writeFile(join(templateDir, 'template-b/README.md'), 'from b\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        `export default async function cyan(prompt, ctx) {
-          return {
-            processors: [
+  test(
+    'normalizes unversioned returned artifacts to a single pinned manifest version',
+    async () => {
+      const fixture = await makeFixture('pinned-artifact');
+      try {
+        const templateDir = join(fixture.templates, 'pinned-artifact');
+        await mkdir(join(templateDir, 'dist'), { recursive: true });
+        const runtimeFile = join(templateDir, 'dist', 'identity-processor.js');
+        await writeFile(runtimeFile, identityProcessorRuntime, 'utf8');
+        await writeFile(
+          join(templateDir, '.cyan_artifact_bundles.json'),
+          JSON.stringify({
+            bundles: [
               {
-                name: 'cyanprint/identity',
-                files: [
-                  { root: 'template-a', glob: '**/*', type: 'Template' },
-                  { root: 'template-b', glob: '**/*', type: 'Template' },
-                ],
+                key: 'processor:cyanprint:identity:4',
+                dependency: { kind: 'processor', owner: 'cyanprint', name: 'identity', version: '4' },
+                runtimeFile,
+                integrity: sha256(identityProcessorRuntime),
               },
             ],
-          };
-        }\n`,
-      );
+          }),
+          'utf8',
+        );
+        await writeFile(
+          join(templateDir, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'pinned-artifact',
+            bundledEntry: 'cyan.ts',
+            processors: ['cyanprint/identity@4'],
+          }),
+          'utf8',
+        );
+        await writeFile(
+          join(templateDir, 'cyan.ts'),
+          [
+            'export default function cyan() {',
+            "  return { processors: [{ owner: 'cyanprint', name: 'identity' }] };",
+            '}',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
 
-      await createProject({ template: templateDir, outDir: out, answers: {}, headless: true, localFallback: false });
+        await createProject({ template: templateDir, outDir: fixture.out, headless: true, localFallback: false });
 
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('from b\n');
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('executes child templates declared by a template group', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-group-'));
-    try {
-      await createProject({
-        template: join(root, 'examples/template-groups/basic'),
-        outDir: out,
-        answers: { name: 'Parent Group' },
-        headless: true,
-      });
-      const readme = await Bun.file(join(out, 'README.md')).text();
-      expect(readme).toContain('# ARTIFACT PROJECT');
-      expect(readme).toContain('Generated locally.');
-      expect(await Bun.file(join(out, 'GROUP.md')).text()).toContain('# Parent Group');
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('does not record pre-existing output files as generated state', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-existing-output-'));
-    try {
-      await writeFile(join(out, 'KEEP.md'), '# Keep\n', 'utf8');
-      const result = await createProject({
-        template: join(root, 'examples/templates/hello'),
-        outDir: out,
-        answers: { name: 'Generated Only' },
-        headless: true,
-      });
-      expect(result.files.map(file => file.path)).toEqual(['README.md']);
-      expect(await Bun.file(join(out, 'KEEP.md')).text()).toBe('# Keep\n');
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).text()).not.toContain('KEEP.md');
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('persists child-only preset answers for headless updates', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-child-answers-'));
-    const templatesRoot = join(tempRoot, 'examples/templates');
-    const parent = join(templatesRoot, 'parent');
-    const child = join(templatesRoot, 'child');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(parent, 'template'), { recursive: true });
-      await mkdir(join(child, 'template'), { recursive: true });
-      await writeFile(join(parent, 'template/PARENT.md'), '# Parent\n', 'utf8');
-      await writeFile(join(child, 'template/CHILD.md'), '# __CHILD_NAME__\n', 'utf8');
-      await writeFile(
-        join(parent, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: parent',
-          'bundledEntry: cyan.ts',
-          'templates:',
-          '  - cyanprint/child',
-          'processors:',
-          '  - cyan/default',
-          'presets:',
-          '  templates:',
-          '    cyanprint/child:',
-          '      answers:',
-          '        childName: Nested Answer',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(parent, 'cyan.ts'),
-        [
-          'export default function cyan(prompt, ctx) {',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(child, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: child',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(child, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt, ctx) {',
-          '  const childName = await prompt.text("childName", "Child name");',
-          '  return {',
-          '    processors: [{',
-          '      name: "cyan/default",',
-          '      files: [{ root: "template", glob: "**/*", type: "Template" }],',
-          '      config: { vars: { CHILD_NAME: childName } },',
-          '    }],',
-          '  };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await createProject({ template: parent, outDir: out, headless: true });
-
-      expect(await Bun.file(join(out, 'CHILD.md')).text()).toContain('# Nested Answer');
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).text()).toContain('childName: Nested Answer');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('root ancestor presets win over a nearer parent for a grandchild (answers + det-state)', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-cascade-'));
-    const templates = join(tempRoot, 'examples/templates');
-    const out = join(tempRoot, 'out');
-    const yaml = (lines: string[]) => `${lines.join('\n')}\n`;
-    const emptyCyan = 'export default function cyan() { return {}; }\n';
-    try {
-      // A (root) -> B -> C. A presets C's answer + det-state; B presets C's answer differently.
-      await mkdir(join(templates, 'a'), { recursive: true });
-      await writeFile(
-        join(templates, 'a/cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: a',
-          'bundledEntry: cyan.ts',
-          'templates:',
-          '  - cyanprint/b',
-          'presets:',
-          '  templates:',
-          '    cyanprint/c:',
-          '      answers:',
-          '        grand: FROM_A',
-          '      deterministic:',
-          '        seed: A_SEED',
-        ]),
-      );
-      await writeFile(join(templates, 'a/cyan.ts'), emptyCyan);
-
-      await mkdir(join(templates, 'b'), { recursive: true });
-      await writeFile(
-        join(templates, 'b/cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: b',
-          'bundledEntry: cyan.ts',
-          'templates:',
-          '  - cyanprint/c',
-          'presets:',
-          '  templates:',
-          '    cyanprint/c:',
-          '      answers:',
-          '        grand: FROM_B',
-        ]),
-      );
-      await writeFile(join(templates, 'b/cyan.ts'), emptyCyan);
-
-      await mkdir(join(templates, 'c/template'), { recursive: true });
-      await writeFile(join(templates, 'c/template/OUT.md'), 'grand=__GRAND__\n');
-      await writeFile(
-        join(templates, 'c/cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: c',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-        ]),
-      );
-      await writeFile(
-        join(templates, 'c/cyan.ts'),
-        [
-          'export default async function cyan(prompt) {',
-          '  const grand = await prompt.text("grand", "Grand");',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { GRAND: grand } } }] };',
-          '}',
-          '',
-        ].join('\n'),
-      );
-
-      await createProject({ template: join(templates, 'a'), outDir: out, headless: true });
-      // Root A's preset wins over B's for the grandchild's answer.
-      expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('grand=FROM_A\n');
-      // A's det-state seed cascaded through to the shared state.
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).text()).toContain('seed: A_SEED');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects a template included more than once in the composition', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-dup-'));
-    const templates = join(tempRoot, 'examples/templates');
-    const out = join(tempRoot, 'out');
-    const yaml = (lines: string[]) => `${lines.join('\n')}\n`;
-    const emptyCyan = 'export default function cyan() { return {}; }\n';
-    const simpleTemplate = async (name: string, deps: string[] = []) => {
-      await mkdir(join(templates, name, 'template'), { recursive: true });
-      await writeFile(join(templates, name, `template/${name.toUpperCase()}.md`), `# ${name}\n`);
-      await writeFile(
-        join(templates, name, 'cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          `name: ${name}`,
-          'bundledEntry: cyan.ts',
-          ...(deps.length ? ['templates:', ...deps.map(dep => `  - cyanprint/${dep}`)] : []),
-          'processors:',
-          '  - cyan/default',
-        ]),
-      );
-      await writeFile(join(templates, name, 'cyan.ts'), emptyCyan);
-    };
-    try {
-      await simpleTemplate('dup');
-      await simpleTemplate('x', ['dup']);
-      await simpleTemplate('y', ['dup']);
-      await simpleTemplate('group', ['x', 'y']); // x and y both pull cyanprint/dup
-      await expect(createProject({ template: join(templates, 'group'), outDir: out, headless: true })).rejects.toThrow(
-        'included more than once',
-      );
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('allows two templates to share the same processor', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-shared-proc-'));
-    const templates = join(tempRoot, 'examples/templates');
-    const out = join(tempRoot, 'out');
-    const yaml = (lines: string[]) => `${lines.join('\n')}\n`;
-    const emptyCyan = 'export default function cyan() { return {}; }\n';
-    const renderCyan =
-      'export default function cyan() { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n';
-    const leaf = async (name: string) => {
-      await mkdir(join(templates, name, 'template'), { recursive: true });
-      await writeFile(join(templates, name, `template/${name.toUpperCase()}.md`), `# ${name}\n`);
-      await writeFile(
-        join(templates, name, 'cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          `name: ${name}`,
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-        ]),
-      );
-      await writeFile(join(templates, name, 'cyan.ts'), renderCyan);
-    };
-    try {
-      await leaf('p');
-      await leaf('q');
-      await mkdir(join(templates, 'grp'), { recursive: true });
-      await writeFile(
-        join(templates, 'grp/cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: grp',
-          'bundledEntry: cyan.ts',
-          'templates:',
-          '  - cyanprint/p',
-          '  - cyanprint/q',
-        ]),
-      );
-      await writeFile(join(templates, 'grp/cyan.ts'), emptyCyan);
-      const result = await createProject({ template: join(templates, 'grp'), outDir: out, headless: true });
-      expect(result.files.map(file => file.path).sort()).toEqual(['P.md', 'Q.md']);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('traceProject returns provenance, per-template output, and diffs', async () => {
-    const answers = JSON.parse(
-      await readFile(join(root, 'examples/template-groups/basic/answers.json'), 'utf8'),
-    ) as Record<string, unknown>;
-    const trace = await traceProject({
-      template: join(root, 'examples/template-groups/basic'),
-      answers,
-      headless: true,
-    });
-    expect(trace.tree.ref).toBe('cyanprint/basic-group');
-    expect(trace.tree.children.length).toBe(2);
-    expect(trace.tree.children.every(child => child.ownFiles.length > 0)).toBe(true);
-    expect(trace.provenance.length).toBeGreaterThan(0);
-    expect(trace.provenance.every(entry => entry.source.includes('/'))).toBe(true);
-    expect(trace.provenance.some(entry => entry.decision === 'lww-override')).toBe(true);
-    expect(trace.diffs.length).toBeGreaterThan(0);
-  });
-
-  test('trace provenance attributes a grandchild file to the grandchild, not the merging parent', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-trace-deep-'));
-    const templates = join(tempRoot, 'examples/templates');
-    const yaml = (lines: string[]) => `${lines.join('\n')}\n`;
-    const emptyCyan = 'export default function cyan() { return {}; }\n';
-    const renderCyan =
-      'export default function cyan() { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n';
-    const template = async (name: string, deps: string[], render: boolean) => {
-      await mkdir(join(templates, name, 'template'), { recursive: true });
-      if (render) {
-        await writeFile(join(templates, name, `template/${name.toUpperCase()}.md`), `# ${name}\n`);
-      }
-      await writeFile(
-        join(templates, name, 'cyan.yaml'),
-        yaml([
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          `name: ${name}`,
-          'bundledEntry: cyan.ts',
-          ...(deps.length ? ['templates:', ...deps.map(dep => `  - cyanprint/${dep}`)] : []),
-          ...(render ? ['processors:', '  - cyan/default'] : []),
-        ]),
-      );
-      await writeFile(join(templates, name, 'cyan.ts'), render ? renderCyan : emptyCyan);
-    };
-    try {
-      await template('deep-c', [], true);
-      await template('deep-b', ['deep-c'], false);
-      await template('deep-a', ['deep-b'], false);
-      const trace = await traceProject({ template: join(templates, 'deep-a'), headless: true });
-      const entry = trace.provenance.find(item => item.path === 'DEEP-C.md');
-      expect(entry?.source).toBe('cyanprint/deep-c');
-      expect(entry?.decision).toBe('added');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('interactively prompted answers from a custom adapter persist to generated state', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-adapter-'));
-    const template = join(tempRoot, 'examples/templates/prompted');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(template, 'template'), { recursive: true });
-      await writeFile(join(template, 'template/OUT.md'), 'name=__NAME__\n');
-      await writeFile(
-        join(template, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: prompted',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(template, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt) {',
-          '  const name = await prompt.text("name", "Name");',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { NAME: name } } }] };',
-          '}',
-          '',
-        ].join('\n'),
-      );
-      // A custom adapter (like the CLI's inquirer adapter) holds its own cache; core must still
-      // record its answers so update can reuse them.
-      const adapterCache: Record<string, unknown> = {};
-      await createProject({
-        template,
-        outDir: out,
-        headless: false,
-        promptAdapter: {
-          async ask<T>(request: { name: string }): Promise<T> {
-            adapterCache[request.name] = 'Prompted Project';
-            return 'Prompted Project' as T;
+        const state = await loadGeneratedState(fixture.out);
+        const processorArtifacts = (state.templates[0]?.artifacts ?? []).filter(entry => entry.kind === 'processor');
+        expect(processorArtifacts).toEqual([
+          {
+            kind: 'processor',
+            owner: 'cyanprint',
+            name: 'identity',
+            version: '4',
+            integrity: sha256(identityProcessorRuntime),
           },
-        },
-      });
-      expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('name=Prompted Project\n');
-      const state = await Bun.file(join(out, '.cyan_state.yaml')).text();
-      expect(state).toContain('name: Prompted Project');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('unifiedDiff uses zero-based starts for zero-length hunk ranges', async () => {
-    const { unifiedDiff } = await import('./util/unified-diff');
-    expect(unifiedDiff('', 'a\nb')).toContain('@@ -0,0 +1,2 @@');
-    expect(unifiedDiff('a\nb', '')).toContain('@@ -1,2 +0,0 @@');
-  });
-
-  test('prompt validation rejects out-of-range headless answers and accepts valid ones', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-validate-'));
-    const template = join(tempRoot, 'examples/templates/validated');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(template, 'template'), { recursive: true });
-      await writeFile(join(template, 'template/OUT.md'), 'count=__COUNT__\n');
-      await writeFile(
-        join(template, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: validated',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(template, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt) {',
-          '  const count = await prompt.number("count", "Count", {',
-          '    validate: value => (value >= 5 && value <= 10 ? true : "count must be between 5 and 10"),',
-          '  });',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { COUNT: String(count) } } }] };',
-          '}',
-          '',
-        ].join('\n'),
-      );
-      await expect(createProject({ template, outDir: out, headless: true, answers: { count: 3 } })).rejects.toThrow(
-        'count must be between 5 and 10',
-      );
-      await createProject({ template, outDir: out, headless: true, answers: { count: 7 } });
-      expect(await Bun.file(join(out, 'OUT.md')).text()).toBe('count=7\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('createProject reports generation progress for templates and artifacts', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-progress-'));
-    const events: Array<{ kind: string; ref: string }> = [];
-    try {
-      await createProject({
-        template: join(root, 'examples/templates/hello'),
-        outDir: out,
-        headless: true,
-        answers: JSON.parse(await readFile(join(root, 'examples/templates/hello/answers.json'), 'utf8')) as Record<
-          string,
-          unknown
-        >,
-        onProgress: event => events.push({ kind: event.kind, ref: event.ref }),
-      });
-      expect(events.some(event => event.kind === 'template' && event.ref === 'cyanprint/hello')).toBe(true);
-      expect(events.some(event => event.kind === 'processor' && event.ref === 'cyan/default')).toBe(true);
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('executes child templates returned by cyan.ts', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-runtime-template-'));
-    const templatesRoot = join(tempRoot, 'examples/templates');
-    const parent = join(templatesRoot, 'parent');
-    const child = join(templatesRoot, 'child');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(parent, 'template'), { recursive: true });
-      await mkdir(join(child, 'template'), { recursive: true });
-      await writeFile(join(parent, 'template/PARENT.md'), '# Parent\n', 'utf8');
-      await writeFile(join(child, 'template/CHILD.md'), '# Child\n', 'utf8');
-      await writeFile(
-        join(parent, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: parent',
-          'bundledEntry: cyan.ts',
-          'templates:',
-          '  - cyanprint/child',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(parent, 'cyan.ts'),
-        [
-          'export default function cyan(prompt, ctx) {',
-          '  return {',
-          '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
-          '    templates: [{ kind: "template", owner: "cyanprint", name: "child" }]',
-          '  };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(child, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: child',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(child, 'cyan.ts'),
-        [
-          'export default function cyan(prompt, ctx) {',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      const result = await createProject({ template: parent, outDir: out, headless: true });
-
-      expect(await Bun.file(join(out, 'CHILD.md')).text()).toContain('# Child');
-      expect(await Bun.file(join(out, 'PARENT.md')).text()).toContain('# Parent');
-      expect(result.artifactUses.templates).toEqual([
-        { kind: 'template', owner: 'cyanprint', name: 'child', config: undefined },
-      ]);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('loads template folders with copy/template modes and scoped processors', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-folder-template-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-folder-template-out-'));
-    const runtimeDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-folder-template-runtime-'));
-    const bytes = new Uint8Array([0, 1, 2, 253, 254, 255]);
-    try {
-      await mkdir(join(templateDir, 'template-text/docs'), { recursive: true });
-      await mkdir(join(templateDir, 'template-copy/assets'), { recursive: true });
-      await mkdir(runtimeDir, { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: folder-template',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyanprint/suffix@4',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt, ctx) {',
-          "  const name = await prompt.text('name', 'Project name');",
-          '  return {',
-          '    processors: [{',
-          "      name: 'cyanprint/suffix',",
-          '      files: [',
-          "        { root: 'template-text', glob: '**/*', type: 'Template' },",
-          "        { root: 'template-copy', glob: '**/*', type: 'Copy' },",
-          '      ],',
-          '      config: { vars: { NAME: name } },',
-          '    }],',
-          '  };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(templateDir, 'template-text/docs/README.md'), '# __NAME__\n', 'utf8');
-      await writeFile(join(templateDir, 'template-text/PLAIN.md'), 'plain __NAME__\n', 'utf8');
-      await writeFile(join(templateDir, 'template-copy/assets/pixel.bin'), bytes);
-      const runtimeFile = join(runtimeDir, 'suffix.js');
-      await writeFile(
-        runtimeFile,
-        [
-          "import { mkdir } from 'node:fs/promises';",
-          "import { dirname } from 'node:path';",
-          'export async function processor(input) {',
-          '  const vars = input.config?.vars ?? {};',
-          '  const glob = new Bun.Glob("**/*");',
-          '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true })) {',
-          '    let next = await Bun.file(input.inputDir + "/" + path).text();',
-          '    for (const [name, value] of Object.entries(vars)) {',
-          '      next = next.replaceAll(`__${name}__`, String(value));',
-          '    }',
-          '    await mkdir(dirname(input.outputDir + "/" + path), { recursive: true });',
-          '    await Bun.write(input.outputDir + "/" + path, `${next}processed\\n`);',
-          '  }',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyanprint:suffix:4',
-              dependency: { kind: 'processor', owner: 'cyanprint', name: 'suffix', version: '4' },
-              runtimeFile,
-              integrity: sha256(await Bun.file(runtimeFile).text()),
-            },
-          ],
-        }),
-        'utf8',
-      );
-
-      await createProject({ template: templateDir, outDir: out, answers: { name: 'Folder App' }, headless: true });
-
-      expect(await Bun.file(join(out, 'docs/README.md')).text()).toBe('# Folder App\nprocessed\n');
-      expect(await Bun.file(join(out, 'PLAIN.md')).text()).toBe('plain Folder App\nprocessed\n');
-      expect(new Uint8Array(await Bun.file(join(out, 'assets/pixel.bin')).arrayBuffer())).toEqual(bytes);
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-      await rm(runtimeDir, { recursive: true, force: true });
-    }
-  });
-
-  test('template scripts can use every prompt input type and return pure processor data', async () => {
-    const templateDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-all-inputs-'));
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-all-inputs-out-'));
-    try {
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: all-inputs',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt, ctx) {',
-          "  const name = await prompt.text('name', 'Name');",
-          "  const enabled = await prompt.confirm('enabled', 'Enabled?');",
-          "  const color = await prompt.select('color', 'Color', { options: ['cyan', 'darkcyan'] });",
-          "  const features = await prompt.multiselect('features', 'Features', { options: ['cli', 'web', 'worker'] });",
-          "  const count = await prompt.number('count', 'Count');",
-          '  return {',
-          '    processors: [{',
-          "      name: 'cyan/default',",
-          "      files: [{ root: 'template', glob: '**/*', type: 'Template' }],",
-          '      config: { vars: { NAME: name, ENABLED: enabled, COLOR: color, FEATURES: features.join(","), COUNT: count } },',
-          '    }],',
-          '  };',
-          '}',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        join(templateDir, 'template/README.md'),
-        'name=__NAME__ enabled=__ENABLED__ color=__COLOR__ features=__FEATURES__ count=__COUNT__',
-        'utf8',
-      );
-
-      await createProject({
-        template: templateDir,
-        outDir: out,
-        headless: true,
-        answers: {
-          name: 'Inputs',
-          enabled: true,
-          color: 'cyan',
-          features: ['cli', 'worker'],
-          count: 7,
-        },
-      });
-
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe(
-        'name=Inputs enabled=true color=cyan features=cli,worker count=7\n',
-      );
-    } finally {
-      await rm(templateDir, { recursive: true, force: true });
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('records create-time same-path conflicts when templates have no resolver', async () => {
-    const fixture = await createSamePathFixture([
-      { name: 'same-a', content: 'from a\n' },
-      { name: 'same-b', content: 'from b\n' },
-    ]);
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe('from b\n');
-      expect(await Bun.file(join(fixture.outDir, '.cyan_state.yaml')).text()).toContain('reason: no_resolver');
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  test('records create-time conflicts for different resolvers and same resolver with different config', async () => {
-    const fixture = await createSamePathFixture(
-      [
-        {
-          name: 'same-a',
-          content: 'from a\n',
-          resolvers: [{ name: 'cyanprint/merge-a', config: { paths: ['shared.txt'], mode: 'a' } }],
-        },
-        {
-          name: 'same-b',
-          content: 'from b\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'b' } }],
-        },
-        {
-          name: 'same-c',
-          content: 'from c\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'c' } }],
-        },
-      ],
-      ['merge-a', 'merge-b'],
-    );
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      const state = await Bun.file(join(fixture.outDir, '.cyan_state.yaml')).text();
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe('from c\n');
-      expect(state).toContain('reason: different_resolver');
-      expect(state).toContain('reason: same_resolver_different_config');
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  test('uses matching create-time resolvers and falls back to LWW for mixed resolver groups', async () => {
-    const fixture = await createSamePathFixture(
-      [
-        {
-          name: 'same-a',
-          content: 'from a\n',
-          resolvers: [{ name: 'cyanprint/merge-a', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        {
-          name: 'same-b',
-          content: 'from b\n',
-          resolvers: [{ name: 'cyanprint/merge-a', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        { name: 'same-c', content: 'from c\n' },
-        {
-          name: 'same-d',
-          content: 'from d\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        {
-          name: 'same-e',
-          content: 'from e\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-      ],
-      ['merge-a', 'merge-b'],
-    );
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      const state = await Bun.file(join(fixture.outDir, '.cyan_state.yaml')).text();
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe('from d\nfrom e\n');
-      expect(state).toContain('reason: no_resolver');
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  test('fold resolvers receive every original same-path template layer', async () => {
-    const fixture = await createSamePathFixture(
-      [
-        {
-          name: 'same-a',
-          content: 'from a\n',
-          resolvers: [{ name: 'cyanprint/origin-fold', config: { paths: ['shared.txt'] } }],
-        },
-        {
-          name: 'same-b',
-          content: 'from b\n',
-          resolvers: [{ name: 'cyanprint/origin-fold', config: { paths: ['shared.txt'] } }],
-        },
-        {
-          name: 'same-c',
-          content: 'from c\n',
-          resolvers: [{ name: 'cyanprint/origin-fold', config: { paths: ['shared.txt'] } }],
-        },
-      ],
-      ['origin-fold'],
-      [
-        folderResolverPrelude,
-        'export async function resolver(input) {',
-        '  const path = configPath(input.config);',
-        '  const sorted = [...input.inputDirs].sort((left, right) => left.origin.layer - right.origin.layer || left.origin.template.localeCompare(right.origin.template));',
-        '  const parts = [];',
-        '  for (const entry of sorted) {',
-        '    const sidecar = await Bun.file(entry.dir + "/" + entry.origin.template + ".txt").text();',
-        '    parts.push(`${entry.origin.template}:${entry.origin.layer}:${sidecar.trim()}`);',
-        '  }',
-        '  await put(input.outputDir, path, parts.join("\\n") + "\\n");',
-        '}',
-        '',
-      ].join('\n'),
-    );
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe(
-        'same-a:0:sidecar same-a\nsame-b:1:sidecar same-b\nsame-c:2:sidecar same-c\n',
-      );
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  test('framework resolver path overrides user config path during create merges', async () => {
-    const fixture = await createSamePathFixture(
-      [
-        {
-          name: 'same-a',
-          content: 'from a\n',
-          resolvers: [{ name: 'cyanprint/path-proof', config: { paths: ['shared.txt'], path: 'wrong.txt' } }],
-        },
-        {
-          name: 'same-b',
-          content: 'from b\n',
-          resolvers: [{ name: 'cyanprint/path-proof', config: { paths: ['shared.txt'], path: 'wrong.txt' } }],
-        },
-      ],
-      ['path-proof'],
-    );
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe('from a\nfrom b\n');
-      expect(await Bun.file(join(fixture.outDir, 'wrong.txt')).exists()).toBe(false);
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  test('records LWW conflict metadata when different create-time resolver groups meet', async () => {
-    const fixture = await createSamePathFixture(
-      [
-        {
-          name: 'same-a',
-          content: 'from a\n',
-          resolvers: [{ name: 'cyanprint/merge-a', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        {
-          name: 'same-b',
-          content: 'from b\n',
-          resolvers: [{ name: 'cyanprint/merge-a', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        {
-          name: 'same-c',
-          content: 'from c\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-        {
-          name: 'same-d',
-          content: 'from d\n',
-          resolvers: [{ name: 'cyanprint/merge-b', config: { paths: ['shared.txt'], mode: 'same' } }],
-        },
-      ],
-      ['merge-a', 'merge-b'],
-    );
-    try {
-      await createProject({ template: fixture.groupDir, outDir: fixture.outDir, answers: {}, headless: true });
-
-      const state = await Bun.file(join(fixture.outDir, '.cyan_state.yaml')).text();
-      expect(await Bun.file(join(fixture.outDir, 'shared.txt')).text()).toBe('from c\nfrom d\n');
-      expect(state).toContain('reason: different_resolver');
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-});
-
-type SamePathLayer = {
-  name: string;
-  content: string;
-  resolvers?: Array<{ name: string; config?: unknown }>;
-};
-
-async function createSamePathFixture(layers: SamePathLayer[], resolverNames: string[] = [], resolverRuntime?: string) {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-same-path-'));
-  const outDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-same-path-out-'));
-  const templatesRoot = join(tempRoot, 'examples/templates');
-  const groupsRoot = join(tempRoot, 'examples/template-groups');
-  await mkdir(templatesRoot, { recursive: true });
-  await mkdir(groupsRoot, { recursive: true });
-  const resolverBundles = await createSamePathResolverBundles(tempRoot, resolverNames, resolverRuntime);
-
-  for (const layer of layers) {
-    const templateDir = join(templatesRoot, layer.name);
-    await mkdir(join(templateDir, 'template'), { recursive: true });
-    await writeFile(join(templateDir, 'template/shared.txt'), layer.content, 'utf8');
-    await writeFile(join(templateDir, `template/${layer.name}.txt`), `sidecar ${layer.name}\n`, 'utf8');
-    await writeFile(
-      join(templateDir, 'cyan.yaml'),
-      [
-        'cyanprint: 4',
-        'kind: template',
-        'owner: cyanprint',
-        `name: ${layer.name}`,
-        'bundledEntry: cyan.ts',
-        'processors:',
-        '  - cyan/default',
-        ...(layer.resolvers?.length
-          ? ['resolvers:', ...[...new Set(layer.resolvers.map(resolver => resolver.name))].map(ref => `  - ${ref}`)]
-          : []),
-        '',
-      ].join('\n'),
-      'utf8',
-    );
-    await writeFile(
-      join(templateDir, 'cyan.ts'),
-      [
-        'export default function cyan(prompt, ctx) {',
-        '  return {',
-        "    processors: [{ name: 'cyan/default', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
-        `    resolvers: ${JSON.stringify(layer.resolvers ?? [])},`,
-        '  };',
-        '}',
-        '',
-      ].join('\n'),
-      'utf8',
-    );
-    if (resolverBundles.length > 0) {
-      await writeFile(
-        join(templateDir, '.cyan_artifact_bundles.json'),
-        JSON.stringify({ bundles: resolverBundles }),
-        'utf8',
-      );
-    }
-  }
-
-  const groupDir = join(groupsRoot, 'same-path-group');
-  await mkdir(groupDir, { recursive: true });
-  await writeFile(
-    join(groupDir, 'cyan.yaml'),
-    [
-      'cyanprint: 4',
-      'kind: template-group',
-      'owner: cyanprint',
-      'name: same-path-group',
-      'bundledEntry: cyan.ts',
-      'templates:',
-      ...layers.map(layer => `  - cyanprint/${layer.name}`),
-      '',
-    ].join('\n'),
-    'utf8',
-  );
-  await writeFile(join(groupDir, 'cyan.ts'), 'export default function cyan(prompt, ctx) { return {}; }\n', 'utf8');
-
-  return {
-    groupDir,
-    outDir,
-    cleanup: async () => {
-      await rm(tempRoot, { recursive: true, force: true });
-      await rm(outDir, { recursive: true, force: true });
+        ]);
+      } finally {
+        await fixture.cleanup();
+      }
     },
-  };
-}
+    LONG,
+  );
 
-async function createSamePathResolverBundles(tempRoot: string, names: string[], resolverRuntime?: string) {
-  const distDir = join(tempRoot, 'dist');
-  await mkdir(distDir, { recursive: true });
-  const bundles = [];
-  for (const name of names) {
-    const runtimeFile = join(distDir, `${name}.js`);
-    const runtime = resolverRuntime ?? folderConcatResolverRuntime;
-    await writeFile(runtimeFile, runtime, 'utf8');
-    bundles.push({
-      key: `resolver:cyanprint:${name}`,
-      dependency: { kind: 'resolver', owner: 'cyanprint', name },
-      runtimeFile,
-      integrity: sha256(runtime),
-    });
-  }
-  return bundles;
-}
+  test(
+    'registry-hydrated templates resolve unversioned artifacts from pinned cache entries',
+    async () => {
+      const fixture = await makeFixture('cache-artifact');
+      try {
+        const templateDir = join(fixture.templates, 'cached-default');
+        const runtimeDir = join(fixture.root, 'runtime');
+        await mkdir(templateDir, { recursive: true });
+        await mkdir(runtimeDir, { recursive: true });
+        const runtime =
+          'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "from-cache\\n"); }\n';
+        await writeFile(join(runtimeDir, 'processor.js'), runtime, 'utf8');
+        await writeFile(
+          join(templateDir, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'cached-default',
+            bundledEntry: 'cyan.ts',
+            processors: ['cyan/default'],
+          }),
+          'utf8',
+        );
+        await writeFile(
+          join(templateDir, 'cyan.ts'),
+          "export default async () => ({ processors: [{ owner: 'cyan', name: 'default' }] });\n",
+          'utf8',
+        );
+        await writeFile(
+          join(templateDir, '.cyan_artifact_bundles.json'),
+          JSON.stringify({
+            bundles: [
+              {
+                key: 'processor:cyan:default:4',
+                dependency: { kind: 'processor', owner: 'cyan', name: 'default', version: '4' },
+                runtimeFile: join(runtimeDir, 'processor.js'),
+                integrity: sha256(runtime),
+              },
+            ],
+          }),
+          'utf8',
+        );
 
-describe('standard artifact tests', () => {
-  test('runs processor, plugin, and resolver test fixtures', async () => {
-    const defaultProcessor = await runArtifactTests({
-      artifactDir: join(root, 'in-tree/official/processors/default'),
-    });
-    expect(defaultProcessor).toMatchObject({ kind: 'processor', passed: 1, failed: 0 });
+        await createProject({ template: templateDir, outDir: fixture.out, headless: true, localFallback: false });
 
-    const processor = await runArtifactTests({ artifactDir: join(root, 'examples/artifacts/processor-uppercase') });
-    expect(processor).toMatchObject({ kind: 'processor', passed: 1, failed: 0 });
+        expect(await readOut(fixture.out, 'README.md')).toBe('from-cache\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 
-    const plugin = await runArtifactTests({ artifactDir: join(root, 'examples/artifacts/plugin-footer') });
-    expect(plugin).toMatchObject({ kind: 'plugin', passed: 1, failed: 0 });
+  test(
+    'template scripts can use every prompt input type',
+    async () => {
+      const fixture = await makeFixture('all-inputs');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'all-inputs',
+          files: {
+            'README.md': 'name=__NAME__ enabled=__ENABLED__ color=__COLOR__ features=__FEATURES__ count=__COUNT__\n',
+          },
+          cyanTs: [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Name');",
+            "  const enabled = await prompt.confirm('enabled', 'Enabled?');",
+            "  const color = await prompt.select('color', 'Color', { options: ['cyan', 'darkcyan'] });",
+            "  const features = await prompt.multiselect('features', 'Features', { options: ['cli', 'web', 'worker'] });",
+            "  const count = await prompt.number('count', 'Count');",
+            '  return {',
+            '    processors: [{',
+            "      name: 'cyanprint/vars',",
+            "      files: [{ root: 'template', glob: '**/*', type: 'Template' }],",
+            "      config: { vars: { NAME: name, ENABLED: enabled, COLOR: color, FEATURES: features.join(','), COUNT: count } },",
+            '    }],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await createProject({
+          template,
+          outDir: fixture.out,
+          headless: true,
+          answers: { name: 'Inputs', enabled: true, color: 'cyan', features: ['cli', 'worker'], count: 7 },
+        });
+        expect(await readOut(fixture.out, 'README.md')).toBe(
+          'name=Inputs enabled=true color=cyan features=cli,worker count=7\n',
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 
-    const resolver = await runArtifactTests({ artifactDir: join(root, 'examples/artifacts/resolver-keep-user') });
-    expect(resolver).toMatchObject({ kind: 'resolver', passed: 2, failed: 0 });
+  test(
+    'prompt validation rejects out-of-range headless answers and accepts valid ones',
+    async () => {
+      const fixture = await makeFixture('validate');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'validated',
+          files: { 'OUT.md': 'count=__COUNT__\n' },
+          cyanTs: [
+            'export default async function cyan(prompt) {',
+            "  const count = await prompt.number('count', 'Count', {",
+            "    validate: value => (value >= 5 && value <= 10 ? true : 'count must be between 5 and 10'),",
+            '  });',
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { COUNT: String(count) } } }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await expect(
+          createProject({ template, outDir: fixture.out, headless: true, answers: { count: 3 } }),
+        ).rejects.toThrow('count must be between 5 and 10');
+        await createProject({ template, outDir: fixture.out, headless: true, answers: { count: 7 } });
+        expect(await readOut(fixture.out, 'OUT.md')).toBe('count=7\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 
-    const jsonResolver = await runArtifactTests({ artifactDir: join(root, 'examples/artifacts/resolver1') });
-    expect(jsonResolver).toMatchObject({ kind: 'resolver', passed: 3, failed: 0 });
+  test(
+    'interactively prompted answers from a custom adapter persist to generated state',
+    async () => {
+      const fixture = await makeFixture('adapter');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'prompted',
+          files: { 'OUT.md': 'name=__NAME__\n' },
+          cyanTs: [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Name');",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { NAME: name } } }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await createProject({
+          template,
+          outDir: fixture.out,
+          headless: false,
+          promptAdapter: {
+            async ask<T>(): Promise<T> {
+              return 'Prompted Project' as T;
+            },
+          },
+        });
+        expect(await readOut(fixture.out, 'OUT.md')).toBe('name=Prompted Project\n');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.history[0]?.answers).toEqual({ name: 'Prompted Project' });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 
-    const lineResolver = await runArtifactTests({ artifactDir: join(root, 'examples/artifacts/resolver2') });
-    expect(lineResolver).toMatchObject({ kind: 'resolver', passed: 2, failed: 0 });
-  });
+  test(
+    'createProject reports generation progress for templates and artifacts',
+    async () => {
+      const fixture = await makeFixture('progress');
+      const events: Array<{ kind: string; ref: string }> = [];
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'progress', files: { 'README.md': '# P\n' } });
+        await createProject({
+          template,
+          outDir: fixture.out,
+          headless: true,
+          onProgress: event => events.push({ kind: event.kind, ref: event.ref }),
+        });
+        expect(events.some(event => event.kind === 'template' && event.ref === 'cyanprint/progress')).toBe(true);
+        expect(events.some(event => event.kind === 'processor' && event.ref === 'cyanprint/vars')).toBe(true);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 
-  test('default processor trims generated trailing whitespace fixtures', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-default-processor-fixture-'));
-    const artifactDir = join(tempRoot, 'processor-default');
-    try {
-      await mkdir(join(artifactDir, 'src'), { recursive: true });
-      await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
-      await mkdir(join(artifactDir, 'tests/basic/expected'), { recursive: true });
-      await writeFile(
-        join(artifactDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: processor',
-          'owner: cyanprint',
-          'name: default',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'src/index.ts'),
-        await Bun.file(join(root, 'in-tree/official/processors/default/src/index.ts')).text(),
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'tests/basic/input/README.md'),
-        '# Example   \n\nLine with trailing spaces    \n',
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'tests/basic/expected/README.md'),
-        '# Example\n\nLine with trailing spaces\n',
-        'utf8',
-      );
+  test(
+    'post-generation commands run inside the generated project directory',
+    async () => {
+      const fixture = await makeFixture('command-cwd');
+      try {
+        const template = await writeTemplate(fixture, {
+          name: 'command-cwd',
+          cyanTs: [
+            'export default async () => ({',
+            '  commands: [{',
+            "    command: 'bun',",
+            '    args: ["--eval", "await Bun.write(\\"post-command-cwd.txt\\", process.cwd())"],',
+            '    allow: true,',
+            '  }],',
+            '});',
+            '',
+          ].join('\n'),
+        });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        expect(await realpath(await readOut(fixture.out, 'post-command-cwd.txt'))).toBe(await realpath(fixture.out));
+        expect(await Bun.file(join(fixture.out, '.cyan_state.yaml')).text()).toContain('post-command-cwd.txt');
+        // The command-created file is attributed to the template whose command ran.
+        const state = await loadGeneratedState(fixture.out);
+        const entry = state.provenance.find(item => item.path === 'post-command-cwd.txt');
+        expect(entry?.source).toBe('cyanprint/command-cwd@local');
+        expect(await Bun.file(join(root, 'post-command-cwd.txt')).exists()).toBe(false);
+      } finally {
+        await fixture.cleanup();
+        await rm(join(root, 'post-command-cwd.txt'), { force: true });
+      }
+    },
+    LONG,
+  );
 
-      const report = await runArtifactTests({ artifactDir });
+  test(
+    'loads template folders with copy/template modes through one scoped processor',
+    async () => {
+      const fixture = await makeFixture('folder-modes');
+      const bytes = new Uint8Array([0, 1, 2, 253, 254, 255]);
+      try {
+        await writeVarsProcessor(fixture);
+        const templateDir = join(fixture.templates, 'folder-template');
+        await mkdir(join(templateDir, 'template-text/docs'), { recursive: true });
+        await mkdir(join(templateDir, 'template-copy/assets'), { recursive: true });
+        await writeFile(
+          join(templateDir, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'folder-template',
+            bundledEntry: 'cyan.ts',
+            processors: ['cyanprint/vars'],
+          }),
+          'utf8',
+        );
+        await writeFile(join(templateDir, 'template-text/docs/README.md'), '# __NAME__\n', 'utf8');
+        await writeFile(join(templateDir, 'template-copy/assets/pixel.bin'), bytes);
+        await writeFile(
+          join(templateDir, 'cyan.ts'),
+          [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Project name');",
+            '  return {',
+            '    processors: [{',
+            "      name: 'cyanprint/vars',",
+            '      files: [',
+            "        { root: 'template-text', glob: '**/*', type: 'Template' },",
+            "        { root: 'template-copy', glob: '**/*', type: 'Copy' },",
+            '      ],',
+            '      config: { vars: { NAME: name } },',
+            '    }],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
 
-      expect(report).toMatchObject({ passed: 1, failed: 0 });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
+        await createProject({
+          template: templateDir,
+          outDir: fixture.out,
+          answers: { name: 'Folder App' },
+          headless: true,
+        });
 
-  test('runs legacy Ketone-style resolver fixtures through the fold compatibility path', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-ketone-resolver-fixture-'));
-    const artifactDir = join(tempRoot, 'resolver');
-    try {
-      await mkdir(join(artifactDir, 'inputs/basic/template-a'), { recursive: true });
-      await mkdir(join(artifactDir, 'snapshots/basic'), { recursive: true });
-      await writeFile(
-        join(artifactDir, 'cyan.yaml'),
-        [
-          'username: atomi',
-          'name: legacy-json',
-          'description: Legacy Ketone resolver fixture',
-          'readme: README.MD',
-          'build:',
-          '  images:',
-          '    resolver:',
-          '      image: legacy-json',
-          '      dockerfile: Dockerfile',
-          '      context: .',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(artifactDir, 'README.MD'), '# Legacy JSON Resolver\n', 'utf8');
-      await writeFile(
-        join(artifactDir, 'index.ts'),
-        [
-          "import { StartResolverWithLambda } from '@atomicloud/cyan-sdk';",
-          "import type { ResolverInput, ResolverOutput } from '@atomicloud/cyan-sdk';",
-          '',
-          'StartResolverWithLambda((input: ResolverInput): ResolverOutput => {',
-          '  const file = input.files[0];',
-          '  if (!file) throw new Error("missing file");',
-          '  const parsed = JSON.parse(file.content) as Record<string, unknown>;',
-          '  return { path: file.path, content: JSON.stringify({ b: parsed.b, a: parsed.a }) };',
-          '});',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'test.cyan.yaml'),
-        [
-          'tests:',
-          '  - name: basic',
-          '    expected:',
-          '      type: snapshot',
-          '      value:',
-          '        path: ./snapshots/basic',
-          '    config: {}',
-          '    resolver_inputs:',
-          '      - path: ./inputs/basic/template-a',
-          '        origin:',
-          '          template: template-a',
-          '          layer: 0',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'inputs/basic/template-a/data.json'),
-        '{\r\n  "a": 1,\r\n  "b": 2\r\n}\r\n',
-        'utf8',
-      );
-      await writeFile(join(artifactDir, 'snapshots/basic/data.json'), '{"b":2,"a":1}', 'utf8');
-
-      const report = await runArtifactTests({ artifactDir });
-
-      expect(report).toMatchObject({ kind: 'resolver', passed: 1, failed: 0 });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('command validations run only after expected output comparison', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-command-validation-'));
-    const processorDir = join(tempRoot, 'processor');
-    const pluginDir = join(tempRoot, 'plugin');
-    const resolverDir = join(tempRoot, 'resolver');
-    const templateDir = join(tempRoot, 'template');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(processorDir, 'src'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
-      await writeFile(
-        join(processorDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: processor',
-          'owner: cyanprint',
-          'name: failing-command',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(processorDir, 'src/index.ts'), identityProcessorRuntime, 'utf8');
-      await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
-      await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Input\n', 'utf8');
-      await writeFile(
-        join(processorDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    input: tests/basic/input',
-          '    expected: tests/basic/expected',
-          '    validations:',
-          '      - exit 1',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(pluginDir, 'src'), { recursive: true });
-      await mkdir(join(pluginDir, 'tests/basic/input'), { recursive: true });
-      await mkdir(join(pluginDir, 'tests/basic/expected'), { recursive: true });
-      await writeFile(
-        join(pluginDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: plugin',
-          'owner: cyanprint',
-          'name: failing-command',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(pluginDir, 'src/index.ts'), 'export function plugin(input) {}\n', 'utf8');
-      await writeFile(join(pluginDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
-      await writeFile(join(pluginDir, 'tests/basic/expected/README.md'), '# Input\n', 'utf8');
-      await writeFile(
-        join(pluginDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    input: tests/basic/input',
-          '    expected: tests/basic/expected',
-          '    validations:',
-          '      - exit 1',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(resolverDir, 'src'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/basic'), { recursive: true });
-      await writeFile(
-        join(resolverDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: resolver',
-          'owner: cyanprint',
-          'name: failing-command',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(resolverDir, 'src/index.ts'), latestFolderResolverRuntime, 'utf8');
-      await writeFile(join(resolverDir, 'tests/basic/current.txt'), 'actual\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/basic/expected.txt'), 'actual\n', 'utf8');
-      await writeFile(
-        join(resolverDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    current: tests/basic/current.txt',
-          '    expected: tests/basic/expected.txt',
-          '    validations:',
-          '      - exit 1',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await mkdir(join(templateDir, 'expected'), { recursive: true });
-      await writeFile(join(templateDir, 'template/README.md'), '# Template\n', 'utf8');
-      await writeFile(join(templateDir, 'expected/README.md'), '# Template\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: failing-command',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        ['cases:', '  - name: basic', '    expected: expected', '    validations:', '      - exit 1', ''].join('\n'),
-        'utf8',
-      );
-      await createProject({ template: templateDir, outDir: join(templateDir, 'expected'), headless: true });
-
-      const processorValidationReport = await runArtifactTests({ artifactDir: processorDir });
-      expect(processorValidationReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(processorValidationReport.cases[0]?.message).toContain('Command failed');
-
-      const pluginValidationReport = await runArtifactTests({ artifactDir: pluginDir });
-      expect(pluginValidationReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(pluginValidationReport.cases[0]?.message).toContain('Command failed');
-
-      const resolverValidationReport = await runArtifactTests({ artifactDir: resolverDir });
-      expect(resolverValidationReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(resolverValidationReport.cases[0]?.message).toContain('Command failed');
-
-      const templateValidationReport = await runTemplateTest({
-        template: templateDir,
-        outDir: join(out, 'validation'),
-      });
-      expect(templateValidationReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(templateValidationReport.cases[0]?.message).toContain('Command failed');
-
-      await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Expected mismatch\n', 'utf8');
-      await writeFile(join(pluginDir, 'tests/basic/expected/README.md'), '# Expected mismatch\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/basic/expected.txt'), 'expected mismatch\n', 'utf8');
-      await writeFile(join(templateDir, 'expected/README.md'), '# Expected mismatch\n', 'utf8');
-
-      const processorMismatchReport = await runArtifactTests({ artifactDir: processorDir });
-      expect(processorMismatchReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(processorMismatchReport.cases[0]?.message).toContain('Output mismatch');
-      expect(processorMismatchReport.cases[0]?.message).not.toContain('Command failed');
-
-      const pluginMismatchReport = await runArtifactTests({ artifactDir: pluginDir });
-      expect(pluginMismatchReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(pluginMismatchReport.cases[0]?.message).toContain('Output mismatch');
-      expect(pluginMismatchReport.cases[0]?.message).not.toContain('Command failed');
-
-      const resolverMismatchReport = await runArtifactTests({ artifactDir: resolverDir });
-      expect(resolverMismatchReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(resolverMismatchReport.cases[0]?.message).toContain('Resolver output mismatch');
-      expect(resolverMismatchReport.cases[0]?.message).not.toContain('Command failed');
-
-      const templateMismatchReport = await runTemplateTest({ template: templateDir, outDir: join(out, 'mismatch') });
-      expect(templateMismatchReport).toMatchObject({ passed: 0, failed: 1 });
-      expect(templateMismatchReport.cases[0]?.message).toContain('Output mismatch');
-      expect(templateMismatchReport.cases[0]?.message).not.toContain('Command failed');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('template tests pass with expected output and no README snapshot', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-expected-only-'));
-    const templateDir = join(tempRoot, 'template');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await mkdir(join(templateDir, 'expected'), { recursive: true });
-      await writeFile(join(templateDir, 'template/README.md'), '# Template\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: expected-only',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-      await createProject({ template: templateDir, outDir: join(templateDir, 'expected'), headless: true });
-      await rm(join(templateDir, 'expected/.cyan_state.yaml'), { force: true });
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    expected: expected',
-          '    validations:',
-          '      - test -f README.md',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      expect(await runTemplateTest({ template: templateDir, outDir: out })).toMatchObject({ passed: 1, failed: 0 });
-      const updateReport = await runTemplateTest({ template: templateDir, outDir: out, updateSnapshots: true });
-      expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
-      expect(await Bun.file(join(templateDir, 'expected/.cyan_state.yaml')).exists()).toBe(false);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('template tests fail without cyan.test.yaml or legacy snapshot', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-unasserted-'));
-    const templateDir = join(tempRoot, 'template');
-    try {
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await writeFile(join(templateDir, 'template/README.md'), '# Template\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: unasserted',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-
-      const report = await runTemplateTest({ template: templateDir, outDir: join(tempRoot, 'out') });
-      expect(report).toMatchObject({ passed: 0, failed: 1 });
-      expect(report.cases[0]?.message).toContain('Template tests need cyan.test.yaml');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('template expected fixture update preserves empty expected output folders', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-empty-expected-'));
-    const templateDir = join(tempRoot, 'template');
-    try {
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await mkdir(join(templateDir, 'expected'), { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: empty-output',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        ['cases:', '  - name: basic', '    expected: expected', ''].join('\n'),
-        'utf8',
-      );
-
-      const updateReport = await runTemplateTest({
-        template: templateDir,
-        outDir: join(tempRoot, 'out'),
-        updateSnapshots: true,
-      });
-      expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
-      expect(await exists(join(templateDir, 'expected'))).toBe(true);
-      expect(await runTemplateTest({ template: templateDir, outDir: join(tempRoot, 'out-next') })).toMatchObject({
-        passed: 1,
-        failed: 0,
-      });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('template tests accept inline answers and deterministic state', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-inline-state-'));
-    const templateDir = join(tempRoot, 'template');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await mkdir(join(templateDir, 'expected'), { recursive: true });
-      await writeFile(join(templateDir, 'template/README.md'), '# @@ NAME @@-@@ SLUG @@\n', 'utf8');
-      await writeFile(join(templateDir, 'expected/README.md'), '# Inline-seeded\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: inline-state',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        [
-          'export default async function cyan(prompt, ctx) {',
-          '  const name = await prompt.text("name", "Project name");',
-          '  const slug = ctx.deterministic.get("slug");',
-          '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { NAME: name, SLUG: slug }, parser: { varSyntax: [["@@", "@@"]] } } }] };',
-          '}',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: inline',
-          '    answers:',
-          '      name: Inline',
-          '    deterministicState:',
-          '      slug: seeded',
-          '    expected: expected',
-          '    validations:',
-          "      - grep -q '# Inline-seeded' README.md",
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      expect(await runTemplateTest({ template: templateDir, outDir: out })).toMatchObject({ passed: 1, failed: 0 });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('template expected output compares and updates binary files byte for byte', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-binary-'));
-    const templateDir = join(tempRoot, 'template');
-    const out = join(tempRoot, 'out');
-    const binary = new Uint8Array([0, 1, 2, 253, 254, 255]);
-    try {
-      await mkdir(join(templateDir, 'template/assets'), { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        'cyanprint: 4\nkind: template\nowner: cyanprint\nname: binary\nbundledEntry: cyan.ts\nprocessors:\n  - cyan/default\n',
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan() { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Copy" }] }] }; }\n',
-        'utf8',
-      );
-      await writeFile(join(templateDir, 'template/assets/pixel.bin'), binary);
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    expected: expected',
-          '    validations:',
-          '      - test -f assets/pixel.bin',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await createProject({ template: templateDir, outDir: join(templateDir, 'expected'), headless: true });
-
-      expect(await runTemplateTest({ template: templateDir, outDir: out })).toMatchObject({ passed: 1, failed: 0 });
-      await writeFile(join(templateDir, 'expected/assets/pixel.bin'), new Uint8Array([0, 1, 2, 3]));
-      expect(await runTemplateTest({ template: templateDir, outDir: out })).toMatchObject({ passed: 0, failed: 1 });
-      const updateReport = await runTemplateTest({ template: templateDir, outDir: out, updateSnapshots: true });
-      expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
-      expect(new Uint8Array(await Bun.file(join(templateDir, 'expected/assets/pixel.bin')).arrayBuffer())).toEqual(
-        binary,
-      );
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects escaping processor output when updating artifact snapshots', async () => {
-    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-snapshot-'));
-    try {
-      await mkdir(join(artifactDir, 'src'), { recursive: true });
-      await mkdir(join(artifactDir, 'dist'), { recursive: true });
-      await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
-      await writeFile(
-        join(artifactDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: processor',
-          'owner: cyanprint',
-          'name: escape',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'dist/index.js'),
-        'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "stale"); }',
-        'utf8',
-      );
-      await writeFile(
-        join(artifactDir, 'src/index.ts'),
-        'export async function processor(input) { await Bun.write(input.outputDir + "/../escape.txt", "bad"); }',
-        'utf8',
-      );
-      await writeFile(join(artifactDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
-      const report = await runArtifactTests({ artifactDir, updateSnapshots: true });
-      expect(report.failed).toBe(1);
-      expect(await Bun.file(join(artifactDir, 'tests/basic/escape.txt')).exists()).toBe(false);
-    } finally {
-      await rm(artifactDir, { recursive: true, force: true });
-    }
-  });
-
-  test('rejects removed commands field in cyanprint test manifests', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-removed-commands-'));
-    const processorDir = join(tempRoot, 'processor');
-    const templateDir = join(tempRoot, 'template');
-    try {
-      await mkdir(join(processorDir, 'src'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
-      await writeFile(
-        join(processorDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: processor',
-          'owner: cyanprint',
-          'name: removed-commands',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(processorDir, 'src/index.ts'), identityProcessorRuntime);
-      await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
-      await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Input\n', 'utf8');
-      await writeFile(
-        join(processorDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    input: tests/basic/input',
-          '    expected: tests/basic/expected',
-          '    commands:',
-          '      - exit 0',
-          '    snapshot: tests/basic/expected/README.md',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        'cyanprint: 4\nkind: template\nowner: cyanprint\nname: removed-commands\nbundledEntry: cyan.ts\nprocessors:\n  - cyan/default\n',
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-      await writeFile(join(templateDir, 'template/README.md'), '# Template\n', 'utf8');
-      await createProject({ template: templateDir, outDir: join(templateDir, 'expected'), headless: true });
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        ['cases:', '  - name: basic', '    expected: expected', '    commands:', '      - exit 0', ''].join('\n'),
-        'utf8',
-      );
-
-      await expect(runArtifactTests({ artifactDir: processorDir })).rejects.toThrow('commands');
-      await expect(runTemplateTest({ template: templateDir, outDir: join(tempRoot, 'out') })).rejects.toThrow(
-        'commands',
-      );
-
-      await writeFile(
-        join(processorDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    input: tests/basic/input',
-          '    expected: tests/basic/expected',
-          '    snapshot: tests/basic/expected/README.md',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await expect(runArtifactTests({ artifactDir: processorDir })).rejects.toThrow('snapshot');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('failing validations do not mutate expected output when updating snapshots', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-validation-'));
-    const processorDir = join(tempRoot, 'processor');
-    const resolverDir = join(tempRoot, 'resolver');
-    const templateDir = join(tempRoot, 'template');
-    try {
-      await mkdir(join(processorDir, 'src'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
-      await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
-      await writeFile(
-        join(processorDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: processor',
-          'owner: cyanprint',
-          'name: update-validation',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(processorDir, 'src/index.ts'),
-        'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "# New\\n"); }\n',
-        'utf8',
-      );
-      await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
-      await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Old\n', 'utf8');
-      await writeFile(
-        join(processorDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: basic',
-          '    input: tests/basic/input',
-          '    expected: tests/basic/expected',
-          '    validations:',
-          '      - exit 1',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(resolverDir, 'src'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/text'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/folder/current'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/folder/expected'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/fold/input-a'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/fold/input-b'), { recursive: true });
-      await mkdir(join(resolverDir, 'tests/fold/expected'), { recursive: true });
-      await writeFile(
-        join(resolverDir, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: resolver',
-          'owner: cyanprint',
-          'name: update-validation',
-          'entry: src/index.ts',
-          'bundledEntry: dist/index.js',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(join(resolverDir, 'src/index.ts'), latestFolderResolverRuntime, 'utf8');
-      await writeFile(join(resolverDir, 'tests/text/current.txt'), 'new text\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/text/expected.txt'), 'old text\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/folder/current/file.txt'), 'new folder\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/folder/expected/file.txt'), 'old folder\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/fold/input-a/file.txt'), 'first fold\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/fold/input-b/file.txt'), 'new fold\n', 'utf8');
-      await writeFile(join(resolverDir, 'tests/fold/expected/file.txt'), 'old fold\n', 'utf8');
-      await writeFile(
-        join(resolverDir, 'cyan.test.yaml'),
-        [
-          'cases:',
-          '  - name: text',
-          '    current: tests/text/current.txt',
-          '    expected: tests/text/expected.txt',
-          '    validations:',
-          '      - exit 1',
-          '  - name: folder',
-          '    current: tests/folder/current',
-          '    expected: tests/folder/expected',
-          '    validations:',
-          '      - exit 1',
-          '  - name: fold',
-          '    resolverInputs:',
-          '      - path: tests/fold/input-a',
-          '        origin: { template: a, layer: 0 }',
-          '      - path: tests/fold/input-b',
-          '        origin: { template: b, layer: 1 }',
-          '    expected: tests/fold/expected',
-          '    validations:',
-          '      - exit 1',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
-
-      await mkdir(join(templateDir, 'template'), { recursive: true });
-      await writeFile(
-        join(templateDir, 'cyan.yaml'),
-        'cyanprint: 4\nkind: template\nowner: cyanprint\nname: update-validation\nbundledEntry: cyan.ts\nprocessors:\n  - cyan/default\n',
-        'utf8',
-      );
-      await writeFile(
-        join(templateDir, 'cyan.ts'),
-        'export default function cyan(prompt, ctx) { return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] }; }\n',
-        'utf8',
-      );
-      await writeFile(join(templateDir, 'template/README.md'), '# New\n', 'utf8');
-      await mkdir(join(templateDir, 'expected'), { recursive: true });
-      await writeFile(join(templateDir, 'expected/README.md'), '# Old\n', 'utf8');
-      await writeFile(
-        join(templateDir, 'cyan.test.yaml'),
-        ['cases:', '  - name: basic', '    expected: expected', '    validations:', '      - exit 1', ''].join('\n'),
-        'utf8',
-      );
-
-      const processorReport = await runArtifactTests({ artifactDir: processorDir, updateSnapshots: true });
-      expect(processorReport).toMatchObject({ passed: 0, failed: 1, snapshotUpdated: 0 });
-      expect(await Bun.file(join(processorDir, 'tests/basic/expected/README.md')).text()).toBe('# Old\n');
-
-      const resolverReport = await runArtifactTests({ artifactDir: resolverDir, updateSnapshots: true });
-      expect(resolverReport).toMatchObject({ passed: 0, failed: 3, snapshotUpdated: 0 });
-      expect(await Bun.file(join(resolverDir, 'tests/text/expected.txt')).text()).toBe('old text\n');
-      expect(await Bun.file(join(resolverDir, 'tests/folder/expected/file.txt')).text()).toBe('old folder\n');
-      expect(await Bun.file(join(resolverDir, 'tests/fold/expected/file.txt')).text()).toBe('old fold\n');
-
-      const templateReport = await runTemplateTest({
-        template: templateDir,
-        outDir: join(tempRoot, 'template-out'),
-        updateSnapshots: true,
-      });
-      expect(templateReport).toMatchObject({ passed: 0, failed: 1, snapshotUpdated: 0 });
-      expect(await Bun.file(join(templateDir, 'expected/README.md')).text()).toBe('# Old\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
+        expect(await readOut(fixture.out, 'docs/README.md')).toBe('# Folder App\n');
+        expect(new Uint8Array(await Bun.file(join(fixture.out, 'assets/pixel.bin')).arrayBuffer())).toEqual(bytes);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 });
 
-// The parity templates (cyan/new, workspace, nix) prove themselves through their own
-// cyan.test.yaml suites, which run on every `cyanprint push` in the full-stack e2e.
-
-describe('update three state resolver merge trust safety post generation command machine readable errors', () => {
-  test('update reuses answers and merge exposes conflicts', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-'));
-    try {
-      await createProject({
-        template: join(root, 'examples/templates/update-v1'),
-        outDir: out,
-        answers: { name: 'Update Project' },
-      });
-      const update = await updateProject({
-        projectDir: out,
-        template: join(root, 'examples/templates/update-v2'),
-        answers: { tagline: 'Updated with pinned answers.' },
-      });
-      expect(update.status).toBe('done');
-      expect(mergeFile({ prior: 'a', current: 'b', target: 'c' }).status).toBe('conflicted');
-      expect(evaluateTrust({ trusted: true, version: '4', integrity: 'abc' }).scope).toBe('version');
-    } finally {
-      await rm(out, { recursive: true, force: true });
-    }
-  });
-
-  test('update reuses deterministic state from the previous install', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-deterministic-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const [dir, fallback] of [
-        [v1, 'stable-id'],
-        [v2, 'changed-id'],
-      ] as const) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(join(dir, 'template/README.md'), '# @@ ID @@\n', 'utf8');
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: deterministic-update',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          [
-            'export default function cyan(prompt, ctx) {',
-            `  const id = ctx.deterministic.get("id") ?? ${JSON.stringify(fallback)};`,
-            '  ctx.deterministic.set("id", id);',
-            '  return { processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }], config: { vars: { ID: id }, parser: { varSyntax: [["@@", "@@"]] } } }] };',
-            '}',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-
-      await createProject({ template: v1, outDir: out, headless: true });
-      await updateProject({ projectDir: out, template: v2, headless: true });
-
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('# stable-id\n');
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).text()).toContain('id: stable-id');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update records resolver output in generated state', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-resolver-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const [dir, value] of [
-        [v1, 'generated v1'],
-        [v2, 'generated v2'],
-      ] as const) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(join(dir, 'template/README.md'), value, 'utf8');
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: resolver-output-state',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            'resolvers:',
-            '  - cyanprint/keep-user',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          [
-            'export default async function cyan() {',
-            '  return {',
-            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
-            '    resolvers: [{ name: "cyanprint/keep-user", config: { paths: ["README.md"] } }],',
-            '  };',
-            '}',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-      await createProject({ template: v1, outDir: out, headless: true });
-      await writeFile(join(out, 'README.md'), '# User Edit\n\nKeep me.\n', 'utf8');
-      const update = await updateProject({
-        projectDir: out,
-        template: v2,
-      });
-      expect(update.status).toBe('done');
-      const state = await Bun.file(join(out, '.cyan_state.yaml')).text();
-      expect(state).toContain('# User Edit');
-      expect(state).toContain(sha256('# User Edit\n\nKeep me.\n'));
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update conflicts when a text-tracked resolver file is replaced with binary bytes', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-binary-current-conflict-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const [dir, value] of [
-        [v1, 'v1'],
-        [v2, 'v2'],
-      ] as const) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(join(dir, 'template/README.md'), value, 'utf8');
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: binary-current-conflict',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            'resolvers:',
-            '  - cyanprint/keep-user',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          [
+describe('composition via the templates dictionary', () => {
+  test(
+    'embedded answers and deterministicState reach the child and bubble into persisted state',
+    async () => {
+      const fixture = await makeFixture('embedded-config');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, {
+          name: 'child',
+          files: { 'CHILD.md': 'name=__CHILD_NAME__ seed=__SEED__\n' },
+          cyanTs: [
             'export default async function cyan(prompt, ctx) {',
-            '  return {',
-            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
-            '    resolvers: [{ name: "cyanprint/keep-user", config: { paths: ["README.md"] } }],',
-            '  };',
+            "  const childName = await prompt.text('childName', 'Child name');",
+            "  const seed = ctx.deterministic.get('seed');",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { CHILD_NAME: childName, SEED: seed } } }] };",
             '}',
             '',
           ].join('\n'),
-          'utf8',
-        );
+        });
+        const parent = await writeTemplate(fixture, {
+          name: 'parent',
+          files: { 'PARENT.md': '# Parent\n' },
+          templates: {
+            'cyanprint/child': {
+              answers: { childName: 'Nested Answer' },
+              deterministicState: { seed: 'A_SEED' },
+            },
+          },
+        });
+
+        await createProject({ template: parent, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'CHILD.md')).toBe('name=Nested Answer seed=A_SEED\n');
+        expect(await readOut(fixture.out, 'PARENT.md')).toBe('# Parent\n');
+        const state = await loadGeneratedState(fixture.out);
+        const history = state.templates[0]?.history[0];
+        // Child answers bubble up into the root's persisted answer bag for updates.
+        expect(history?.answers.childName).toBe('Nested Answer');
+        expect(history?.deterministicState.seed).toBe('A_SEED');
+      } finally {
+        await fixture.cleanup();
       }
-      await createProject({ template: v1, outDir: out, headless: true });
-      await writeFile(join(out, 'README.md'), new Uint8Array([0xff, 0xfe, 0xfd, 0x00]));
+    },
+    LONG,
+  );
 
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update).toMatchObject({
-        status: 'conflict',
-        conflicts: [{ path: 'README.md', reason: 'user_edit_and_target_changed' }],
-      });
-      expect(new Uint8Array(await Bun.file(join(out, 'README.md')).arrayBuffer())).toEqual(
-        new Uint8Array([0xff, 0xfe, 0xfd, 0x00]),
-      );
-      expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).exists()).toBe(true);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update conflicts instead of choosing between ambiguous matching resolvers', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-ambiguous-resolver-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const [dir, value] of [
-        [v1, 'v1'],
-        [v2, 'v2'],
-      ] as const) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(join(dir, 'template/README.md'), value, 'utf8');
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: ambiguous-resolver-update',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            'resolvers:',
-            '  - cyanprint/resolver1',
-            '  - cyanprint/resolver2',
-            '',
-          ].join('\n'),
-          'utf8',
+  test(
+    'rejects a template included more than once in the composition',
+    async () => {
+      const fixture = await makeFixture('dup');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, { name: 'dup', files: { 'DUP.md': '# dup\n' } });
+        await writeTemplate(fixture, { name: 'x', templates: { 'cyanprint/dup': {} } });
+        await writeTemplate(fixture, { name: 'y', templates: { 'cyanprint/dup': {} } });
+        const group = await writeTemplate(fixture, {
+          name: 'group',
+          templates: { 'cyanprint/x': {}, 'cyanprint/y': {} },
+        });
+        await expect(createProject({ template: group, outDir: fixture.out, headless: true })).rejects.toThrow(
+          'included more than once',
         );
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          [
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'allows two templates to share the same processor',
+    async () => {
+      const fixture = await makeFixture('shared-proc');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, { name: 'p', files: { 'P.md': '# p\n' } });
+        await writeTemplate(fixture, { name: 'q', files: { 'Q.md': '# q\n' } });
+        const group = await writeTemplate(fixture, {
+          name: 'grp',
+          kind: 'template-group',
+          templates: { 'cyanprint/p': {}, 'cyanprint/q': {} },
+        });
+        const result = await createProject({ template: group, outDir: fixture.out, headless: true });
+        expect(result.files.map(file => file.path).sort()).toEqual(['P.md', 'Q.md']);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('tier 1 — processor outputs', () => {
+  test(
+    'conflicting processor outputs fall back to LWW by invocation with processor origins recorded',
+    async () => {
+      const fixture = await makeFixture('tier1-lww');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'append', runtime: appendProcessorRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'tier1',
+          files: { 'docs/note.md': 'start' },
+          processors: ['cyanprint/append'],
+          cyanTs: [
             'export default async function cyan() {',
             '  return {',
-            '    processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }],',
-            '    resolvers: [',
-            '      { name: "cyanprint/resolver1", config: { paths: ["README.md"] } },',
-            '      { name: "cyanprint/resolver2", config: { paths: ["README.md"] } },',
+            '    processors: [',
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'A' } },",
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'B' } },",
             '    ],',
             '  };',
             '}',
             '',
           ].join('\n'),
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'docs/note.md')).toBe('startB');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'docs/note.md');
+        expect(decision?.decision).toBe('lww-override');
+        expect(decision?.segment).toBe('processor');
+        expect(decision?.source).toBe('cyanprint/tier1@local');
+        expect(decision?.contributors).toEqual([
+          { template: 'cyanprint/tier1@local', layer: 0, processor: { ref: 'cyanprint/append', invocation: 0 } },
+          { template: 'cyanprint/tier1@local', layer: 1, processor: { ref: 'cyanprint/append', invocation: 1 } },
+        ]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'conflicting processor outputs merge through the nominated resolver with processor origins',
+    async () => {
+      const fixture = await makeFixture('tier1-resolver');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'append', runtime: appendProcessorRuntime });
+        await writeArtifact(fixture, { kind: 'resolver', name: 'origins', runtime: originResolverRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'tier1r',
+          files: { 'docs/note.md': 'start' },
+          processors: ['cyanprint/append'],
+          resolvers: [{ ref: 'cyanprint/origins', config: {}, files: ['docs/**'] }],
+          cyanTs: [
+            'export default async function cyan() {',
+            '  return {',
+            '    processors: [',
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'A' } },",
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'B' } },",
+            '    ],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        // The resolver saw every variation, each carrying its processor ref + invocation.
+        expect(await readOut(fixture.out, 'docs/note.md')).toBe(
+          'cyanprint/tier1r@local:0:cyanprint/append#0\ncyanprint/tier1r@local:1:cyanprint/append#1\n',
+        );
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'docs/note.md');
+        expect(decision?.decision).toBe('resolver-merged');
+        expect(decision?.segment).toBe('processor');
+        expect(decision?.resolver).toBe('cyanprint/origins');
+        expect(decision?.contributors?.map(origin => origin.processor?.invocation)).toEqual([0, 1]);
+        expect(lwwEntries(state.provenance)).toBe(0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'merges renamed scoped processor output beside independent processor output',
+    async () => {
+      const fixture = await makeFixture('tier1-rename');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'append', runtime: appendProcessorRuntime });
+        await writeArtifact(fixture, { kind: 'processor', name: 'rename', runtime: renameProcessorRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'rename-pipeline',
+          files: { 'docs/note.md': 'start' },
+          processors: ['cyanprint/rename', 'cyanprint/append'],
+          cyanTs: [
+            'export default async function cyan() {',
+            '  return {',
+            '    processors: [',
+            "      { name: 'cyanprint/rename', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] },",
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'A' } },",
+            '    ],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'docs/note.md')).toBe('startA');
+        expect(await readOut(fixture.out, 'docs/renamed.md')).toBe('startR');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'rejects scoped processor output outside its sandbox',
+    async () => {
+      const fixture = await makeFixture('tier1-escape');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'escape', runtime: escapeProcessorRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'scope-escape',
+          files: { 'docs/note.md': 'safe' },
+          processors: ['cyanprint/escape'],
+          cyanTs: [
+            'export default async function cyan() {',
+            "  return { processors: [{ name: 'cyanprint/escape', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }] }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await expect(createProject({ template, outDir: fixture.out, headless: true })).rejects.toThrow(
+          'unsafe output path',
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'loads distinct scopes with the same output path as one overlaid invocation input',
+    async () => {
+      const fixture = await makeFixture('tier1-scopes');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'identity', runtime: identityProcessorRuntime });
+        const templateDir = join(fixture.templates, 'distinct-scopes');
+        await mkdir(join(templateDir, 'template-a'), { recursive: true });
+        await mkdir(join(templateDir, 'template-b'), { recursive: true });
+        await writeFile(join(templateDir, 'template-a/README.md'), 'from a\n', 'utf8');
+        await writeFile(join(templateDir, 'template-b/README.md'), 'from b\n', 'utf8');
+        await writeFile(
+          join(templateDir, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'distinct-scopes',
+            bundledEntry: 'cyan.ts',
+            processors: ['cyanprint/identity'],
+          }),
           'utf8',
         );
-      }
-      await createProject({ template: v1, outDir: out, headless: true });
-      await writeFile(join(out, 'README.md'), 'user edit', 'utf8');
-
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update).toMatchObject({
-        status: 'conflict',
-        conflicts: [{ path: 'README.md', reason: 'user_edit_and_target_changed_ambiguous_resolver' }],
-      });
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('user edit');
-      expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).text()).toBe('v2\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update preserves generated binary files when target changes', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-binary-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const dir of [v1, v2]) {
-        await mkdir(join(dir, 'template'), { recursive: true });
         await writeFile(
-          join(dir, 'cyan.yaml'),
+          join(templateDir, 'cyan.ts'),
           [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: binary-update',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
+            'export default async function cyan() {',
+            '  return {',
+            '    processors: [{',
+            "      name: 'cyanprint/identity',",
+            '      files: [',
+            "        { root: 'template-a', glob: '**/*', type: 'Template' },",
+            "        { root: 'template-b', glob: '**/*', type: 'Template' },",
+            '      ],',
+            '    }],',
+            '  };',
+            '}',
             '',
           ].join('\n'),
           'utf8',
         );
+
+        await createProject({ template: templateDir, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'README.md')).toBe('from b\n');
+      } finally {
+        await fixture.cleanup();
       }
-      await writeFile(join(v1, 'template/asset.bin'), new Uint8Array([0, 1]));
-      await writeFile(join(v2, 'template/asset.bin'), new Uint8Array([254, 254]));
-      for (const dir of [v1, v2]) {
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          [
-            'export default async () => ({',
-            '  processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Copy" }] }],',
-            '});',
+    },
+    LONG,
+  );
+
+  test(
+    'plugins transform the resolved tier-1 layer and see their scoped extra files',
+    async () => {
+      const fixture = await makeFixture('plugin');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'uppercase', runtime: uppercaseProcessorRuntime });
+        await writeArtifact(fixture, { kind: 'plugin', name: 'footer', runtime: footerPluginRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'with-artifacts',
+          files: { 'README.md': '# artifact project\n' },
+          processors: ['cyanprint/uppercase'],
+          plugins: ['cyanprint/footer'],
+          cyanTs: [
+            'export default async function cyan() {',
+            '  return {',
+            "    processors: [{ name: 'cyanprint/uppercase', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+            "    plugins: [{ name: 'cyanprint/footer' }],",
+            '  };',
+            '}',
             '',
           ].join('\n'),
-          'utf8',
-        );
+        });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+
+        const readme = await readOut(fixture.out, 'README.md');
+        expect(readme).toContain('# ARTIFACT PROJECT');
+        expect(readme).toContain('Generated locally.');
+        expect(
+          result.artifactBundles
+            .map(bundle => bundle.dependency)
+            .filter(dependency => dependency.kind !== 'template')
+            .map(dependency => `${dependency.kind}:${dependency.owner}/${dependency.name}`)
+            .sort(),
+        ).toEqual(['plugin:cyanprint/footer', 'processor:cyanprint/uppercase']);
+      } finally {
+        await fixture.cleanup();
       }
+    },
+    LONG,
+  );
 
-      await createProject({ template: v1, outDir: out, headless: true });
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update.status).toBe('done');
-      expect(new Uint8Array(await Bun.file(join(out, 'asset.bin')).arrayBuffer())).toEqual(new Uint8Array([254, 254]));
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update reports conflict instead of resurrecting user-deleted generated files', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-deleted-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const dir of [v1, v2]) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: deleted-update',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-      await writeFile(join(v1, 'template/README.md'), 'v1', 'utf8');
-      await writeFile(join(v2, 'template/README.md'), 'v2', 'utf8');
-      for (const dir of [v1, v2]) {
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
-          'utf8',
-        );
-      }
-
-      await createProject({ template: v1, outDir: out, headless: true });
-      await rm(join(out, 'README.md'), { force: true });
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update).toMatchObject({
-        status: 'conflict',
-        conflicts: [{ path: 'README.md', reason: 'user_deleted_and_target_changed' }],
-      });
-      expect(await Bun.file(join(out, 'README.md')).exists()).toBe(false);
-      expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).text()).toBe('v2\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('conflicted update does not partially write clean target files', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-atomic-conflict-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const dir of [v1, v2]) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: atomic-update',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-      await writeFile(join(v1, 'template/A.md'), 'a1', 'utf8');
-      await writeFile(join(v1, 'template/B.md'), 'b1', 'utf8');
-      await writeFile(join(v2, 'template/A.md'), 'a2', 'utf8');
-      await writeFile(join(v2, 'template/B.md'), 'b2', 'utf8');
-      for (const dir of [v1, v2]) {
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
-          'utf8',
-        );
-      }
-
-      await createProject({ template: v1, outDir: out, headless: true });
-      await writeFile(join(out, 'B.md'), 'user edit', 'utf8');
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update.status).toBe('conflict');
-      expect(await Bun.file(join(out, 'A.md')).text()).toBe('a1\n');
-      expect(await Bun.file(join(out, 'B.md')).text()).toBe('user edit');
-      expect(await Bun.file(join(out, '.cyan_conflicts/B.md.target')).text()).toBe('b2\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update reports conflict when generated file is replaced by a directory', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-directory-conflict-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const dir of [v1, v2]) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: directory-conflict',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-      await writeFile(join(v1, 'template/README.md'), 'v1', 'utf8');
-      await writeFile(join(v2, 'template/README.md'), 'v2', 'utf8');
-      for (const dir of [v1, v2]) {
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
-          'utf8',
-        );
-      }
-
-      await createProject({ template: v1, outDir: out, headless: true });
-      await rm(join(out, 'README.md'));
-      await mkdir(join(out, 'README.md'));
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update).toMatchObject({
-        status: 'conflict',
-        conflicts: [{ path: 'README.md', reason: 'user_replaced_file_with_directory' }],
-      });
-      expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).text()).toBe('v2\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('update preserves prior generated state when regenerated target is unchanged from prior', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-update-unchanged-target-'));
-    const v1 = join(tempRoot, 'v1');
-    const v2 = join(tempRoot, 'v2');
-    const v3 = join(tempRoot, 'v3');
-    const out = join(tempRoot, 'out');
-    try {
-      for (const dir of [v1, v2, v3]) {
-        await mkdir(join(dir, 'template'), { recursive: true });
-        await writeFile(
-          join(dir, 'cyan.yaml'),
-          [
-            'cyanprint: 4',
-            'kind: template',
-            'owner: cyanprint',
-            'name: unchanged-target',
-            'bundledEntry: cyan.ts',
-            'processors:',
-            '  - cyan/default',
-            '',
-          ].join('\n'),
-          'utf8',
-        );
-      }
-      await writeFile(join(v1, 'template/README.md'), 'same', 'utf8');
-      await writeFile(join(v1, 'template/OTHER.md'), 'old', 'utf8');
-      await writeFile(join(v2, 'template/README.md'), 'same', 'utf8');
-      await writeFile(join(v2, 'template/OTHER.md'), 'new', 'utf8');
-      await writeFile(join(v3, 'template/README.md'), 'changed', 'utf8');
-      await writeFile(join(v3, 'template/OTHER.md'), 'new', 'utf8');
-      for (const dir of [v1, v2, v3]) {
-        await writeFile(
-          join(dir, 'cyan.ts'),
-          'export default async () => ({ processors: [{ name: "cyan/default", files: [{ root: "template", glob: "**/*", type: "Template" }] }] });\n',
-          'utf8',
-        );
-      }
-
-      await createProject({ template: v1, outDir: out, headless: true });
-      await writeFile(join(out, 'README.md'), 'user edit', 'utf8');
-      const update = await updateProject({ projectDir: out, template: v2 });
-
-      expect(update.status).toBe('done');
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('user edit');
-      expect(await Bun.file(join(out, 'OTHER.md')).text()).toBe('new\n');
-      const stateAfterUnchangedTarget = await Bun.file(join(out, '.cyan_state.yaml')).text();
-      expect(stateAfterUnchangedTarget).toContain('same');
-      expect(stateAfterUnchangedTarget).not.toContain('user edit');
-
-      const nextUpdate = await updateProject({ projectDir: out, template: v3 });
-
-      expect(nextUpdate).toMatchObject({
-        status: 'conflict',
-        conflicts: [{ path: 'README.md', reason: 'user_edit_and_target_changed' }],
-      });
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('user edit');
-      expect(await Bun.file(join(out, '.cyan_conflicts/README.md.target')).text()).toBe('changed\n');
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  test('registry-hydrated templates resolve unversioned artifacts from pinned cache entries', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-cache-artifact-'));
-    const template = join(tempRoot, 'template');
-    const runtime = join(tempRoot, 'runtime');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(template, { recursive: true });
-      await mkdir(runtime, { recursive: true });
-      await writeFile(
-        join(template, 'cyan.yaml'),
-        [
-          'cyanprint: 4',
-          'kind: template',
-          'owner: cyanprint',
-          'name: cached-default',
-          'bundledEntry: cyan.ts',
-          'processors:',
-          '  - cyan/default',
+  test(
+    'loads scoped plugin files into the plugin input alongside generated output',
+    async () => {
+      const fixture = await makeFixture('scoped-plugin');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'identity', runtime: identityProcessorRuntime });
+        const scopedPluginRuntime = [
+          "import { mkdir } from 'node:fs/promises';",
+          "import { dirname } from 'node:path';",
+          'export async function plugin(input) {',
+          "  const readme = await Bun.file(input.inputDir + '/README.md').text();",
+          "  const asset = await Bun.file(input.inputDir + '/plugin-assets/message.txt').text();",
+          "  await mkdir(dirname(input.outputDir + '/PLUGIN_OUTPUT.txt'), { recursive: true });",
+          "  await Bun.write(input.outputDir + '/PLUGIN_OUTPUT.txt', readme.trim() + '\\n' + asset.trim() + '\\n');",
+          '}',
           '',
-        ].join('\n'),
-        'utf8',
-      );
-      await writeFile(
-        join(template, 'cyan.ts'),
-        [
+        ].join('\n');
+        await writeArtifact(fixture, { kind: 'plugin', name: 'scoped-plugin', runtime: scopedPluginRuntime });
+        const templateDir = join(fixture.templates, 'scoped-plugin');
+        await mkdir(join(templateDir, 'template/app'), { recursive: true });
+        await mkdir(join(templateDir, 'template/plugin-assets'), { recursive: true });
+        await writeFile(join(templateDir, 'template/app/README.md'), '# App\n', 'utf8');
+        await writeFile(join(templateDir, 'template/plugin-assets/message.txt'), 'plugin asset\n', 'utf8');
+        await writeFile(
+          join(templateDir, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'scoped-plugin',
+            bundledEntry: 'cyan.ts',
+            processors: ['cyanprint/identity'],
+            plugins: ['cyanprint/scoped-plugin'],
+          }),
+          'utf8',
+        );
+        await writeFile(
+          join(templateDir, 'cyan.ts'),
+          [
+            'export default async function cyan() {',
+            '  return {',
+            "    processors: [{ name: 'cyanprint/identity', files: [{ root: 'template/app', glob: '**/*', type: 'Template' }] }],",
+            "    plugins: [{ name: 'cyanprint/scoped-plugin', files: [{ root: 'template', glob: 'plugin-assets/**/*', type: 'Copy' }] }],",
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+
+        await createProject({ template: templateDir, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'README.md')).toBe('# App\n');
+        expect(await readOut(fixture.out, 'plugin-assets/message.txt')).toBe('plugin asset\n');
+        expect(await readOut(fixture.out, 'PLUGIN_OUTPUT.txt')).toBe('# App\nplugin asset\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+type SamePathLayer = {
+  name: string;
+  content: string;
+  resolver?: { ref: string; config?: Record<string, unknown> };
+};
+
+/**
+ * Leaves that all emit `shared.txt` plus a sidecar `<NAME>.md`, grouped under one
+ * template-group whose children follow the layer order.
+ */
+async function writeSamePathGroup(
+  fixture: Fixture,
+  layers: SamePathLayer[],
+  group?: Partial<TemplateSpec> & { ownContent?: string },
+): Promise<string> {
+  await writeVarsProcessor(fixture);
+  for (const layer of layers) {
+    await writeTemplate(fixture, {
+      name: layer.name,
+      files: { 'shared.txt': layer.content, [`${layer.name.toUpperCase()}.md`]: `# ${layer.name}\n` },
+      resolvers: layer.resolver
+        ? [{ ref: layer.resolver.ref, config: layer.resolver.config ?? {}, files: ['shared.txt'] }]
+        : undefined,
+    });
+  }
+  return await writeTemplate(fixture, {
+    name: 'grp',
+    kind: 'template-group',
+    templates: Object.fromEntries(layers.map(layer => [`cyanprint/${layer.name}`, {}])),
+    files: group?.ownContent ? { 'shared.txt': group.ownContent } : undefined,
+    resolvers: group?.resolvers,
+    cyanTs: group?.cyanTs,
+  });
+}
+
+describe('tier 2 — dependency tree', () => {
+  test(
+    'unanimous resolver nomination merges all variations in one call',
+    async () => {
+      const fixture = await makeFixture('tier2-consensus');
+      try {
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n', resolver: { ref: 'cyanprint/concat' } },
+          { name: 'same-b', content: 'from b\n', resolver: { ref: 'cyanprint/concat' } },
+        ]);
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from a\nfrom b\n');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('resolver-merged');
+        expect(decision?.segment).toBe('dependency');
+        expect(decision?.resolver).toBe('cyanprint/concat');
+        expect(decision?.contributors).toEqual([
+          { template: 'cyanprint/same-a@local', layer: 0 },
+          { template: 'cyanprint/same-b@local', layer: 1 },
+        ]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'same resolver with different config is no consensus — LWW wins',
+    async () => {
+      const fixture = await makeFixture('tier2-config');
+      try {
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n', resolver: { ref: 'cyanprint/concat', config: { mode: 'a' } } },
+          { name: 'same-b', content: 'from b\n', resolver: { ref: 'cyanprint/concat', config: { mode: 'b' } } },
+        ]);
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from b\n');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('lww-override');
+        expect(decision?.segment).toBe('dependency');
+        expect(decision?.source).toBe('cyanprint/same-b@local');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'different resolver nominations are no consensus — LWW wins',
+    async () => {
+      const fixture = await makeFixture('tier2-mixed');
+      try {
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat2', runtime: concatResolverRuntime });
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n', resolver: { ref: 'cyanprint/concat' } },
+          { name: 'same-b', content: 'from b\n', resolver: { ref: 'cyanprint/concat2' } },
+        ]);
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from b\n');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.provenance.find(entry => entry.path === 'shared.txt')?.decision).toBe('lww-override');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'AllNone (no template nominates a resolver) falls back to LWW',
+    async () => {
+      const fixture = await makeFixture('tier2-none');
+      try {
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n' },
+          { name: 'same-b', content: 'from b\n' },
+        ]);
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from b\n');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('lww-override');
+        expect(decision?.segment).toBe('dependency');
+        expect(decision?.contributors?.length).toBe(2);
+        // Non-conflicting sibling files keep plain 'added' provenance.
+        const added = state.provenance.find(entry => entry.path === 'SAME-A.md');
+        expect(added?.decision).toBe('added');
+        expect(added?.source).toBe('cyanprint/same-a@local');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    "the parent's own post-plugin layer is last, so self wins LWW over dependencies",
+    async () => {
+      const fixture = await makeFixture('tier2-self');
+      try {
+        const group = await writeSamePathGroup(
+          fixture,
+          [
+            { name: 'same-a', content: 'from a\n' },
+            { name: 'same-b', content: 'from b\n' },
+          ],
+          { ownContent: 'from group\n' },
+        );
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from group\n');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('lww-override');
+        expect(decision?.source).toBe('cyanprint/grp@local');
+        expect(decision?.contributors?.map(origin => origin.template)).toEqual([
+          'cyanprint/same-a@local',
+          'cyanprint/same-b@local',
+          'cyanprint/grp@local',
+        ]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'the resolver receives every same-path variation with template origins in one call',
+    async () => {
+      const fixture = await makeFixture('tier2-origins');
+      try {
+        await writeArtifact(fixture, { kind: 'resolver', name: 'origins', runtime: originResolverRuntime });
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n', resolver: { ref: 'cyanprint/origins' } },
+          { name: 'same-b', content: 'from b\n', resolver: { ref: 'cyanprint/origins' } },
+          { name: 'same-c', content: 'from c\n', resolver: { ref: 'cyanprint/origins' } },
+        ]);
+
+        await createProject({ template: group, outDir: fixture.out, headless: true });
+
+        expect(await readOut(fixture.out, 'shared.txt')).toBe(
+          'cyanprint/same-a@local:0\ncyanprint/same-b@local:1\ncyanprint/same-c@local:2\n',
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('tier 3 — multi-install (create upserts into an existing project)', () => {
+  test(
+    'sibling templates layer by installedAt with LWW, user edits survive the merge, and history upserts',
+    async () => {
+      const fixture = await makeFixture('tier3');
+      try {
+        await writeVarsProcessor(fixture);
+        const first = await writeTemplate(fixture, {
+          name: 'first',
+          files: { 'shared.txt': 'from first\n', 'FIRST.md': '# first\n', 'USER.md': 'original\n' },
+        });
+        const second = await writeTemplate(fixture, {
+          name: 'second',
+          files: { 'shared.txt': 'from second\n', 'SECOND.md': '# second\n' },
+        });
+
+        await createProject({ template: first, outDir: fixture.out, headless: true });
+        // A user edit to a file the sibling never touches must survive the upsert merge.
+        await writeFile(join(fixture.out, 'USER.md'), 'edited by user\n', 'utf8');
+
+        const result = await createProject({ template: second, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        expect(result.conflicts).toEqual([]);
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from second\n');
+        expect(await readOut(fixture.out, 'FIRST.md')).toBe('# first\n');
+        expect(await readOut(fixture.out, 'SECOND.md')).toBe('# second\n');
+        expect(await readOut(fixture.out, 'USER.md')).toBe('edited by user\n');
+
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates.map(entry => entry.name).sort()).toEqual(['first', 'second']);
+        expect(state.templates.every(entry => entry.active)).toBe(true);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('lww-override');
+        expect(decision?.segment).toBe('sibling');
+        expect(decision?.source).toBe('cyanprint/second@local');
+        expect(decision?.contributors?.map(origin => origin.template)).toEqual([
+          'cyanprint/first@local',
+          'cyanprint/second@local',
+        ]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'sibling conflicts merge through a unanimously nominated resolver',
+    async () => {
+      const fixture = await makeFixture('tier3-resolver');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        const first = await writeTemplate(fixture, {
+          name: 'first',
+          files: { 'shared.txt': 'from first\n' },
+          resolvers: [{ ref: 'cyanprint/concat', config: {}, files: ['shared.txt'] }],
+        });
+        const second = await writeTemplate(fixture, {
+          name: 'second',
+          files: { 'shared.txt': 'from second\n' },
+          resolvers: [{ ref: 'cyanprint/concat', config: {}, files: ['shared.txt'] }],
+        });
+
+        await createProject({ template: first, outDir: fixture.out, headless: true });
+        const result = await createProject({ template: second, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        expect(await readOut(fixture.out, 'shared.txt')).toBe('from first\nfrom second\n');
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'shared.txt');
+        expect(decision?.decision).toBe('resolver-merged');
+        expect(decision?.segment).toBe('sibling');
+        expect(decision?.resolver).toBe('cyanprint/concat');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    're-creating the same template upserts a new history entry and regenerates output',
+    async () => {
+      const fixture = await makeFixture('tier3-recreate');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'recreate',
+          files: { 'OUT.md': 'name=__NAME__\n' },
+          cyanTs: [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Name');",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { NAME: name } } }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true, answers: { name: 'One' } });
+        const result = await createProject({ template, outDir: fixture.out, headless: true, answers: { name: 'Two' } });
+
+        expect(result.status).toBe('done');
+        expect(await readOut(fixture.out, 'OUT.md')).toBe('name=Two\n');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates.length).toBe(1);
+        expect(state.templates[0]?.history.length).toBe(2);
+        expect(state.templates[0]?.history[0]?.answers).toEqual({ name: 'One' });
+        expect(state.templates[0]?.history[1]?.answers).toEqual({ name: 'Two' });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'a conflicted upsert leaves state untouched and skips post-generation commands',
+    async () => {
+      const fixture = await makeFixture('tier3-conflict');
+      try {
+        await writeVarsProcessor(fixture);
+        const commandCyan = [
+          'export default function cyan() {',
+          '  return {',
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+          "    commands: [{ command: 'touch', args: ['command-ran.txt'], allow: true }],",
+          '  };',
+          '}',
+          '',
+        ].join('\n');
+        const v1 = await writeTemplate(fixture, {
+          name: 'upsert-conflict',
+          dir: 'upsert-conflict-old',
+          files: { 'README.md': 'template old\n' },
+        });
+        const v2 = await writeTemplate(fixture, {
+          name: 'upsert-conflict',
+          dir: 'upsert-conflict-new',
+          files: { 'README.md': 'template new\n' },
+          cyanTs: commandCyan,
+        });
+
+        await createProject({ template: v1, outDir: fixture.out, headless: true });
+        await writeFile(join(fixture.out, 'README.md'), 'user edit\n', 'utf8');
+        const before = await loadGeneratedState(fixture.out);
+
+        const result = await createProject({ template: v2, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('conflict');
+        expect(result.conflicts).toEqual(['README.md']);
+        expect(await readOut(fixture.out, 'README.md')).toContain('<<<<<<<');
+        // Post-generation commands must not run over marker-bearing files, and state
+        // must not record the incoming generation as accepted.
+        expect(await exists(join(fixture.out, 'command-ran.txt'))).toBe(false);
+        const after = await loadGeneratedState(fixture.out);
+        expect(after.templates[0]?.history.length).toBe(before.templates[0]?.history.length ?? -1);
+        expect(after.templates[0]?.source).toBe(before.templates[0]?.source ?? 'missing');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'a clean upsert runs post-generation commands and records their output in state',
+    async () => {
+      const fixture = await makeFixture('tier3-clean-command');
+      try {
+        await writeVarsProcessor(fixture);
+        // v2 adds a post-generation command that writes a file not present in the template
+        // tree; a clean upsert must run it AND record the file it creates in state.
+        const commandCyan = [
+          'export default function cyan() {',
+          '  return {',
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+          '    commands: [{ command: "bun", args: ["--eval", "await Bun.write(\\"generated-by-command.txt\\", \\"fromcommand\\")"], allow: true }],',
+          '  };',
+          '}',
+          '',
+        ].join('\n');
+        const v1 = await writeTemplate(fixture, {
+          name: 'upsert-clean',
+          dir: 'upsert-clean-old',
+          files: { 'README.md': 'shared\n' },
+        });
+        const v2 = await writeTemplate(fixture, {
+          name: 'upsert-clean',
+          dir: 'upsert-clean-new',
+          files: { 'README.md': 'shared\n' },
+          cyanTs: commandCyan,
+        });
+
+        await createProject({ template: v1, outDir: fixture.out, headless: true });
+        const result = await createProject({ template: v2, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        // Command ran: its file is on disk...
+        expect(await readOut(fixture.out, 'generated-by-command.txt')).toBe('fromcommand');
+        // ...and — parity with a fresh create — it is recorded in state, not silently dropped.
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.files.some(file => file.path === 'generated-by-command.txt')).toBe(true);
+        // Provenance names the template whose command created the file, never 'unknown'.
+        const commandEntry = state.provenance.find(entry => entry.path === 'generated-by-command.txt');
+        expect(commandEntry?.source).toBe('cyanprint/upsert-clean@local');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('applyMergedTree', () => {
+  test('applies deletions before writes so a merge can replace a file with a directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      // ours has `foo` as a FILE on disk; the merge turns it into a directory.
+      const ours = [{ path: 'foo', content: 'old\n' }];
+      await writeFile(join(dir, 'foo'), 'old\n', 'utf8');
+      const merge = await gitThreeWayMerge({
+        base: ours,
+        ours,
+        theirs: [{ path: 'foo/bar.txt', content: 'new\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      // Writing before deleting would mkdir `foo` while the old file exists → EEXIST.
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'foo/bar.txt')).text()).toBe('new\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('prunes emptied directories so a merge can replace a directory with a file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      // ours has `foo` as a DIRECTORY on disk; the merge turns it into a file.
+      const ours = [{ path: 'foo/bar.txt', content: 'old\n' }];
+      await mkdir(join(dir, 'foo'), { recursive: true });
+      await writeFile(join(dir, 'foo/bar.txt'), 'old\n', 'utf8');
+      const merge = await gitThreeWayMerge({
+        base: ours,
+        ours,
+        theirs: [{ path: 'foo', content: 'flat\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      // Deleting foo/bar.txt leaves an empty `foo/` dir; it must be pruned before the
+      // file write, or writing `foo` fails with EISDIR.
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'foo')).text()).toBe('flat\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps sibling content when pruning emptied directories', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      const ours = [
+        { path: 'pkg/removed.txt', content: 'bye\n' },
+        { path: 'pkg/kept.txt', content: 'stay\n' },
+      ];
+      await mkdir(join(dir, 'pkg'), { recursive: true });
+      await writeFile(join(dir, 'pkg/removed.txt'), 'bye\n', 'utf8');
+      await writeFile(join(dir, 'pkg/kept.txt'), 'stay\n', 'utf8');
+      const merge = await gitThreeWayMerge({
+        base: ours,
+        ours,
+        theirs: [{ path: 'pkg/kept.txt', content: 'stay\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await applyMergedTree(dir, merge);
+      expect(await exists(join(dir, 'pkg/removed.txt'))).toBe(false);
+      expect(await Bun.file(join(dir, 'pkg/kept.txt')).text()).toBe('stay\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write through a directory symlink (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      // User planted a directory symlink inside the project: `assets -> <outside>`.
+      // readProjectFiles is symlink-blind, so a merge that adds `assets/config.txt` looks clean.
+      await symlink(outside, join(dir, 'assets'));
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [{ path: 'assets/config.txt', content: 'new\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      // Without the guard this would follow the symlink and write <outside>/config.txt.
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/symlink/);
+      expect(await exists(join(outside, 'config.txt'))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write through a file symlink (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      // User replaced a generated file with a symlink to an outside target.
+      await writeFile(join(outside, 'target.txt'), 'original\n', 'utf8');
+      await symlink(join(outside, 'target.txt'), join(dir, 'foo.txt'));
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [{ path: 'foo.txt', content: 'rewritten\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/symlink/);
+      // The outside target is untouched — the write did not follow the link.
+      expect(await Bun.file(join(outside, 'target.txt')).text()).toBe('original\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to delete through a directory symlink (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      // User replaced a generated directory with a symlink: `assets -> <outside>`, where the
+      // outside target holds real user data. A merge that deletes managed `assets/config.txt`
+      // would, without a guard, follow the symlinked parent and unlink <outside>/config.txt.
+      await writeFile(join(outside, 'config.txt'), 'outside\n', 'utf8');
+      await symlink(outside, join(dir, 'assets'));
+      await expect(
+        applyMergedTree(dir, { files: [], deletions: ['assets/config.txt'], conflicts: [] }),
+      ).rejects.toThrow(/symlink/);
+      // The outside file survives — the delete did not follow the link.
+      expect(await Bun.file(join(outside, 'config.txt')).text()).toBe('outside\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write through a hard-linked managed file (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      // User hard-linked an in-project path to an outside inode: `foo.txt` and
+      // `<outside>/target.txt` share one inode. lstat sees a regular file (isSymbolicLink()
+      // false), so the symlink guard alone would let the write truncate the shared inode.
+      await writeFile(join(outside, 'target.txt'), 'original\n', 'utf8');
+      await link(join(outside, 'target.txt'), join(dir, 'foo.txt'));
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [{ path: 'foo.txt', content: 'rewritten\n' }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/hard link/);
+      // The shared inode is untouched — the write did not rewrite the outside file.
+      expect(await Bun.file(join(outside, 'target.txt')).text()).toBe('original\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write a binary file through a hard link (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      await writeFile(join(outside, 'target.bin'), Buffer.from([0, 1, 2]));
+      await link(join(outside, 'target.bin'), join(dir, 'logo.bin'));
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [{ path: 'logo.bin', bytesBase64: Buffer.from([9, 9, 9]).toString('base64') }],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/hard link/);
+      expect([...(await Bun.file(join(outside, 'target.bin')).bytes())]).toEqual([0, 1, 2]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write through a special file / FIFO (no redirect into a pipe reader)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      // User planted a FIFO at a managed path. lstat sees neither a symlink nor a regular file,
+      // so the symlink+hardlink guards alone would let `Bun.write`/`writeFile` open the pipe and
+      // redirect generated bytes into a reader (data loss) or block forever with no reader.
+      const fifo = join(dir, 'foo.txt');
+      await mkfifo(fifo);
+      // A reader keeps the (guard-removed) write from blocking, so the genuineness proof fails
+      // cleanly instead of hanging; with the guard in place the reject happens before any open.
+      const reader = Bun.spawn(['cat', fifo], { stdout: 'ignore', stderr: 'ignore' });
+      try {
+        const merge = await gitThreeWayMerge({
+          base: [],
+          ours: [],
+          theirs: [{ path: 'foo.txt', content: 'rewritten\n' }],
+        });
+        expect(merge.conflicts).toEqual([]);
+        await expect(applyMergedTree(dir, merge)).rejects.toThrow(/special file/);
+        // The path is still a FIFO — the write did not open the pipe.
+        expect((await lstat(fifo)).isFIFO()).toBe(true);
+      } finally {
+        reader.kill();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('writeGeneratedState link safety', () => {
+  const state = buildGeneratedState({ templates: [], files: [], provenance: [] });
+
+  test('refuses to write .cyan_state.yaml through a symlink (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-state-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      // User planted `.cyan_state.yaml -> <outside>/target.yaml`. writeText follows it, so
+      // without the guard the state would be persisted outside the project root.
+      await writeFile(join(outside, 'target.yaml'), 'original\n', 'utf8');
+      await symlink(join(outside, 'target.yaml'), join(dir, '.cyan_state.yaml'));
+      await expect(writeGeneratedState(dir, state)).rejects.toThrow(/symlink/);
+      expect(await Bun.file(join(outside, 'target.yaml')).text()).toBe('original\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write .cyan_state.yaml through a hard link (no escape outside the project root)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-state-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+    try {
+      await writeFile(join(outside, 'target.yaml'), 'original\n', 'utf8');
+      await link(join(outside, 'target.yaml'), join(dir, '.cyan_state.yaml'));
+      await expect(writeGeneratedState(dir, state)).rejects.toThrow(/hard link/);
+      expect(await Bun.file(join(outside, 'target.yaml')).text()).toBe('original\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to write .cyan_state.yaml through a special file / FIFO (no redirect into a pipe reader)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-state-'));
+    try {
+      // User planted `.cyan_state.yaml` as a FIFO. `writeText`'s `writeFile` would open the pipe,
+      // sending state YAML to a reader (silent data loss) or blocking forever with no reader.
+      const fifo = join(dir, '.cyan_state.yaml');
+      await mkfifo(fifo);
+      const reader = Bun.spawn(['cat', fifo], { stdout: 'ignore', stderr: 'ignore' });
+      try {
+        await expect(writeGeneratedState(dir, state)).rejects.toThrow(/special file/);
+        expect((await lstat(fifo)).isFIFO()).toBe(true);
+      } finally {
+        reader.kill();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveLayers identical variations', () => {
+  const failingInvoker = async (): Promise<string> => {
+    throw new Error('resolver must not be invoked');
+  };
+
+  test('byte-identical multi-layer content passes through without a decision', async () => {
+    const result = await resolveLayers({
+      layers: [
+        { template: 'cyanprint/a@1', files: [{ path: 'LICENSE', content: 'MIT\n' }], resolvers: [] },
+        {
+          template: 'cyanprint/b@1',
+          files: [
+            { path: 'LICENSE', content: 'MIT\n' },
+            { path: 'b.txt', content: 'b\n' },
+          ],
+          resolvers: [],
+        },
+      ],
+      segment: 'dependency',
+      invokeResolver: failingInvoker,
+    });
+
+    // No lww-override for identical bytes — nothing can be lost, so strict template
+    // tests must not demand an assertion for shared identical files.
+    expect(result.decisions).toEqual([]);
+    expect(result.files).toEqual([
+      { path: 'LICENSE', content: 'MIT\n' },
+      { path: 'b.txt', content: 'b\n' },
+    ]);
+  });
+
+  test('identical binary variations pass through; differing content still records lww-override', async () => {
+    const result = await resolveLayers({
+      layers: [
+        {
+          template: 'cyanprint/a@1',
+          files: [
+            { path: 'logo.bin', bytesBase64: 'AAE=' },
+            { path: 'shared.txt', content: 'from a\n' },
+          ],
+          resolvers: [],
+        },
+        {
+          template: 'cyanprint/b@1',
+          files: [
+            { path: 'logo.bin', bytesBase64: 'AAE=' },
+            { path: 'shared.txt', content: 'from b\n' },
+          ],
+          resolvers: [],
+        },
+      ],
+      segment: 'sibling',
+      invokeResolver: failingInvoker,
+    });
+
+    expect(result.decisions).toEqual([
+      {
+        path: 'shared.txt',
+        source: 'cyanprint/b@1',
+        decision: 'lww-override',
+        segment: 'sibling',
+        contributors: [
+          { template: 'cyanprint/a@1', layer: 0 },
+          { template: 'cyanprint/b@1', layer: 1 },
+        ],
+      },
+    ]);
+    expect(result.files.find(file => file.path === 'shared.txt')?.content).toBe('from b\n');
+    expect(result.files.find(file => file.path === 'logo.bin')?.bytesBase64).toBe('AAE=');
+  });
+});
+
+/** Two fixture dirs for one template ref: v1 (`version: '1'`) and v2 (`version: '2'`). */
+async function writeVersionPair(
+  fixture: Fixture,
+  args: {
+    name: string;
+    v1Files: Record<string, string>;
+    v2Files: Record<string, string>;
+    v1CyanTs?: string;
+    v2CyanTs?: string;
+    processors?: string[];
+  },
+): Promise<{
+  v1: string;
+  v2: string;
+  resolveTemplateSource: (source: { source: string; version?: string }) => Promise<string>;
+  resolveUpdateTarget: () => Promise<{ templateDir: string; version: string }>;
+}> {
+  const v1 = await writeTemplate(fixture, {
+    name: args.name,
+    dir: `${args.name}-v1`,
+    version: '1',
+    files: args.v1Files,
+    cyanTs: args.v1CyanTs,
+    processors: args.processors,
+  });
+  const v2 = await writeTemplate(fixture, {
+    name: args.name,
+    dir: `${args.name}-v2`,
+    version: '2',
+    files: args.v2Files,
+    cyanTs: args.v2CyanTs,
+    processors: args.processors,
+  });
+  return {
+    v1,
+    v2,
+    resolveTemplateSource: async ({ version }) => (version === '2' ? v2 : v1),
+    resolveUpdateTarget: async () => ({ templateDir: v2, version: '2' }),
+  };
+}
+
+describe('update', () => {
+  test(
+    'update floats to the resolved target, reuses answers, preserves user edits, and appends history',
+    async () => {
+      const fixture = await makeFixture('update-bump');
+      try {
+        await writeVarsProcessor(fixture);
+        const promptedCyan = (extra: boolean): string =>
+          [
+            'export default async function cyan(prompt) {',
+            "  const name = await prompt.text('name', 'Name');",
+            ...(extra ? ["  const tagline = await prompt.text('tagline', 'Tagline', { default: 'none' });"] : []),
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { NAME: name" +
+              (extra ? ', TAGLINE: tagline' : '') +
+              ' } } }] };',
+            '}',
+            '',
+          ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'upd',
+          v1Files: { 'README.md': 'title=__NAME__\nbody v1\n', 'KEEP.md': 'keep\n' },
+          v2Files: { 'README.md': 'title=__NAME__\nbody v2\ntag=__TAGLINE__\n', 'KEEP.md': 'keep\n' },
+          v1CyanTs: promptedCyan(false),
+          v2CyanTs: promptedCyan(true),
+        });
+
+        await createProject({
+          template: pair.v1,
+          outDir: fixture.out,
+          headless: true,
+          answers: { name: 'Update Project' },
+        });
+        await writeFile(join(fixture.out, 'KEEP.md'), 'keep\nuser line\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          answers: { tagline: 'Updated with pinned answers.' },
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(update.conflicts).toEqual([]);
+        expect(update.updated).toEqual([{ ref: 'cyanprint/upd', from: '1', to: '2' }]);
+        expect(update.reusedAnswers).toContain('name');
+        expect(await readOut(fixture.out, 'README.md')).toBe(
+          'title=Update Project\nbody v2\ntag=Updated with pinned answers.\n',
+        );
+        expect(await readOut(fixture.out, 'KEEP.md')).toBe('keep\nuser line\n');
+
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.version).toBe('2');
+        expect(state.templates[0]?.history.length).toBe(2);
+        expect(state.templates[0]?.history[0]?.version).toBe('1');
+        expect(state.templates[0]?.history[1]?.version).toBe('2');
+        expect(state.templates[0]?.history[1]?.answers).toEqual({
+          name: 'Update Project',
+          tagline: 'Updated with pinned answers.',
+        });
+
+        // Trust policy is unchanged by the update flow.
+        expect(evaluateTrust({ trusted: true, version: '4', integrity: 'abc' }).scope).toBe('version');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update of an unversioned local source is a no-op by design',
+    async () => {
+      const fixture = await makeFixture('update-local');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'local-only', files: { 'README.md': 'local\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        const update = await updateProject({ projectDir: fixture.out, headless: true });
+
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([]);
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    '--template floats only the target and persists new state only for changed versions',
+    async () => {
+      const fixture = await makeFixture('update-targeted');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'upd-a',
+          v1Files: { 'A.md': 'a v1\n' },
+          v2Files: { 'A.md': 'a v2\n' },
+        });
+        const other = await writeTemplate(fixture, {
+          name: 'upd-b',
+          version: '1',
+          files: { 'B.md': 'b\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await createProject({ template: other, outDir: fixture.out, headless: true });
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          template: 'cyanprint/upd-a',
+          headless: true,
+          resolveTemplateSource: async ({ source, version }) =>
+            source === resolve(pair.v1) || source === resolve(pair.v2)
+              ? await pair.resolveTemplateSource({ source, version })
+              : other,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([{ ref: 'cyanprint/upd-a', from: '1', to: '2' }]);
+        expect(await readOut(fixture.out, 'A.md')).toBe('a v2\n');
+        expect(await readOut(fixture.out, 'B.md')).toBe('b\n');
+
+        const state = await loadGeneratedState(fixture.out);
+        const updatedEntry = state.templates.find(entry => entry.name === 'upd-a');
+        const untouchedEntry = state.templates.find(entry => entry.name === 'upd-b');
+        expect(updatedEntry?.version).toBe('2');
+        expect(updatedEntry?.history.length).toBe(2);
+        // Only templates whose version actually changed get a new history entry.
+        expect(untouchedEntry?.version).toBe('1');
+        expect(untouchedEntry?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'both-changed lines stay in-file as standard git conflict markers',
+    async () => {
+      const fixture = await makeFixture('update-conflict');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'conflicting',
+          v1Files: { 'README.md': 'hello v1\n' },
+          v2Files: { 'README.md': 'hello v2\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await writeFile(join(fixture.out, 'README.md'), 'hello user\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('conflict');
+        expect(update.conflicts).toEqual(['README.md']);
+        const readme = await readOut(fixture.out, 'README.md');
+        expect(readme).toContain('<<<<<<<');
+        expect(readme).toContain('hello user');
+        expect(readme).toContain('hello v2');
+        expect(readme).toContain('>>>>>>>');
+
+        // State must not advance while conflicts are pending: a retry has to merge from
+        // the ORIGINAL base, not treat the half-accepted incoming tree as the baseline.
+        const pending = await loadGeneratedState(fixture.out);
+        expect(pending.templates[0]?.version).toBe('1');
+        expect(pending.templates[0]?.history.length).toBe(1);
+
+        // Resolve the conflict, retry: the update completes and only now state advances.
+        await writeFile(join(fixture.out, 'README.md'), 'hello v2\n', 'utf8');
+        const retry = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+        expect(retry.status).toBe('done');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.version).toBe('2');
+        expect(state.templates[0]?.history.length).toBe(2);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update refreshes generated files matched by the generated .gitignore',
+    async () => {
+      const fixture = await makeFixture('update-gitignored');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'ignored-gen',
+          v1Files: { '.gitignore': 'generated.txt\n', 'generated.txt': 'gen v1\n' },
+          v2Files: { '.gitignore': 'generated.txt\n', 'generated.txt': 'gen v2\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        // The file is matched by the generation's own .gitignore; the merge must still
+        // carry the new content instead of silently keeping the stale on-disk copy.
+        expect(await readOut(fixture.out, 'generated.txt')).toBe('gen v2\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'files the new version dropped are deleted from the project',
+    async () => {
+      const fixture = await makeFixture('update-delete');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'dropping',
+          v1Files: { 'README.md': 'same\n', 'OLD.md': 'old\n' },
+          v2Files: { 'README.md': 'same\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(await exists(join(fixture.out, 'OLD.md'))).toBe(false);
+        expect(await readOut(fixture.out, 'README.md')).toBe('same\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'conflicted updates still apply clean changes to other files',
+    async () => {
+      const fixture = await makeFixture('update-partial');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'partial',
+          v1Files: { 'A.md': 'a1\n', 'B.md': 'b1\n' },
+          v2Files: { 'A.md': 'a2\n', 'B.md': 'b2\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await writeFile(join(fixture.out, 'B.md'), 'user edit\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('conflict');
+        expect(update.conflicts).toEqual(['B.md']);
+        expect(await readOut(fixture.out, 'A.md')).toBe('a2\n');
+        expect(await readOut(fixture.out, 'B.md')).toContain('<<<<<<<');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update reports a conflict when the user deleted a file the new version changed',
+    async () => {
+      const fixture = await makeFixture('update-user-deleted');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'deleted',
+          v1Files: { 'README.md': 'v1\n', 'STAY.md': 'stay\n' },
+          v2Files: { 'README.md': 'v2\n', 'STAY.md': 'stay\n' },
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await rm(join(fixture.out, 'README.md'), { force: true });
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('conflict');
+        expect(update.conflicts).toEqual(['README.md']);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update reuses deterministic state from the previous install',
+    async () => {
+      const fixture = await makeFixture('update-deterministic');
+      try {
+        await writeVarsProcessor(fixture);
+        const deterministicCyan = (fallback: string): string =>
+          [
+            'export default function cyan(prompt, ctx) {',
+            `  const id = ctx.deterministic.get('id') ?? ${JSON.stringify(fallback)};`,
+            "  ctx.deterministic.set('id', id);",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { ID: id } } }] };",
+            '}',
+            '',
+          ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'deterministic-update',
+          v1Files: { 'README.md': '# __ID__\n' },
+          v2Files: { 'README.md': '# __ID__\n' },
+          v1CyanTs: deterministicCyan('stable-id'),
+          v2CyanTs: deterministicCyan('changed-id'),
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(await readOut(fixture.out, 'README.md')).toBe('# stable-id\n');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.history[1]?.deterministicState).toEqual({ id: 'stable-id' });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update preserves generated binary files when the target changes them',
+    async () => {
+      const fixture = await makeFixture('update-binary');
+      try {
+        await writeVarsProcessor(fixture);
+        const copyCyan = [
           'export default async () => ({',
-          '  processors: [{ kind: "processor", owner: "cyan", name: "default" }],',
+          "  processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Copy' }] }],",
           '});',
           '',
-        ].join('\n'),
-        'utf8',
-      );
+        ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'binary-update',
+          v1Files: {},
+          v2Files: {},
+          v1CyanTs: copyCyan,
+          v2CyanTs: copyCyan,
+          processors: ['cyanprint/vars'],
+        });
+        // One top-level and one nested binary: the merge repo must create parent
+        // directories for binary writes, exactly as it does for text files.
+        await mkdir(join(pair.v1, 'template/assets/nested'), { recursive: true });
+        await mkdir(join(pair.v2, 'template/assets/nested'), { recursive: true });
+        await writeFile(join(pair.v1, 'template/asset.bin'), new Uint8Array([0, 1]));
+        await writeFile(join(pair.v2, 'template/asset.bin'), new Uint8Array([254, 254]));
+        await writeFile(join(pair.v1, 'template/assets/nested/icon.bin'), new Uint8Array([0, 2]));
+        await writeFile(join(pair.v2, 'template/assets/nested/icon.bin'), new Uint8Array([253, 253]));
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(new Uint8Array(await Bun.file(join(fixture.out, 'asset.bin')).arrayBuffer())).toEqual(
+          new Uint8Array([254, 254]),
+        );
+        expect(new Uint8Array(await Bun.file(join(fixture.out, 'assets/nested/icon.bin')).arrayBuffer())).toEqual(
+          new Uint8Array([253, 253]),
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'a clean update runs the changed template post-generation commands and records their output',
+    async () => {
+      const fixture = await makeFixture('update-command');
+      try {
+        await writeVarsProcessor(fixture);
+        // v2 gains a post-generation command that stamps the resolved version into a file
+        // outside the template tree. A clean update must run it and record the file.
+        const commandCyan = (version: string): string =>
+          [
+            'export default function cyan() {',
+            '  return {',
+            "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+            `    commands: [{ command: "bun", args: ["--eval", "await Bun.write(\\"command-stamp.txt\\", \\"v${version}\\")"], allow: true }],`,
+            '  };',
+            '}',
+            '',
+          ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'cmd-upd',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+          v1CyanTs: commandCyan('1'),
+          v2CyanTs: commandCyan('2'),
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        expect(await readOut(fixture.out, 'command-stamp.txt')).toBe('v1');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        // The changed template's command re-ran on update...
+        expect(await readOut(fixture.out, 'command-stamp.txt')).toBe('v2');
+        // ...and its output is recorded in state, so a later update treats it as
+        // generated content rather than an untracked user file.
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates[0]?.version).toBe('2');
+        expect(state.files.some(file => file.path === 'command-stamp.txt')).toBe(true);
+        // Provenance attributes the command's file to the template that ran it.
+        const stampEntry = state.provenance.find(entry => entry.path === 'command-stamp.txt');
+        expect(stampEntry?.source).toBe('cyanprint/cmd-upd@2');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('legacy state migration', () => {
+  test('migrateGeneratedState lifts single-template state files in place', () => {
+    const migrated = migrateGeneratedState({
+      cyanprint: 4,
+      template: { owner: 'cyanprint', name: 'legacy', version: '3', source: '/somewhere/legacy' },
+      answers: { name: 'Legacy' },
+      deterministicState: { seed: 's' },
+      files: [{ path: 'README.md', sha256: 'abc', content: '# stale\n' }],
+      artifacts: [],
+    });
+    expect(migrated.cyanprint).toBe(4);
+    expect(migrated.templates.length).toBe(1);
+    const entry = migrated.templates[0];
+    expect(entry?.owner).toBe('cyanprint');
+    expect(entry?.name).toBe('legacy');
+    expect(entry?.version).toBe('3');
+    expect(entry?.source).toBe('/somewhere/legacy');
+    expect(entry?.active).toBe(true);
+    expect(entry?.history.length).toBe(1);
+    expect(entry?.history[0]?.answers).toEqual({ name: 'Legacy' });
+    expect(entry?.history[0]?.deterministicState).toEqual({ seed: 's' });
+    // Legacy embedded content is dropped: files carry only path + sha256.
+    expect(migrated.files).toEqual([{ path: 'README.md', sha256: 'abc' }]);
+    expect(migrated.provenance).toEqual([]);
+  });
+
+  test(
+    'create into a legacy single-template project migrates state and upserts the new template',
+    async () => {
+      const fixture = await makeFixture('legacy-upsert');
+      try {
+        await writeVarsProcessor(fixture);
+        const original = await writeTemplate(fixture, { name: 'legacy-app', files: { 'APP.md': '# app\n' } });
+        const sibling = await writeTemplate(fixture, { name: 'legacy-addon', files: { 'ADDON.md': '# addon\n' } });
+
+        await createProject({ template: original, outDir: fixture.out, headless: true });
+        // Rewrite the state to the pre-multi-install single-template shape.
+        await writeFile(
+          join(fixture.out, '.cyan_state.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            template: { owner: 'cyanprint', name: 'legacy-app', version: 'local', source: resolve(original) },
+            answers: {},
+            deterministicState: {},
+            files: [{ path: 'APP.md', sha256: sha256('# app\n') }],
+            artifacts: [],
+          }),
+          'utf8',
+        );
+
+        const result = await createProject({ template: sibling, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        expect(await readOut(fixture.out, 'APP.md')).toBe('# app\n');
+        expect(await readOut(fixture.out, 'ADDON.md')).toBe('# addon\n');
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.templates.map(entry => entry.name).sort()).toEqual(['legacy-addon', 'legacy-app']);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('template tests (cyan.test.yaml)', () => {
+  test(
+    'strict merge assertions: unasserted LWW fails, asserted LWW passes with ignore + gitignore exclusion',
+    async () => {
+      const fixture = await makeFixture('template-test-strict');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, {
+          name: 'ta',
+          files: { 'shared.txt': 'from a\n', 'A.md': '# a\n', '.gitignore': 'build/\n' },
+        });
+        await writeTemplate(fixture, {
+          name: 'tb',
+          files: { 'shared.txt': 'from b\n', 'B.md': '# b\n', 'debug.log': 'log\n', 'build/cache.txt': 'cache\n' },
+        });
+        const group = await writeTemplate(fixture, {
+          name: 'grp',
+          kind: 'template-group',
+          templates: { 'cyanprint/ta': {}, 'cyanprint/tb': {} },
+        });
+        // The expected tree omits debug.log (ignore: glob) and build/ (output's own .gitignore).
+        const expectedDir = join(group, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'shared.txt'), 'from b\n', 'utf8');
+        await writeFile(join(expectedDir, 'A.md'), '# a\n', 'utf8');
+        await writeFile(join(expectedDir, 'B.md'), '# b\n', 'utf8');
+        await writeFile(join(expectedDir, '.gitignore'), 'build/\n', 'utf8');
+
+        // 1. Strict by default: the tier-2 LWW on shared.txt is not asserted -> fail.
+        await writeFile(
+          join(group, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'strict', expected: 'expected' }] }),
+          'utf8',
+        );
+        const strictReport = await runTemplateTest({ template: group, outDir: join(fixture.out, 'strict') });
+        expect(strictReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(strictReport.cases[0]?.message).toContain('unasserted lww-override');
+
+        // 2. Asserting the LWW (and excluding volatile files) passes byte-for-byte.
+        await writeFile(
+          join(group, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'asserted',
+                expected: 'expected',
+                ignore: ['*.log'],
+                merges: [{ path: 'shared.txt', decision: 'lww', segment: 'dependency' }],
+              },
+            ],
+          }),
+          'utf8',
+        );
+        expect(await runTemplateTest({ template: group, outDir: join(fixture.out, 'asserted') })).toMatchObject({
+          passed: 1,
+          failed: 0,
+        });
+
+        // 3. A merges assertion that does not match the recorded decision fails.
+        await writeFile(
+          join(group, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'wrong',
+                expected: 'expected',
+                ignore: ['*.log'],
+                merges: [{ path: 'shared.txt', decision: 'resolver', resolver: 'cyanprint/concat' }],
+              },
+            ],
+          }),
+          'utf8',
+        );
+        const wrongReport = await runTemplateTest({ template: group, outDir: join(fixture.out, 'wrong') });
+        expect(wrongReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(wrongReport.cases[0]?.message).toContain('merges assertion not satisfied');
+
+        // 4. The discouraged allowUnassertedLww escape hatch accepts the unasserted LWW.
+        await writeFile(
+          join(group, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [{ name: 'escape', expected: 'expected', ignore: ['*.log'], allowUnassertedLww: true }],
+          }),
+          'utf8',
+        );
+        expect(await runTemplateTest({ template: group, outDir: join(fixture.out, 'escape') })).toMatchObject({
+          passed: 1,
+          failed: 0,
+        });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'merges assertions match resolver-merged decisions including the resolver ref',
+    async () => {
+      const fixture = await makeFixture('template-test-resolver');
+      try {
+        await writeArtifact(fixture, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n', resolver: { ref: 'cyanprint/concat' } },
+          { name: 'same-b', content: 'from b\n', resolver: { ref: 'cyanprint/concat' } },
+        ]);
+        const expectedDir = join(group, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'shared.txt'), 'from a\nfrom b\n', 'utf8');
+        await writeFile(join(expectedDir, 'SAME-A.md'), '# same-a\n', 'utf8');
+        await writeFile(join(expectedDir, 'SAME-B.md'), '# same-b\n', 'utf8');
+        await writeFile(
+          join(group, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'merged',
+                expected: 'expected',
+                merges: [
+                  { path: 'shared.txt', decision: 'resolver', resolver: 'cyanprint/concat', segment: 'dependency' },
+                ],
+              },
+            ],
+          }),
+          'utf8',
+        );
+        expect(await runTemplateTest({ template: group, outDir: fixture.out })).toMatchObject({ passed: 1, failed: 0 });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'template tests accept inline answers and deterministic state',
+    async () => {
+      const fixture = await makeFixture('template-test-inline');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'inline-state',
+          files: { 'README.md': '# __NAME__-__SLUG__\n' },
+          cyanTs: [
+            'export default async function cyan(prompt, ctx) {',
+            "  const name = await prompt.text('name', 'Project name');",
+            "  const slug = ctx.deterministic.get('slug');",
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { NAME: name, SLUG: slug } } }] };",
+            '}',
+            '',
+          ].join('\n'),
+        });
+        const expectedDir = join(template, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'README.md'), '# Inline-seeded\n', 'utf8');
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'inline',
+                answers: { name: 'Inline' },
+                deterministicState: { slug: 'seeded' },
+                expected: 'expected',
+                validations: ["grep -q '# Inline-seeded' README.md"],
+              },
+            ],
+          }),
+          'utf8',
+        );
+        expect(await runTemplateTest({ template, outDir: fixture.out })).toMatchObject({ passed: 1, failed: 0 });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'template tests pass with expected output and snapshot updates never persist state files',
+    async () => {
+      const fixture = await makeFixture('template-test-expected');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'expected-only',
+          files: { 'README.md': '# Template\n' },
+        });
+        const expectedDir = join(template, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'README.md'), '# Template\n', 'utf8');
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected', validations: ['test -f README.md'] }] }),
+          'utf8',
+        );
+
+        expect(await runTemplateTest({ template, outDir: fixture.out })).toMatchObject({ passed: 1, failed: 0 });
+        const updateReport = await runTemplateTest({ template, outDir: fixture.out, updateSnapshots: true });
+        expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
+        expect(await Bun.file(join(template, 'expected/.cyan_state.yaml')).exists()).toBe(false);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'template tests fail without cyan.test.yaml or a legacy snapshot',
+    async () => {
+      const fixture = await makeFixture('template-test-missing');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'unasserted', files: { 'README.md': '# Template\n' } });
+        const report = await runTemplateTest({ template, outDir: fixture.out });
+        expect(report).toMatchObject({ passed: 0, failed: 1 });
+        expect(report.cases[0]?.message).toContain('Template tests need cyan.test.yaml');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'template expected fixture update preserves empty expected output folders',
+    async () => {
+      const fixture = await makeFixture('template-test-empty');
+      try {
+        const template = await writeTemplate(fixture, { name: 'empty-output' });
+        await mkdir(join(template, 'expected'), { recursive: true });
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected' }] }),
+          'utf8',
+        );
+
+        const updateReport = await runTemplateTest({ template, outDir: fixture.out, updateSnapshots: true });
+        expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
+        expect(await exists(join(template, 'expected'))).toBe(true);
+        expect(await runTemplateTest({ template, outDir: join(fixture.root, 'out-next') })).toMatchObject({
+          passed: 1,
+          failed: 0,
+        });
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'template expected output compares and updates binary files byte for byte',
+    async () => {
+      const fixture = await makeFixture('template-test-binary');
+      const binary = new Uint8Array([0, 1, 2, 253, 254, 255]);
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'binary',
+          cyanTs: [
+            'export default function cyan() {',
+            "  return { processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Copy' }] }] };",
+            '}',
+            '',
+          ].join('\n'),
+          processors: ['cyanprint/vars'],
+        });
+        await mkdir(join(template, 'template/assets'), { recursive: true });
+        await writeFile(join(template, 'template/assets/pixel.bin'), binary);
+        const expectedDir = join(template, 'expected/assets');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'pixel.bin'), binary);
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [{ name: 'basic', expected: 'expected', validations: ['test -f assets/pixel.bin'] }],
+          }),
+          'utf8',
+        );
+
+        expect(await runTemplateTest({ template, outDir: fixture.out })).toMatchObject({ passed: 1, failed: 0 });
+        await writeFile(join(expectedDir, 'pixel.bin'), new Uint8Array([0, 1, 2, 3]));
+        expect(await runTemplateTest({ template, outDir: fixture.out })).toMatchObject({ passed: 0, failed: 1 });
+        const updateReport = await runTemplateTest({ template, outDir: fixture.out, updateSnapshots: true });
+        expect(updateReport).toMatchObject({ passed: 1, failed: 0, snapshotUpdated: 1 });
+        expect(new Uint8Array(await Bun.file(join(expectedDir, 'pixel.bin')).arrayBuffer())).toEqual(binary);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'rejects removed commands and snapshot fields in template test manifests',
+    async () => {
+      const fixture = await makeFixture('template-test-removed');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'removed-commands', files: { 'README.md': '# T\n' } });
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected', commands: ['exit 0'] }] }),
+          'utf8',
+        );
+        await expect(runTemplateTest({ template, outDir: fixture.out })).rejects.toThrow('commands');
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected', snapshot: 'README.md' }] }),
+          'utf8',
+        );
+        await expect(runTemplateTest({ template, outDir: fixture.out })).rejects.toThrow('snapshot');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'command validations run only after the expected output comparison, and never mutate snapshots on failure',
+    async () => {
+      const fixture = await makeFixture('template-test-validations');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'failing-command', files: { 'README.md': '# New\n' } });
+        const expectedDir = join(template, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'README.md'), '# New\n', 'utf8');
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected', validations: ['exit 1'] }] }),
+          'utf8',
+        );
+
+        const validationReport = await runTemplateTest({ template, outDir: join(fixture.out, 'validation') });
+        expect(validationReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(validationReport.cases[0]?.message).toContain('Command failed');
+
+        // A mismatch is reported before validations run.
+        await writeFile(join(expectedDir, 'README.md'), '# Expected mismatch\n', 'utf8');
+        const mismatchReport = await runTemplateTest({ template, outDir: join(fixture.out, 'mismatch') });
+        expect(mismatchReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(mismatchReport.cases[0]?.message).toContain('Output mismatch');
+        expect(mismatchReport.cases[0]?.message).not.toContain('Command failed');
+
+        // updateSnapshots with failing validations must not rewrite the expected tree.
+        await writeFile(join(expectedDir, 'README.md'), '# Old\n', 'utf8');
+        const updateReport = await runTemplateTest({
+          template,
+          outDir: join(fixture.out, 'update'),
+          updateSnapshots: true,
+        });
+        expect(updateReport).toMatchObject({ passed: 0, failed: 1, snapshotUpdated: 0 });
+        expect(await Bun.file(join(expectedDir, 'README.md')).text()).toBe('# Old\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+/** Standalone artifact dir for runArtifactTests: src entry compiled into a temp runtime. */
+async function writeStandaloneArtifact(
+  dir: string,
+  args: { kind: 'processor' | 'plugin' | 'resolver'; name: string; runtime: string },
+): Promise<void> {
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await writeFile(
+    join(dir, 'cyan.yaml'),
+    YAML.stringify({
+      cyanprint: 4,
+      kind: args.kind,
+      owner: 'cyanprint',
+      name: args.name,
+      entry: 'src/index.ts',
+      bundledEntry: 'dist/index.js',
+    }),
+    'utf8',
+  );
+  await writeFile(join(dir, 'src/index.ts'), args.runtime, 'utf8');
+}
+
+describe('artifact tests (runArtifactTests)', () => {
+  test(
+    'runs processor, plugin, and resolver fixtures via convention tests directories',
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-convention-'));
+      try {
+        const processorDir = join(tempRoot, 'processor');
+        await writeStandaloneArtifact(processorDir, {
+          kind: 'processor',
+          name: 'uppercase',
+          runtime: uppercaseProcessorRuntime,
+        });
+        await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
+        await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# hi\n', 'utf8');
+        await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# HI\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: processorDir })).toMatchObject({
+          kind: 'processor',
+          passed: 1,
+          failed: 0,
+        });
+
+        const pluginDir = join(tempRoot, 'plugin');
+        await writeStandaloneArtifact(pluginDir, { kind: 'plugin', name: 'footer', runtime: footerPluginRuntime });
+        await mkdir(join(pluginDir, 'tests/basic/input'), { recursive: true });
+        await mkdir(join(pluginDir, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(pluginDir, 'tests/basic/input/README.md'), '# In\n', 'utf8');
+        await writeFile(join(pluginDir, 'tests/basic/expected/README.md'), '# In\nGenerated locally.\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: pluginDir })).toMatchObject({
+          kind: 'plugin',
+          passed: 1,
+          failed: 0,
+        });
+
+        const resolverDir = join(tempRoot, 'resolver');
+        await writeStandaloneArtifact(resolverDir, {
+          kind: 'resolver',
+          name: 'concat',
+          runtime: concatResolverRuntime,
+        });
+        await mkdir(join(resolverDir, 'tests/basic/input-0'), { recursive: true });
+        await mkdir(join(resolverDir, 'tests/basic/input-1'), { recursive: true });
+        await mkdir(join(resolverDir, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(resolverDir, 'tests/basic/input-0/data.txt'), 'one\n', 'utf8');
+        await writeFile(join(resolverDir, 'tests/basic/input-1/data.txt'), 'two\n', 'utf8');
+        await writeFile(join(resolverDir, 'tests/basic/expected/data.txt'), 'one\ntwo\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: resolverDir })).toMatchObject({
+          kind: 'resolver',
+          passed: 1,
+          failed: 0,
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'resolver manifest cases use the global variations shape with origins (including processor origins)',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-variations-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'resolver',
+          name: 'origins',
+          runtime: originResolverRuntime,
+        });
+        await mkdir(join(artifactDir, 'inputs/a'), { recursive: true });
+        await mkdir(join(artifactDir, 'inputs/b'), { recursive: true });
+        await mkdir(join(artifactDir, 'expected'), { recursive: true });
+        await writeFile(join(artifactDir, 'inputs/a/config.json'), '{"from":"a"}\n', 'utf8');
+        await writeFile(join(artifactDir, 'inputs/b/config.json'), '{"from":"b"}\n', 'utf8');
+        await writeFile(
+          join(artifactDir, 'expected/config.json'),
+          'cyanprint/tri-a@5:0\ncyanprint/tri-b@5:1:cyanprint/gen#0\n',
+          'utf8',
+        );
+        await writeFile(
+          join(artifactDir, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'variations',
+                expected: 'expected',
+                config: {},
+                variations: [
+                  { path: 'inputs/a', origin: { template: 'cyanprint/tri-a@5', layer: 0 } },
+                  {
+                    path: 'inputs/b',
+                    origin: {
+                      template: 'cyanprint/tri-b@5',
+                      layer: 1,
+                      processor: { ref: 'cyanprint/gen', invocation: 0 },
+                    },
+                  },
+                ],
+              },
+            ],
+          }),
+          'utf8',
+        );
+
+        expect(await runArtifactTests({ artifactDir })).toMatchObject({ kind: 'resolver', passed: 1, failed: 0 });
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test('rejects legacy resolver prior/current/target test fields', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-legacy-fields-'));
+    try {
+      await writeStandaloneArtifact(artifactDir, { kind: 'resolver', name: 'legacy', runtime: concatResolverRuntime });
       await writeFile(
-        join(runtime, 'processor.js'),
-        'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "from-cache\\n"); }\n',
-        'utf8',
-      );
-      await writeFile(
-        join(template, '.cyan_artifact_bundles.json'),
-        JSON.stringify({
-          bundles: [
-            {
-              key: 'processor:cyan:default:4',
-              dependency: { kind: 'processor', owner: 'cyan', name: 'default', version: '4' },
-              runtimeFile: join(runtime, 'processor.js'),
-              integrity: sha256(await Bun.file(join(runtime, 'processor.js')).text()),
-            },
-          ],
+        join(artifactDir, 'cyan.test.yaml'),
+        YAML.stringify({
+          cases: [{ name: 'basic', current: 'tests/basic/current.txt', expected: 'tests/basic/expected.txt' }],
         }),
         'utf8',
       );
-
-      await createProject({ template, outDir: out, headless: true });
-
-      expect(await Bun.file(join(out, 'README.md')).text()).toBe('from-cache\n');
+      await expect(runArtifactTests({ artifactDir })).rejects.toThrow('no longer supported');
     } finally {
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(artifactDir, { recursive: true, force: true });
     }
   });
 
-  test('template resolver parity fixtures merge cross-template updates', async () => {
-    const out = await mkdtemp(join(tmpdir(), 'cyanprint-test-template-resolvers-'));
+  test('rejects removed commands and snapshot fields in artifact test manifests', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-removed-'));
     try {
-      await createProject({
-        template: join(root, 'examples/templates/template-resolver-1'),
-        outDir: out,
-        headless: true,
+      await writeStandaloneArtifact(artifactDir, {
+        kind: 'processor',
+        name: 'removed',
+        runtime: identityProcessorRuntime,
       });
-      await writeFile(join(out, '.gitignore'), 'ignore-type-1\ninternal\n', 'utf8');
+      await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
+      await writeFile(join(artifactDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
       await writeFile(
-        join(out, 'c1.json'),
-        `${JSON.stringify({ nodes: { user: true }, list: [9] }, null, 2)}\n`,
+        join(artifactDir, 'cyan.test.yaml'),
+        YAML.stringify({ cases: [{ name: 'basic', input: 'tests/basic/input', commands: ['exit 0'] }] }),
         'utf8',
       );
+      await expect(runArtifactTests({ artifactDir })).rejects.toThrow('commands');
       await writeFile(
-        join(out, 'c2.json'),
-        `${JSON.stringify({ nodes: { user: true }, list: [9] }, null, 2)}\n`,
+        join(artifactDir, 'cyan.test.yaml'),
+        YAML.stringify({ cases: [{ name: 'basic', input: 'tests/basic/input', snapshot: 'x.md' }] }),
         'utf8',
       );
-      await writeFile(
-        join(out, 'c3.json'),
-        `${JSON.stringify({ nodes: { user: true }, list: [2, 9] }, null, 2)}\n`,
-        'utf8',
-      );
-
-      const result = await updateProject({
-        projectDir: out,
-        template: join(root, 'examples/templates/template-resolver-2'),
-        headless: true,
-      });
-
-      expect(result.status).toBe('done');
-      expect(await Bun.file(join(out, 'from-1.txt')).exists()).toBe(false);
-      expect(await Bun.file(join(out, 'from-2.txt')).exists()).toBe(true);
-      const gitignore = await Bun.file(join(out, '.gitignore')).text();
-      expect(gitignore).toContain('ignore-type-1');
-      expect(gitignore).toContain('ignore-type-2');
-      expect(gitignore).toContain('internal');
-      expect(JSON.parse(await Bun.file(join(out, 'c1.json')).text()).list).toEqual([1, 9, 3]);
-      expect(JSON.parse(await Bun.file(join(out, 'c2.json')).text()).list).toEqual([3]);
-      expect(JSON.parse(await Bun.file(join(out, 'c3.json')).text()).list).toEqual([1, 2, 9, 3]);
+      await expect(runArtifactTests({ artifactDir })).rejects.toThrow('snapshot');
     } finally {
-      await rm(out, { recursive: true, force: true });
+      await rm(artifactDir, { recursive: true, force: true });
     }
   });
 
-  test('post-generation commands run inside the generated project directory', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-command-cwd-'));
-    const template = join(tempRoot, 'template');
-    const out = join(tempRoot, 'out');
-    try {
-      await mkdir(template, { recursive: true });
-      await writeFile(
-        join(template, 'cyan.yaml'),
-        ['cyanprint: 4', 'kind: template', 'owner: cyanprint', 'name: command-cwd', 'bundledEntry: cyan.ts', ''].join(
-          '\n',
-        ),
-        'utf8',
-      );
-      await writeFile(
-        join(template, 'cyan.ts'),
-        [
-          'export default async () => ({',
-          '  commands: [{',
-          '    command: "bun",',
-          '    args: ["--eval", "await Bun.write(\\"post-command-cwd.txt\\", process.cwd())"],',
-          '    allow: true,',
-          '  }],',
-          '});',
-          '',
-        ].join('\n'),
-        'utf8',
-      );
+  test(
+    'rejects escaping processor output when updating artifact snapshots',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-escape-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'processor',
+          name: 'escape',
+          runtime:
+            'export async function processor(input) { await Bun.write(input.outputDir + "/../escape.txt", "bad"); }\n',
+        });
+        await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
+        await writeFile(join(artifactDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+        const report = await runArtifactTests({ artifactDir, updateSnapshots: true });
+        expect(report.failed).toBe(1);
+        expect(await Bun.file(join(artifactDir, 'tests/basic/escape.txt')).exists()).toBe(false);
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
 
-      await createProject({ template, outDir: out, headless: true });
+  test(
+    'validations run only after expected comparison and never mutate snapshots on failure',
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-validations-'));
+      try {
+        const processorDir = join(tempRoot, 'processor');
+        await writeStandaloneArtifact(processorDir, {
+          kind: 'processor',
+          name: 'update-validation',
+          runtime:
+            'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "# New\\n"); }\n',
+        });
+        await mkdir(join(processorDir, 'tests/basic/input'), { recursive: true });
+        await mkdir(join(processorDir, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(processorDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+        await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# New\n', 'utf8');
+        await writeFile(
+          join(processorDir, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              { name: 'basic', input: 'tests/basic/input', expected: 'tests/basic/expected', validations: ['exit 1'] },
+            ],
+          }),
+          'utf8',
+        );
 
-      expect(await realpath(await Bun.file(join(out, 'post-command-cwd.txt')).text())).toBe(await realpath(out));
-      expect(await Bun.file(join(out, '.cyan_state.yaml')).text()).toContain('post-command-cwd.txt');
-      expect(await Bun.file(join(root, 'post-command-cwd.txt')).exists()).toBe(false);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-      await rm(join(root, 'post-command-cwd.txt'), { force: true });
-    }
+        const validationReport = await runArtifactTests({ artifactDir: processorDir });
+        expect(validationReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(validationReport.cases[0]?.message).toContain('Command failed');
+
+        await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Mismatch\n', 'utf8');
+        const mismatchReport = await runArtifactTests({ artifactDir: processorDir });
+        expect(mismatchReport).toMatchObject({ passed: 0, failed: 1 });
+        expect(mismatchReport.cases[0]?.message).toContain('Output mismatch');
+        expect(mismatchReport.cases[0]?.message).not.toContain('Command failed');
+
+        await writeFile(join(processorDir, 'tests/basic/expected/README.md'), '# Old\n', 'utf8');
+        const updateReport = await runArtifactTests({ artifactDir: processorDir, updateSnapshots: true });
+        expect(updateReport).toMatchObject({ passed: 0, failed: 1, snapshotUpdated: 0 });
+        expect(await Bun.file(join(processorDir, 'tests/basic/expected/README.md')).text()).toBe('# Old\n');
+
+        const resolverDir = join(tempRoot, 'resolver');
+        await writeStandaloneArtifact(resolverDir, {
+          kind: 'resolver',
+          name: 'update-validation',
+          runtime: concatResolverRuntime,
+        });
+        await mkdir(join(resolverDir, 'inputs/a'), { recursive: true });
+        await mkdir(join(resolverDir, 'expected'), { recursive: true });
+        await writeFile(join(resolverDir, 'inputs/a/data.txt'), 'new\n', 'utf8');
+        await writeFile(join(resolverDir, 'expected/data.txt'), 'old\n', 'utf8');
+        await writeFile(
+          join(resolverDir, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [
+              {
+                name: 'basic',
+                expected: 'expected',
+                variations: [{ path: 'inputs/a', origin: { template: 'a', layer: 0 } }],
+                validations: ['exit 1'],
+              },
+            ],
+          }),
+          'utf8',
+        );
+        const resolverReport = await runArtifactTests({ artifactDir: resolverDir, updateSnapshots: true });
+        expect(resolverReport).toMatchObject({ passed: 0, failed: 1, snapshotUpdated: 0 });
+        expect(await Bun.file(join(resolverDir, 'expected/data.txt')).text()).toBe('old\n');
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'runs legacy Ketone-style resolver fixtures (test.cyan.yaml) against the global resolver API',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-ketone-resolver-'));
+      try {
+        await mkdir(join(artifactDir, 'inputs/basic/template-a'), { recursive: true });
+        await mkdir(join(artifactDir, 'snapshots/basic'), { recursive: true });
+        await writeFile(
+          join(artifactDir, 'cyan.yaml'),
+          [
+            'username: atomi',
+            'name: legacy-json',
+            'description: Legacy Ketone resolver fixture',
+            'build:',
+            '  images:',
+            '    resolver:',
+            '      image: legacy-json',
+            '      dockerfile: Dockerfile',
+            '      context: .',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+        await writeFile(
+          join(artifactDir, 'index.ts'),
+          [
+            'export function resolver(input) {',
+            '  const file = input.files[0];',
+            "  if (!file) throw new Error('missing file');",
+            '  const parsed = JSON.parse(file.content);',
+            '  return { path: file.path, content: JSON.stringify({ b: parsed.b, a: parsed.a }) };',
+            '}',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+        await writeFile(
+          join(artifactDir, 'test.cyan.yaml'),
+          [
+            'tests:',
+            '  - name: basic',
+            '    expected:',
+            '      type: snapshot',
+            '      value:',
+            '        path: ./snapshots/basic',
+            '    config: {}',
+            '    resolver_inputs:',
+            '      - path: ./inputs/basic/template-a',
+            '        origin:',
+            '          template: template-a',
+            '          layer: 0',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+        await writeFile(join(artifactDir, 'inputs/basic/template-a/data.json'), '{\n  "a": 1,\n  "b": 2\n}\n', 'utf8');
+        await writeFile(join(artifactDir, 'snapshots/basic/data.json'), '{"b":2,"a":1}', 'utf8');
+
+        expect(await runArtifactTests({ artifactDir })).toMatchObject({ kind: 'resolver', passed: 1, failed: 0 });
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+});
+
+describe('processor output cache', () => {
+  test(
+    'identical hermetic inputs hit the cache; bypassCache skips reads but still writes',
+    async () => {
+      const fixture = await makeFixture('processor-cache');
+      const cacheDir = join(fixture.root, 'cache');
+      const counterFile = join(fixture.root, 'invocations.txt');
+      try {
+        await writeArtifact(fixture, {
+          kind: 'processor',
+          name: 'counter',
+          runtime: counterProcessorRuntime(counterFile),
+        });
+        const template = await writeTemplate(fixture, {
+          name: 'cached',
+          processors: ['cyanprint/counter'],
+          cyanTs: "export default async () => ({ processors: [{ name: 'cyanprint/counter' }] });\n",
+        });
+        const invocations = async (): Promise<number> =>
+          (
+            await Bun.file(counterFile)
+              .text()
+              .catch(() => '')
+          ).length;
+
+        await createProject({ template, outDir: join(fixture.out, 'one'), headless: true, cacheDir });
+        expect(await invocations()).toBe(1);
+        expect(await readOut(join(fixture.out, 'one'), 'GENERATED.md')).toBe('generated\n');
+
+        // Identical (integrity, config, input file set) -> cache hit skips the invocation.
+        await createProject({ template, outDir: join(fixture.out, 'two'), headless: true, cacheDir });
+        expect(await invocations()).toBe(1);
+        expect(await readOut(join(fixture.out, 'two'), 'GENERATED.md')).toBe('generated\n');
+
+        // bypassCache skips the read (the processor runs again) but still writes the entry.
+        await createProject({
+          template,
+          outDir: join(fixture.out, 'three'),
+          headless: true,
+          cacheDir,
+          bypassCache: true,
+        });
+        expect(await invocations()).toBe(2);
+
+        await createProject({ template, outDir: join(fixture.out, 'four'), headless: true, cacheDir });
+        expect(await invocations()).toBe(2);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'changed processor config misses the cache',
+    async () => {
+      const fixture = await makeFixture('processor-cache-config');
+      const cacheDir = join(fixture.root, 'cache');
+      const counterFile = join(fixture.root, 'invocations.txt');
+      try {
+        await writeArtifact(fixture, {
+          kind: 'processor',
+          name: 'counter',
+          runtime: counterProcessorRuntime(counterFile),
+        });
+        const configCyan = (flag: string): string =>
+          `export default async () => ({ processors: [{ name: 'cyanprint/counter', config: { flag: ${JSON.stringify(flag)} } }] });\n`;
+        // Two template dirs sharing one processor artifact: same integrity + input set,
+        // different config — only the config differs in the cache key.
+        const flagA = await writeTemplate(fixture, {
+          name: 'cached-config-a',
+          processors: ['cyanprint/counter'],
+          cyanTs: configCyan('a'),
+        });
+        const flagB = await writeTemplate(fixture, {
+          name: 'cached-config-b',
+          processors: ['cyanprint/counter'],
+          cyanTs: configCyan('b'),
+        });
+        const invocations = async (): Promise<number> =>
+          (
+            await Bun.file(counterFile)
+              .text()
+              .catch(() => '')
+          ).length;
+
+        await createProject({ template: flagA, outDir: join(fixture.out, 'one'), headless: true, cacheDir });
+        expect(await invocations()).toBe(1);
+        await createProject({ template: flagB, outDir: join(fixture.out, 'two'), headless: true, cacheDir });
+        expect(await invocations()).toBe(2);
+        // Identical config hits the cache again.
+        await createProject({ template: flagA, outDir: join(fixture.out, 'three'), headless: true, cacheDir });
+        expect(await invocations()).toBe(2);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('trace', () => {
+  test(
+    'traceProject returns the composition tree, engine provenance, and per-template diffs',
+    async () => {
+      const fixture = await makeFixture('trace');
+      try {
+        const group = await writeSamePathGroup(fixture, [
+          { name: 'same-a', content: 'from a\n' },
+          { name: 'same-b', content: 'from b\n' },
+        ]);
+        const trace = await traceProject({ template: group, headless: true });
+        expect(trace.tree.ref).toBe('cyanprint/grp');
+        expect(trace.tree.children.length).toBe(2);
+        expect(trace.tree.children.every(child => child.ownFiles.length > 0)).toBe(true);
+        expect(trace.provenance.length).toBeGreaterThan(0);
+        expect(trace.provenance.every(entry => entry.source.includes('/'))).toBe(true);
+        const conflict = trace.provenance.find(entry => entry.path === 'shared.txt');
+        expect(conflict?.decision).toBe('lww-override');
+        expect(conflict?.segment).toBe('dependency');
+        // The losing child's own shared.txt differs from the final merged output.
+        expect(trace.diffs.length).toBeGreaterThan(0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'trace provenance attributes a grandchild file to the grandchild, not the merging parent',
+    async () => {
+      const fixture = await makeFixture('trace-deep');
+      try {
+        await writeVarsProcessor(fixture);
+        await writeTemplate(fixture, { name: 'deep-c', files: { 'DEEP-C.md': '# deep-c\n' } });
+        await writeTemplate(fixture, { name: 'deep-b', templates: { 'cyanprint/deep-c': {} } });
+        const top = await writeTemplate(fixture, { name: 'deep-a', templates: { 'cyanprint/deep-b': {} } });
+        const trace = await traceProject({ template: top, headless: true });
+        const entry = trace.provenance.find(item => item.path === 'DEEP-C.md');
+        expect(entry?.source).toBe('cyanprint/deep-c@local');
+        expect(entry?.decision).toBe('added');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('unified diff', () => {
+  test('unifiedDiff uses zero-based starts for zero-length hunk ranges', async () => {
+    const { unifiedDiff } = await import('./util/unified-diff');
+    expect(unifiedDiff('', 'a\nb')).toContain('@@ -0,0 +1,2 @@');
+    expect(unifiedDiff('a\nb', '')).toContain('@@ -1,2 +0,0 @@');
   });
 });

@@ -7,5 +7,9 @@ bundledEntry: cyan.ts
 processors:
   - cyan/default
 
+# Same resolver as merge-la1/merge-la2 but with different config, so composing
+# merge-la3 with them yields no consensus and falls back to LWW.
 resolvers:
-  - cyanprint/merge-a
+  - ref: cyanprint/merge-a
+    config: { dedupe: true }
+    files: ["shared.txt", "never.txt"]

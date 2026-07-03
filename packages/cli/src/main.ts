@@ -97,7 +97,7 @@ Examples:
     program
       .command('update')
       .argument('<project>', 'project directory to update')
-      .description('update a project with a newer template output'),
+      .description('float every active template to latest (git three-way merge with local edits)'),
     UPDATE_OPTIONS,
   ).action(async (project: string, options: OptionValues) => {
     await updateCommand([project, ...optionArgv(options, UPDATE_OPTIONS)], {
@@ -312,9 +312,9 @@ const UPDATE_OPTIONS: CliOptionSpec[] = [
   {
     flag: 'template',
     value: '<template>',
-    description: 'template path or registry reference',
-    required: true,
+    description: 'only update the installed template matching this owner/name[@version]',
   },
+  { flag: 'interactive', description: 'pick the version per template' },
   { flag: 'answers', value: '<file>', description: 'JSON answers file for headless or prefilled runs' },
   { flag: 'headless', description: 'disable prompts and require supplied/default answers' },
   { flag: 'json', description: 'print machine-readable JSON' },

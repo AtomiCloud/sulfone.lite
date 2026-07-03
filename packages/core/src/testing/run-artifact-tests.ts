@@ -4,15 +4,15 @@ import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import YAML from 'yaml';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
 import {
-  assertResolverCommutativity,
   invokePlugin,
   invokeProcessor,
   invokeResolver,
   type ArtifactBundleRef,
+  type ResolvedFile,
 } from '@cyanprint/artifact-runner';
-import type { ArtifactKind, CyanManifest, VfsFile } from '@cyanprint/contracts';
+import type { ArtifactKind, CyanManifest, FileOrigin, VfsFile } from '@cyanprint/contracts';
 import { loadManifest } from '../manifest/load-manifest';
-import { comparePaths, exists, mapWithConcurrency, readText, safeJoin, sha256, writeText } from '../util';
+import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, sha256, writeText } from '../util';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
 type ArtifactTestCase = {
@@ -30,12 +30,19 @@ type FileArtifactCase = {
   validations: CommandValidation[];
 };
 
+/** A resolver variation: one contributor's file (or folder of files) plus its origin. */
+type ResolverVariation = {
+  path: string;
+  origin: FileOrigin;
+};
+
+/**
+ * Resolver tests use the global input shape: a list of variations with origins, all
+ * passed to the resolver in one call per path.
+ */
 type ResolverArtifactCase = {
   name: string;
-  prior?: string;
-  current?: string;
-  target?: string;
-  resolverInputs?: Array<{ path: string; origin: { template: string; layer: number } }>;
+  variations?: ResolverVariation[];
   expected?: string;
   config?: unknown;
   configFile?: string;
@@ -69,11 +76,10 @@ export async function runArtifactTests(args: {
   try {
     const runtimeFile = await buildRuntime(args.artifactDir, manifest, runtimeDir);
     const bundle = await artifactBundle(manifest, runtimeFile);
-    const commutative = manifest.kind === 'resolver' && manifest.api === 2 && manifest.commutative === true;
     const update = Boolean(args.updateSnapshots);
     const results = await mapWithConcurrency(testCases, args.concurrency ?? 1, testCase =>
       manifest.kind === 'resolver'
-        ? runResolverCase(bundle, testCase as ResolverArtifactCase, update, commutative)
+        ? runResolverCase(bundle, testCase as ResolverArtifactCase, update)
         : runFileArtifactCase(bundle, manifest.kind as 'processor' | 'plugin', testCase as FileArtifactCase, update),
     );
     const cases = results.map(result => result.case);
@@ -128,26 +134,41 @@ async function loadArtifactTestCases(
 
   const testsDir = testsDirOverride ?? join(artifactDir, 'tests');
   const caseNames = await listCaseNames(testsDir);
-  return caseNames.map(name => {
+  const cases: ArtifactCase[] = [];
+  for (const name of caseNames) {
     const caseDir = join(testsDir, name);
-    return kind === 'resolver'
-      ? ({
-          name,
-          prior: join(caseDir, 'prior.txt'),
-          current: join(caseDir, 'current.txt'),
-          target: join(caseDir, 'target.txt'),
-          expected: join(caseDir, 'expected.txt'),
-          configFile: join(caseDir, 'config.json'),
-          validations: [],
-        } satisfies ResolverArtifactCase)
-      : ({
-          name,
-          input: join(caseDir, 'input'),
-          expected: join(caseDir, 'expected'),
-          configFile: join(caseDir, 'config.json'),
-          validations: [],
-        } satisfies FileArtifactCase);
-  });
+    if (kind === 'resolver') {
+      cases.push({
+        name,
+        variations: await conventionResolverVariations(caseDir),
+        expected: join(caseDir, 'expected'),
+        configFile: join(caseDir, 'config.json'),
+        validations: [],
+      } satisfies ResolverArtifactCase);
+    } else {
+      cases.push({
+        name,
+        input: join(caseDir, 'input'),
+        expected: join(caseDir, 'expected'),
+        configFile: join(caseDir, 'config.json'),
+        validations: [],
+      } satisfies FileArtifactCase);
+    }
+  }
+  return cases;
+}
+
+/** Convention resolver case: `input-<n>` file/folder variations, layered by `n`. */
+async function conventionResolverVariations(caseDir: string): Promise<ResolverVariation[]> {
+  const entries = await readdir(caseDir, { withFileTypes: true }).catch(() => []);
+  const inputs = entries
+    .map(entry => entry.name)
+    .filter(name => /^input-\d+(\.\w+)?$/.test(name))
+    .sort();
+  return inputs.map((name, index) => ({
+    path: join(caseDir, name),
+    origin: { template: name.replace(/\.\w+$/, ''), layer: index },
+  }));
 }
 
 function parseTestManifest(artifactDir: string, kind: ArtifactTestReport['kind'], input: unknown): ArtifactCase[] {
@@ -183,8 +204,8 @@ function parseKetoneResolverTestManifest(artifactDir: string, input: unknown): R
       name: readRequiredString(record.name, `tests[${index}].name`),
       expected,
       config: record.config,
-      resolverInputs: rawInputs.map((rawInput, inputIndex) =>
-        readKetoneResolverInput(artifactDir, rawInput, `tests[${index}].resolver_inputs[${inputIndex}]`),
+      variations: rawInputs.map((rawInput, inputIndex) =>
+        readResolverVariation(artifactDir, rawInput, `tests[${index}].resolver_inputs[${inputIndex}]`),
       ),
       validations: [],
     };
@@ -206,11 +227,7 @@ function readKetoneExpectedPath(root: string, value: unknown, label: string): st
   return readOptionalPath(root, (nested as Record<string, unknown>).path);
 }
 
-function readKetoneResolverInput(
-  root: string,
-  value: unknown,
-  label: string,
-): { path: string; origin: { template: string; layer: number } } {
+function readResolverVariation(root: string, value: unknown, label: string): ResolverVariation {
   if (!value || typeof value !== 'object') {
     throw new Error(`${label} must be a mapping.`);
   }
@@ -224,11 +241,20 @@ function readKetoneResolverInput(
   if (typeof layer !== 'number' || !Number.isInteger(layer)) {
     throw new Error(`${label}.origin.layer must be an integer.`);
   }
+  const processor = originRecord.processor;
+  let processorOrigin: FileOrigin['processor'];
+  if (processor !== undefined) {
+    if (!isRecord(processor) || typeof processor.ref !== 'string' || typeof processor.invocation !== 'number') {
+      throw new Error(`${label}.origin.processor must be { ref, invocation }.`);
+    }
+    processorOrigin = { ref: processor.ref, invocation: processor.invocation };
+  }
   return {
     path: readOptionalPath(root, record.path) ?? '',
     origin: {
       template: readRequiredString(originRecord.template, `${label}.origin.template`),
       layer,
+      ...(processorOrigin ? { processor: processorOrigin } : {}),
     },
   };
 }
@@ -248,17 +274,21 @@ function parseManifestCase(
   const name = readRequiredString(record.name, `cases[${index}].name`);
   const validations = readCommandValidations(record.validations, `cases[${index}].validations`);
   if (kind === 'resolver') {
-    const resolverInputs = Array.isArray(record.resolverInputs)
-      ? record.resolverInputs.map((input, inputIndex) =>
-          readKetoneResolverInput(artifactDir, input, `cases[${index}].resolverInputs[${inputIndex}]`),
+    for (const removed of ['prior', 'current', 'target'] as const) {
+      if (record[removed] !== undefined) {
+        throw new Error(
+          `cases[${index}].${removed} is no longer supported. Resolver tests use variations: a list of { path, origin } entries — all variations reach the resolver in one call.`,
+        );
+      }
+    }
+    const variations = Array.isArray(record.variations)
+      ? record.variations.map((input, inputIndex) =>
+          readResolverVariation(artifactDir, input, `cases[${index}].variations[${inputIndex}]`),
         )
       : undefined;
     return {
       name,
-      prior: readOptionalPath(artifactDir, record.prior),
-      current: readOptionalPath(artifactDir, record.current),
-      target: readOptionalPath(artifactDir, record.target),
-      resolverInputs,
+      variations,
       expected: readOptionalPath(artifactDir, record.expected),
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),
@@ -298,10 +328,6 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   return safeJoin(root, value);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 async function artifactBundle(manifest: CyanManifest, runtimeFile: string): Promise<ArtifactBundleRef> {
   return {
     dependency: {
@@ -312,7 +338,6 @@ async function artifactBundle(manifest: CyanManifest, runtimeFile: string): Prom
     },
     runtimeFile,
     integrity: sha256(await readText(runtimeFile)),
-    api: manifest.api,
   };
 }
 
@@ -369,39 +394,42 @@ async function runFileArtifactCase(
   }
 }
 
+/**
+ * Run a resolver case with the global input shape: variations are grouped per path and
+ * the resolver receives every variation of a path in a single call.
+ */
 async function runResolverCase(
   bundle: ArtifactBundleRef,
   testCase: ResolverArtifactCase,
   updateSnapshots: boolean,
-  commutative: boolean,
 ): Promise<{ case: ArtifactTestCase; snapshotUpdated: boolean }> {
   try {
-    if (testCase.resolverInputs) {
-      return await runResolverFoldCase(bundle, testCase, updateSnapshots, commutative);
-    }
-    if (await isFolderResolverCase(testCase)) {
-      return await runResolverFolderCase(bundle, testCase, updateSnapshots);
+    if (!testCase.variations || testCase.variations.length === 0) {
+      return {
+        case: {
+          name: testCase.name,
+          status: 'failed',
+          message: 'Resolver test case needs variations: a list of { path, origin } entries.',
+        },
+        snapshotUpdated: false,
+      };
     }
     const config = await readCaseConfig(testCase);
-    const path = isRecord(config) && typeof config.path === 'string' ? config.path : 'output.txt';
-    const input = {
-      files: [
-        ...(testCase.prior && (await exists(testCase.prior))
-          ? [{ path, content: await readText(testCase.prior), origin: { template: 'prior', layer: 0 } }]
-          : []),
-        ...(testCase.current && (await exists(testCase.current))
-          ? [{ path, content: await readText(testCase.current), origin: { template: 'current', layer: 1 } }]
-          : []),
-        ...(testCase.target && (await exists(testCase.target))
-          ? [{ path, content: await readText(testCase.target), origin: { template: 'target', layer: 2 } }]
-          : []),
-      ],
-      config,
-    };
-    if (commutative) {
-      await enforceCommutativity(bundle, input.files, config, path);
+    const configRecord = isRecord(config) ? config : {};
+    const groups = new Map<string, ResolvedFile[]>();
+    for (const variation of testCase.variations) {
+      const files = await readResolverVariationFiles(variation.path);
+      for (const file of files) {
+        const current = groups.get(file.path) ?? [];
+        current.push({ path: file.path, content: file.content ?? '', origin: variation.origin });
+        groups.set(file.path, current);
+      }
     }
-    const actual = await invokeResolver(bundle, input);
+    const actual: VfsFile[] = [];
+    for (const [path, files] of [...groups.entries()].sort(([left], [right]) => comparePaths(left, right))) {
+      const output = await invokeResolver(bundle, { config: configRecord, files });
+      actual.push({ path, content: output.content });
+    }
 
     if (!testCase.expected) {
       return {
@@ -409,21 +437,34 @@ async function runResolverCase(
         snapshotUpdated: false,
       };
     }
+    const expectedIsDir = await isDirectory(testCase.expected);
     if (!updateSnapshots) {
-      const expected = await readText(testCase.expected);
-      if (!fileContentsEqual(expected, actual)) {
-        return {
-          case: { name: testCase.name, status: 'failed', message: `Resolver output mismatch for ${testCase.name}` },
-          snapshotUpdated: false,
-        };
+      if (expectedIsDir || actual.length > 1) {
+        const expected = await readFileTree(testCase.expected);
+        const diff = compareFileTrees(expected, actual);
+        if (diff) {
+          return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
+        }
+      } else {
+        const expected = await readText(testCase.expected);
+        if (expected !== (actual[0]?.content ?? '')) {
+          return {
+            case: { name: testCase.name, status: 'failed', message: `Resolver output mismatch for ${testCase.name}` },
+            snapshotUpdated: false,
+          };
+        }
       }
     }
-    const validationFailure = await runCommandsAgainstText(actual, testCase.validations);
+    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
     if (validationFailure) {
       return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
     }
     if (updateSnapshots && testCase.expected) {
-      await writeText(testCase.expected, actual);
+      if (expectedIsDir || actual.length > 1) {
+        await writeFileTree(testCase.expected, actual);
+      } else {
+        await writeText(testCase.expected, actual[0]?.content ?? '');
+      }
     }
     return {
       case: { name: testCase.name, status: 'passed' },
@@ -434,158 +475,11 @@ async function runResolverCase(
   }
 }
 
-async function runResolverFoldCase(
-  bundle: ArtifactBundleRef,
-  testCase: ResolverArtifactCase,
-  updateSnapshots: boolean,
-  commutative: boolean,
-): Promise<{ case: ArtifactTestCase; snapshotUpdated: boolean }> {
-  const config = await readCaseConfig(testCase);
-  const groups = new Map<
-    string,
-    Array<{ path: string; content: string; origin: { template: string; layer: number }; files: VfsFile[] }>
-  >();
-  for (const input of testCase.resolverInputs ?? []) {
-    const files = await readResolverInputFiles(input.path);
-    for (const file of files) {
-      const current = groups.get(file.path) ?? [];
-      current.push({ path: file.path, content: file.content ?? '', origin: input.origin, files });
-      groups.set(file.path, current);
-    }
-  }
-  const actual: VfsFile[] = [];
-  for (const [path, files] of [...groups.entries()].sort(([left], [right]) => comparePaths(left, right))) {
-    if (commutative) {
-      await enforceCommutativity(bundle, files, config, path);
-    }
-    actual.push({
-      path,
-      content: await invokeResolver(bundle, {
-        files,
-        config: { ...(isRecord(config) ? config : {}), path },
-      }),
-    });
-  }
-  if (!testCase.expected) {
-    return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
-      snapshotUpdated: false,
-    };
-  }
-  if (!updateSnapshots) {
-    const expected = await readFileTree(testCase.expected);
-    const diff = compareFileTrees(expected, actual);
-    if (diff) {
-      return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
-    }
-  }
-  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
-  if (updateSnapshots && testCase.expected) {
-    await writeFileTree(testCase.expected, actual);
-  }
-  return {
-    case: { name: testCase.name, status: 'passed' },
-    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
-  };
-}
-
-async function enforceCommutativity(
-  bundle: ArtifactBundleRef,
-  candidates: Array<{ path: string; content: string; origin: { template: string; layer: number } }>,
-  config: unknown,
-  path: string,
-): Promise<void> {
-  if (candidates.length < 2) {
-    return;
-  }
-  await assertResolverCommutativity(bundle, {
-    path,
-    config: isRecord(config) ? config : {},
-    candidates: candidates.map(candidate => ({
-      path: candidate.path,
-      content: candidate.content,
-      origin: candidate.origin,
-    })),
-  });
-}
-
-async function readResolverInputFiles(path: string): Promise<VfsFile[]> {
+async function readResolverVariationFiles(path: string): Promise<VfsFile[]> {
   if (await isDirectory(path)) {
     return await readFileTree(path);
   }
   return [{ path: basename(path), content: await readText(path) }];
-}
-
-async function runResolverFolderCase(
-  bundle: ArtifactBundleRef,
-  testCase: ResolverArtifactCase,
-  updateSnapshots: boolean,
-): Promise<{ case: ArtifactTestCase; snapshotUpdated: boolean }> {
-  const config = await readCaseConfig(testCase);
-  const prior = testCase.prior && (await isDirectory(testCase.prior)) ? await readFileTree(testCase.prior) : [];
-  const current = testCase.current && (await isDirectory(testCase.current)) ? await readFileTree(testCase.current) : [];
-  const target = testCase.target && (await isDirectory(testCase.target)) ? await readFileTree(testCase.target) : [];
-  const priorMap = new Map(prior.map(file => [file.path, file.content ?? '']));
-  const currentMap = new Map(current.map(file => [file.path, file.content ?? '']));
-  const targetMap = new Map(target.map(file => [file.path, file.content ?? '']));
-  const paths = [...new Set([...priorMap.keys(), ...currentMap.keys(), ...targetMap.keys()])].sort();
-  const actual: VfsFile[] = [];
-  for (const path of paths) {
-    const files = [
-      ...(priorMap.has(path)
-        ? [{ path, content: priorMap.get(path) ?? '', origin: { template: 'prior', layer: 0 }, files: prior }]
-        : []),
-      ...(currentMap.has(path)
-        ? [{ path, content: currentMap.get(path) ?? '', origin: { template: 'current', layer: 1 }, files: current }]
-        : []),
-      ...(targetMap.has(path)
-        ? [{ path, content: targetMap.get(path) ?? '', origin: { template: 'target', layer: 2 }, files: target }]
-        : []),
-    ];
-    actual.push({
-      path,
-      content: await invokeResolver(bundle, {
-        files,
-        config: { ...(isRecord(config) ? config : {}), path },
-      }),
-    });
-  }
-  if (!testCase.expected) {
-    return {
-      case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
-      snapshotUpdated: false,
-    };
-  }
-  if (!updateSnapshots) {
-    const expected = await readFileTree(testCase.expected);
-    const diff = compareFileTrees(expected, actual);
-    if (diff) {
-      return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
-    }
-  }
-  const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
-  if (validationFailure) {
-    return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
-  }
-  if (updateSnapshots && testCase.expected) {
-    await writeFileTree(testCase.expected, actual);
-  }
-  return {
-    case: { name: testCase.name, status: 'passed' },
-    snapshotUpdated: Boolean(updateSnapshots && testCase.expected),
-  };
-}
-
-async function isFolderResolverCase(testCase: ResolverArtifactCase): Promise<boolean> {
-  return Boolean(
-    (testCase.prior && (await isDirectory(testCase.prior))) ||
-    (testCase.current && (await isDirectory(testCase.current))) ||
-    (testCase.target && (await isDirectory(testCase.target))) ||
-    (testCase.expected && (await isDirectory(testCase.expected))),
-  );
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -616,19 +510,6 @@ async function runCommandsAgainstFiles(files: VfsFile[], commands: CommandValida
   const root = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-command-'));
   try {
     await writeFileTree(root, files);
-    return await runCommandValidations(root, commands);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-}
-
-async function runCommandsAgainstText(output: string, commands: CommandValidation[]): Promise<string | undefined> {
-  if (commands.length === 0) {
-    return undefined;
-  }
-  const root = await mkdtemp(join(tmpdir(), 'cyanprint-resolver-command-'));
-  try {
-    await writeText(join(root, 'output.txt'), output);
     return await runCommandValidations(root, commands);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -694,10 +575,6 @@ function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | unde
     }
   }
   return undefined;
-}
-
-function fileContentsEqual(expected: string, actual: string): boolean {
-  return expected === actual;
 }
 
 function fileToBytes(file: VfsFile): Uint8Array {

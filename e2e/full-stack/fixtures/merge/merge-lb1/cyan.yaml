@@ -8,4 +8,5 @@ processors:
   - cyan/default
 
 resolvers:
-  - cyanprint/merge-b
+  - ref: cyanprint/merge-b
+    files: ["shared.txt"]
