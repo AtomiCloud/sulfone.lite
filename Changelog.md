@@ -1,3 +1,15 @@
+## [4.6.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.5.0...v4.6.0) (2026-07-03)
+
+
+### ✨ Features ✨
+
+* **core:** static composition, global resolvers, git-merge update ([36e5d1f](https://github.com/AtomiCloud/sulfone.lite/commit/36e5d1ffdbd01bddf2985da3cb217cbe682e2d22))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **test:** keep artifact test fixtures byte-exact under treefmt ([593672b](https://github.com/AtomiCloud/sulfone.lite/commit/593672b865743dd5ddf60c1a9f9e5c54ef1ba1dc))
+
 ## [4.5.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.4.0...v4.5.0) (2026-07-02)
 
 
