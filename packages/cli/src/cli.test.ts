@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createProject, sha256 } from '@cyanprint/core';
-import { artifactIntegrity } from '@cyanprint/contracts';
+import { artifactIntegrity, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
 import { createCommand } from './commands/create';
@@ -1072,6 +1072,45 @@ describe('local object package safety', () => {
       expect(await Bun.file(join(outDir, 'snapshots/basic/README.md')).text()).toBe('# Snapshot content\n');
       expect(await Bun.file(join(outDir, 'cyan.ts')).exists()).toBe(false);
       expect(await Bun.file(join(outDir, 'cyan.yaml')).exists()).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('template archives carry the probe surface additively', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-probe-archive-'));
+    const templateDir = join(tempRoot, 'template');
+    try {
+      await mkdir(join(templateDir, 'template'), { recursive: true });
+      await writeFile(
+        join(templateDir, 'cyan.yaml'),
+        'cyanprint: 4\nkind: template\nowner: cyanprint\nname: probe-archive\nbundledEntry: cyan.ts\n',
+        'utf8',
+      );
+      await writeFile(join(templateDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
+      await writeFile(join(templateDir, 'template/README.md'), '# Payload\n', 'utf8');
+
+      // A template without probes publishes exactly today's payload — this entry
+      // list is the additivity pin: probes must never change it.
+      const bare = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
+      expect(readTemplateTarFiles(bare.payload).map(file => file.path)).toEqual(['template/README.md']);
+
+      await mkdir(join(templateDir, 'probes'), { recursive: true });
+      await writeFile(
+        join(templateDir, 'probes/tests.ts'),
+        'export default { contractVersion: 1, probes: [] };\n',
+        'utf8',
+      );
+      await writeFile(join(templateDir, 'probes.yaml'), 'contractVersion: 1\nfeatures: []\n', 'utf8');
+
+      // With probes present, probes/** and probes.yaml ride the artifact…
+      const withProbes = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
+      const entries = readTemplateTarFiles(withProbes.payload);
+      expect(entries.map(file => file.path)).toEqual(['probes.yaml', 'probes/tests.ts', 'template/README.md']);
+      // …and pre-existing entries are byte-identical to the probe-free archive.
+      const bareReadme = readTemplateTarFiles(bare.payload).find(file => file.path === 'template/README.md');
+      const withProbesReadme = entries.find(file => file.path === 'template/README.md');
+      expect(withProbesReadme?.bytes).toEqual(bareReadme?.bytes);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

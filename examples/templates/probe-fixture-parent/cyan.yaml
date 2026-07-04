@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-parent
+description: 'Composable gate-bearing parent — the promise a broken child silently breaks.'
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

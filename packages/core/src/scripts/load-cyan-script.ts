@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { readFile, readdir } from 'node:fs/promises';
 import type { Answers, CyanOutput, CyanScript, PromptAdapter, PromptRequest, VfsFile } from '@cyanprint/contracts';
 import { CyanError, makePromptContext, problem, promptOptionValue } from '@cyanprint/contracts';
@@ -177,11 +177,31 @@ export async function globTemplateFiles(
 ): Promise<VfsFile[]> {
   const base = options.base ?? options.root ?? '';
   const scanRoot = base ? safeJoin(templateRoot, base) : templateRoot;
+  // Derive the probe check prefix from the *resolved* scan root relative to the template root,
+  // not the textual base: `safeJoin` collapses `..`/`.` segments (so `base: 'template/..'` scans
+  // the template root itself), and the exclusion check must see the same collapsed path or a
+  // normalized alias like `template/../probes` would smuggle probe files past `isTemplateProbePath`.
+  const normalizedBase = relative(resolve(templateRoot), scanRoot)
+    .split(/[\\/]+/)
+    .filter(part => part && part !== '.')
+    .join('/');
   const excludes = (options.exclude ?? []).map(exclude => new Bun.Glob(exclude));
   const mode = options.mode ?? 'copy';
   const glob = new Bun.Glob(pattern);
   const files: VfsFile[] = [];
   for (const path of await walkTemplateFiles(scanRoot)) {
+    // Drop the probe surface by BOTH the template-root-relative source path AND the
+    // scan-root-relative output path. The source path (with normalized base) keeps the
+    // template's own probes/ + probes.yaml out of every scope, including via `..` aliases
+    // that resolve into the probe directory. The output path closes the payload-scope
+    // leak: a scope like `base: 'template'` writes files at their scan-root-relative path,
+    // so a file at `template/probes/tests.ts` would otherwise materialize as `probes/tests.ts`
+    // in the generated repo — AC5 guarantees generated repos NEVER contain probes/** or
+    // probes.yaml, regardless of where in the template tree the file physically lives.
+    const sourcePath = normalizedBase ? `${normalizedBase}/${path}` : path;
+    if (isTemplateProbePath(sourcePath) || isTemplateProbePath(path)) {
+      continue;
+    }
     if (!matchesTemplateGlob(glob, pattern, path)) {
       continue;
     }
@@ -200,6 +220,27 @@ export async function globTemplateFiles(
     }
   }
   return files.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+/**
+ * Probes ride the published template artifact but must never materialize into
+ * generated repos: the template's own `probes/` directory and committed
+ * `probes.yaml` (both siblings of cyan.ts) are excluded from every template file
+ * scope, even a root-level `**\/*` glob. Applied to BOTH the source path and the
+ * generated-repo output path, so `probes/**` and `probes.yaml` can never appear in
+ * a generated repo — whether the file lives at the template root or is a payload
+ * path like `template/probes/…` whose output would land at `probes/…` (AC5 is an
+ * absolute guarantee about generated repos, so no scope may reintroduce the probe
+ * surface).
+ *
+ * Exported so the tree-assembly boundary in `create-project.ts` can apply the SAME
+ * predicate to processor/plugin *output* paths: this input-side scope filter only
+ * sees files it globs off disk, so a processor that synthesizes a fresh `probes/…`
+ * output path never passes through here. The generated-tree waist re-checks every
+ * final path with this predicate to keep AC5 absolute across every output vector.
+ */
+export function isTemplateProbePath(rootRelativePath: string): boolean {
+  return rootRelativePath === 'probes.yaml' || rootRelativePath === 'probes' || rootRelativePath.startsWith('probes/');
 }
 
 function matchesTemplateGlob(glob: Bun.Glob, pattern: string, path: string): boolean {

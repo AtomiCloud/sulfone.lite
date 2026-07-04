@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-gated
+description: 'Healthy gate-bearing probe fixture — every gate genuinely catches its sabotage.'
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

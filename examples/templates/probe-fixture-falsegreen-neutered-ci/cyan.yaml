@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-falsegreen-neutered-ci
+description: 'False-green mode: ci.sh exits 0 on a fast path before running any gate.'
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

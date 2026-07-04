@@ -29,7 +29,7 @@ import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
 import { processorCacheKey, readProcessorCache, writeProcessorCache } from '../cache/processor-cache';
 import { resolveLayers, type ResolutionLayer, type ResolverInvoker } from '../merge/resolve-layers';
-import { executeCyanScript, globTemplateFiles } from '../scripts/load-cyan-script';
+import { executeCyanScript, globTemplateFiles, isTemplateProbePath } from '../scripts/load-cyan-script';
 import {
   activeTemplates,
   buildGeneratedState,
@@ -427,7 +427,14 @@ export async function generateTemplateTree(options: {
   return {
     manifest: generated.manifest,
     ref: generated.ref,
-    files: generated.files,
+    // Central output waist for AC5: strip the probe surface (`probes/**`, `probes.yaml`)
+    // from the assembled tree. The input-side scope filter in `globTemplateFiles` only
+    // drops probe files it reads off disk — a processor/plugin that *synthesizes* a fresh
+    // `probes/…` output path bypasses it entirely. EVERY generation (fresh, sibling-tier,
+    // regenerate, trace) funnels through this return, so filtering here guarantees no
+    // output vector can materialize the probe surface into a generated repo, regardless of
+    // which subsystem produced the path.
+    files: stripTemplateProbeSurface(generated.files),
     resolvers: generated.manifest.resolvers,
     commands: generated.commands,
     decisions: context.decisions,
@@ -969,6 +976,17 @@ function normalizeScopeRoot(root: string | undefined): string {
 // Output IO, provenance assembly, commands
 // ---------------------------------------------------------------------------
 
+/**
+ * Drop every probe-surface path (`probes/**`, `probes.yaml`) from an assembled tree.
+ * Applied at the `generateTemplateTree` waist so processor/plugin output paths — which
+ * never pass through the input-side `globTemplateFiles` filter — cannot reintroduce the
+ * probe surface into a generated repo (AC5). Keeping it here also keeps the derived
+ * `generatedPaths`, provenance, and persisted `files` consistent with what lands on disk.
+ */
+function stripTemplateProbeSurface(files: VfsFile[]): VfsFile[] {
+  return files.filter(file => !isTemplateProbePath(file.path));
+}
+
 /** Write a merged working tree back to the project: merge deletions first, then changed files. */
 export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeResult): Promise<void> {
   // Deletions must land before writes: a merge can replace a file with a directory (or a
@@ -1058,6 +1076,29 @@ export async function runPostGenerationCommands(
   ctx: PostGenerationContext,
   warnings: CompatibilityWarning[],
 ): Promise<CyanError | undefined> {
+  if (commands.length === 0) {
+    return undefined;
+  }
+  // Commands run on disk AFTER the probe-filtered generated tree was written, so they are
+  // the one output vector the generation waist cannot see. Snapshot the probe surface
+  // (every probe file's bytes and every probe directory) before the batch, run it, then
+  // reconcile the surface back to that snapshot — undoing whatever the commands did to it,
+  // whether they created a file, created an empty directory, overwrote a user's own probe
+  // file, symlinked a probe path, or deleted one. Restoring to a known-good snapshot closes
+  // the whole class instead of enumerating command × filesystem-operation combinations one
+  // at a time. Runs even when a command fails, so an aborted batch cannot strand probe
+  // output on disk.
+  const before = await snapshotProbeSurface(ctx.outDir);
+  const failure = await execPostGenerationCommands(commands, ctx, warnings);
+  await reconcileProbeSurface(ctx.outDir, before, warnings);
+  return failure;
+}
+
+async function execPostGenerationCommands(
+  commands: CyanCommandIntent[],
+  ctx: PostGenerationContext,
+  warnings: CompatibilityWarning[],
+): Promise<CyanError | undefined> {
   for (const command of commands) {
     ctx.onProgress?.({ kind: 'command', ref: [command.command, ...(command.args ?? [])].join(' ') });
     const { runPostGenerationCommand } = await import('../commands/post-generation-command');
@@ -1089,7 +1130,7 @@ export function reportWarnings(warnings: CompatibilityWarning[], json?: boolean)
   }
 }
 
-/** Read the project's files (everything except CyanPrint metadata and `.git/`). */
+/** Read the project's files (everything except CyanPrint metadata, `.git/`, and the probe surface). */
 export async function readProjectFiles(projectDir: string): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
   const info = await stat(projectDir).catch(() => undefined);
@@ -1101,6 +1142,14 @@ export async function readProjectFiles(projectDir: string): Promise<VfsFile[]> {
       .split(/[\\/]+/)
       .join('/');
     if (relativePath === '.cyan_state.yaml' || relativePath === '.git' || relativePath.startsWith('.git/')) {
+      return;
+    }
+    // The probe surface is never part of a generated repo (AC5): the generation waist
+    // already keeps `probes/**` / `probes.yaml` out of every generated tree, and this
+    // snapshot-side exclusion keeps paths a post-generation command created on disk from
+    // being read back into files/state/provenance. `reconcileProbeSurface` removes those
+    // command-created files from disk itself.
+    if (isTemplateProbePath(relativePath)) {
       return;
     }
     const bytes = await readFile(path);
@@ -1137,6 +1186,223 @@ export async function readFinalProjectFiles(
     const previous = preShas.get(file.path);
     return previous === undefined || previous !== fileSha(file);
   });
+}
+
+/**
+ * A full snapshot of the probe surface (`probes/**`, `probes.yaml`) on disk: every probe
+ * FILE's exact bytes plus every probe DIRECTORY that exists, keyed by generated-repo-relative
+ * path. This is the reference the post-command reconcile restores the surface to, so any
+ * probe path a command touches — regardless of the filesystem operation — is fully undone.
+ */
+type ProbeSurfaceSnapshot = { files: Map<string, Buffer>; dirs: Set<string> };
+
+/**
+ * What a probe path currently resolves to on disk. Files (and symlinks, which `walkOutputFiles`
+ * ignores entirely) and directories are all classified so the reconcile can restore, remove, or
+ * leave each precisely — a command-created empty directory or a symlinked probe path is a
+ * generated-repo probe surface (AC5) just as much as a regular file is.
+ */
+async function walkProbeSurface(
+  projectDir: string,
+  visit: {
+    onFile: (rel: string, abs: string) => Promise<void>;
+    onDir: (rel: string) => void;
+    onOther?: (rel: string, abs: string) => Promise<void>;
+  },
+): Promise<void> {
+  const info = await stat(projectDir).catch(() => undefined);
+  if (!info?.isDirectory()) {
+    return;
+  }
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') {
+        continue;
+      }
+      const abs = join(dir, entry.name);
+      const rel = relative(projectDir, abs)
+        .split(/[\\/]+/)
+        .join('/');
+      const isProbe = isTemplateProbePath(rel);
+      if (entry.isDirectory()) {
+        if (isProbe) {
+          visit.onDir(rel);
+        }
+        await walk(abs);
+      } else if (entry.isFile()) {
+        if (isProbe) {
+          await visit.onFile(rel, abs);
+        }
+      } else if (isProbe) {
+        // A symlink / special file at a probe path: never a regular file, so the snapshot
+        // never captures it as user content — the reconcile removes it as command output.
+        await visit.onOther?.(rel, abs);
+      }
+    }
+  };
+  await walk(projectDir);
+}
+
+/** Capture every probe file's bytes and every probe directory currently on disk. */
+async function snapshotProbeSurface(projectDir: string): Promise<ProbeSurfaceSnapshot> {
+  const files = new Map<string, Buffer>();
+  const dirs = new Set<string>();
+  await walkProbeSurface(projectDir, {
+    onFile: async (rel, abs) => {
+      files.set(rel, await readFile(abs));
+    },
+    onDir: rel => {
+      dirs.add(rel);
+    },
+  });
+  return { files, dirs };
+}
+
+/**
+ * Restore the probe surface to its pre-command snapshot after a post-generation command batch
+ * (AC5: generated repos never contain `probes/**` or `probes.yaml`). Post-generation commands
+ * come from the template and have no business touching the reserved probe surface; whatever they
+ * did to it — create a regular file, create an empty directory, overwrite a user's own probe
+ * file in place, symlink a probe path, or delete a pre-existing one — is fully undone so the
+ * surface ends byte-for-byte what it was before the batch. Reconciling to a snapshot, rather than
+ * enumerating command × filesystem-operation combinations, is why this closes the whole class at
+ * once. A final verification re-reads the surface and fails loud if any drift remains, turning the
+ * guarantee into a checked invariant rather than a best-effort scrub. Every change is surfaced as
+ * a warning so the reconcile is attributable, not silent.
+ */
+async function reconcileProbeSurface(
+  projectDir: string,
+  before: ProbeSurfaceSnapshot,
+  warnings: CompatibilityWarning[],
+): Promise<void> {
+  const currentFiles = new Map<string, Buffer>();
+  const currentDirs = new Set<string>();
+  const removeEntry = async (rel: string): Promise<void> => {
+    await assertRootSafeDelete(projectDir, rel);
+    await rm(safeJoin(projectDir, rel), { recursive: true, force: true });
+  };
+
+  const touched: string[] = [];
+  await walkProbeSurface(projectDir, {
+    onFile: async (rel, abs) => {
+      currentFiles.set(rel, await readFile(abs));
+    },
+    onDir: rel => {
+      currentDirs.add(rel);
+    },
+    onOther: async rel => {
+      // Symlink / special file at a probe path — never legitimate output; remove it.
+      await removeEntry(rel);
+      touched.push(rel);
+    },
+  });
+
+  // 1. Files the batch created (absent before) are removed; files it modified in place are
+  //    restored to their original bytes. Untouched pre-existing files are left alone.
+  for (const [rel, bytes] of currentFiles) {
+    const original = before.files.get(rel);
+    if (original === undefined) {
+      await removeEntry(rel);
+      touched.push(rel);
+    } else if (!original.equals(bytes)) {
+      await writeVfsFile(projectDir, { path: rel, bytesBase64: original.toString('base64') });
+      touched.push(rel);
+    }
+  }
+
+  // 2. Files the batch deleted from the pre-existing surface are restored byte-for-byte. If the
+  //    batch replaced such a file with a directory at the same path, that directory is removed
+  //    first: `writeVfsFile` calls `Bun.write`, which throws `EISDIR` on a directory target, so
+  //    without this the restore would abort and the user's original file would be lost. (A symlink
+  //    at a probe path is already gone — `walkProbeSurface`'s `onOther` removed it during the walk
+  //    above — so a directory is the only surviving entry that can collide here.)
+  for (const [rel, bytes] of before.files) {
+    if (!currentFiles.has(rel)) {
+      if (currentDirs.has(rel)) {
+        // Drop the directory (and anything under it) before restoring the file, and remove the
+        // path from `currentDirs` so step 3 does not later treat the now-restored file as a
+        // command-created directory and delete it.
+        await removeEntry(rel);
+        currentDirs.delete(rel);
+        touched.push(rel);
+      }
+      await writeVfsFile(projectDir, { path: rel, bytesBase64: bytes.toString('base64') });
+      touched.push(rel);
+    }
+  }
+
+  // 3. Directories the batch created (e.g. an empty `probes/`) are removed — deepest first so a
+  //    child is gone before its parent. A created directory never held pre-existing content (it
+  //    did not exist before), so a recursive remove only discards command output.
+  const createdDirs = [...currentDirs]
+    .filter(dir => !before.dirs.has(dir))
+    .sort((left, right) => right.length - left.length);
+  for (const dir of createdDirs) {
+    await removeEntry(dir);
+    touched.push(dir);
+  }
+
+  // 4. Restore any pre-existing probe directory a removal above pruned away, so an empty
+  //    user-owned probe directory survives exactly as it was.
+  for (const dir of before.dirs) {
+    await mkdir(safeJoin(projectDir, dir), { recursive: true });
+  }
+
+  await assertProbeSurfaceRestored(projectDir, before);
+
+  if (touched.length > 0) {
+    warnings.push({
+      code: 'post_generation_probe_output_removed',
+      message:
+        `Post-generation commands touched the probe surface, which never belongs in a generated repo; ` +
+        `restored to its pre-command state: ${[...new Set(touched)].sort().join(', ')}. ` +
+        'Probes ride the template artifact only (probes/ next to cyan.ts).',
+    });
+  }
+}
+
+/**
+ * Fail loud if the probe surface on disk drifted from its pre-command snapshot after the
+ * reconcile ran (AC5 enforced at verification time). A correct reconcile always leaves them
+ * identical, so this never fires in practice — it is the guarantee's teeth: a probe-surface
+ * leak aborts generation rather than being written into a repo's state.
+ */
+async function assertProbeSurfaceRestored(projectDir: string, before: ProbeSurfaceSnapshot): Promise<void> {
+  const drift: string[] = [];
+  const seen = new Set<string>();
+  await walkProbeSurface(projectDir, {
+    onFile: async (rel, abs) => {
+      seen.add(rel);
+      const original = before.files.get(rel);
+      if (original === undefined || !original.equals(await readFile(abs))) {
+        drift.push(rel);
+      }
+    },
+    onDir: rel => {
+      if (!before.dirs.has(rel)) {
+        drift.push(rel);
+      }
+    },
+    onOther: async rel => {
+      drift.push(rel);
+    },
+  });
+  for (const rel of before.files.keys()) {
+    if (!seen.has(rel)) {
+      drift.push(rel);
+    }
+  }
+  if (drift.length > 0) {
+    throw new CyanError(
+      problem(
+        'execution',
+        'probe_surface_not_restored',
+        `Probe surface (${[...new Set(drift)].sort().join(', ')}) could not be restored to its pre-command state; ` +
+          'a generated repo must never contain probes/** or probes.yaml.',
+        { drift: [...new Set(drift)].sort() },
+      ),
+    );
+  }
 }
 
 async function walkOutputFiles(root: string, visit: (path: string) => Promise<void>): Promise<void> {

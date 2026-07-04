@@ -123,6 +123,28 @@ const renameProcessorRuntime = [
 const escapeProcessorRuntime =
   'export async function processor(input) { await Bun.write(input.outputDir + "/../README.md", "bad"); }\n';
 
+// Synthesizes fresh probe-surface OUTPUT paths (`probes/tests.ts`, `probes.yaml`) that never
+// existed as template inputs — reviewer-2's loop-4 vector. The input-side `globTemplateFiles`
+// filter cannot catch these because they are minted by the processor, not read off disk; only
+// the generated-tree waist filter keeps them out of the repo (AC5).
+const probeEmittingProcessorRuntime = [
+  "import { mkdir } from 'node:fs/promises';",
+  "import { dirname } from 'node:path';",
+  'export async function processor(input) {',
+  "  const glob = new Bun.Glob('**/*');",
+  '  for await (const path of glob.scan({ cwd: input.inputDir, onlyFiles: true, dot: true })) {',
+  "    const text = await Bun.file(input.inputDir + '/' + path).text();",
+  "    await mkdir(dirname(input.outputDir + '/' + path), { recursive: true });",
+  "    await Bun.write(input.outputDir + '/' + path, text);",
+  '  }',
+  '  // Mint a probe surface out of thin air: no such input path exists.',
+  "  await mkdir(input.outputDir + '/probes', { recursive: true });",
+  "  await Bun.write(input.outputDir + '/probes/tests.ts', '// synthesized probe\\n');",
+  "  await Bun.write(input.outputDir + '/probes.yaml', 'contractVersion: 1\\nfeatures: []\\n');",
+  '}',
+  '',
+].join('\n');
+
 const footerPluginRuntime = [
   'export async function plugin(input) {',
   "  const readme = await Bun.file(input.outputDir + '/README.md').text();",
@@ -3582,5 +3604,443 @@ describe('unified diff', () => {
     const { unifiedDiff } = await import('./util/unified-diff');
     expect(unifiedDiff('', 'a\nb')).toContain('@@ -0,0 +1,2 @@');
     expect(unifiedDiff('a\nb', '')).toContain('@@ -1,2 +0,0 @@');
+  });
+});
+
+describe('probe surface', () => {
+  test('cyan.ts can declare features and executeCyanScript surfaces them', async () => {
+    const fixture = await makeFixture('feature-declaration');
+    try {
+      const template = await writeTemplate(fixture, {
+        name: 'feature-decl',
+        cyanTs: "export default function cyan() { return { features: ['tests', 'lint'] }; }\n",
+      });
+      const output = await executeCyanScript(join(template, 'cyan.ts'), {}, {});
+      expect(output.features).toEqual(['tests', 'lint']);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test(
+    'generated repos never contain the template probe surface (probes/**, probes.yaml)',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion');
+      try {
+        await writeVarsProcessor(fixture);
+        // Worst-case leak vector: a root-level `**/*` scope that scans the template
+        // root itself (probes/ and probes.yaml are siblings of cyan.ts) alongside the
+        // conventional `template/` payload scope.
+        const template = await writeTemplate(fixture, {
+          name: 'probe-bearing',
+          files: { 'README.md': '# Probe bearing\n' },
+          cyanTs: [
+            'export default function cyan() {',
+            '  return {',
+            "    features: ['tests'],",
+            '    processors: [',
+            '      {',
+            "        name: 'cyanprint/vars',",
+            "        files: [{ root: 'template', glob: '**/*', type: 'Copy' }, { glob: '**/*', type: 'Copy' }],",
+            '      },',
+            '    ],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+        await mkdir(join(template, 'probes'), { recursive: true });
+        await writeFile(join(template, 'probes/tests.ts'), '// probe definition\n', 'utf8');
+        await writeFile(join(template, 'probes.yaml'), 'contractVersion: 1\nfeatures: []\n', 'utf8');
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+        expect(result.status).toBe('done');
+        const outputPaths = result.files.map(file => file.path);
+        // The root scope really scanned the template root (cyan.ts rode along)…
+        expect(outputPaths).toContain('cyan.ts');
+        expect(outputPaths).toContain('README.md');
+        // …but the probe surface never materializes.
+        expect(outputPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+        const onDisk = await Array.fromAsync(
+          new Bun.Glob('**/*').scan({ cwd: fixture.out, onlyFiles: true, dot: true }),
+        );
+        expect(onDisk.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'generated repos never contain probe paths synthesized by a processor (output-path vector)',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-processor-output');
+      try {
+        // A processor that MINTS `probes/tests.ts` + `probes.yaml` as fresh output paths — they
+        // never exist as template inputs, so the input-side scope filter cannot see them. Only the
+        // generated-tree waist filter keeps them out of the repo (reviewer-0/reviewer-2 loop-4 finding).
+        await writeArtifact(fixture, { kind: 'processor', name: 'probe-emit', runtime: probeEmittingProcessorRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'probe-emit-bearing',
+          files: { 'README.md': '# Probe emit\n' },
+          processors: ['cyanprint/probe-emit'],
+          cyanTs: [
+            'export default function cyan() {',
+            '  return {',
+            "    features: ['tests'],",
+            '    processors: [',
+            "      { name: 'cyanprint/probe-emit', files: [{ root: 'template', glob: '**/*', type: 'Template' }] },",
+            '    ],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+        expect(result.status).toBe('done');
+        const outputPaths = result.files.map(file => file.path);
+        // The genuine payload rides along…
+        expect(outputPaths).toContain('README.md');
+        // …but the processor-synthesized probe surface never materializes in the result set…
+        expect(outputPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+        // …nor on disk.
+        const onDisk = await Array.fromAsync(
+          new Bun.Glob('**/*').scan({ cwd: fixture.out, onlyFiles: true, dot: true }),
+        );
+        expect(onDisk.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'generated repos never contain probe paths created by a post-generation command (fresh create)',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-command-output');
+      try {
+        // A post-generation command that writes `probes/tests.ts` + `probes.yaml` AFTER the
+        // filtered generated tree landed on disk — the generateTemplateTree waist never sees
+        // these paths, and the post-command snapshot would otherwise read them straight back
+        // into files/state/provenance (reviewer-0/reviewer-2 loop-5 finding).
+        const template = await writeTemplate(fixture, {
+          name: 'probe-command-bearing',
+          cyanTs: [
+            'export default function cyan() {',
+            '  return {',
+            "    features: ['tests'],",
+            '    commands: [{',
+            "      command: 'bun',",
+            '      args: ["--eval", "await Bun.write(\\"probes/tests.ts\\", \\"// leaked\\"); await Bun.write(\\"probes.yaml\\", \\"contractVersion: 1\\"); await Bun.write(\\"command-ran.txt\\", \\"ok\\")"],',
+            '      allow: true,',
+            '    }],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+        expect(result.status).toBe('done');
+        // The command genuinely ran and its non-probe output is captured…
+        expect(await readOut(fixture.out, 'command-ran.txt')).toBe('ok');
+        const outputPaths = result.files.map(file => file.path);
+        expect(outputPaths).toContain('command-ran.txt');
+        // …but the command-created probe surface never lands in the result set…
+        expect(outputPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+        // …nor in the persisted state or provenance…
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.files.filter(file => file.path === 'probes.yaml' || file.path.startsWith('probes/'))).toEqual([]);
+        expect(
+          state.provenance.filter(entry => entry.path === 'probes.yaml' || entry.path.startsWith('probes/')),
+        ).toEqual([]);
+        // …nor on disk.
+        const onDisk = await Array.fromAsync(
+          new Bun.Glob('**/*').scan({ cwd: fixture.out, onlyFiles: true, dot: true }),
+        );
+        expect(onDisk.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update never persists command-created probe paths but preserves user-owned probe files',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-command-update');
+      try {
+        await writeVarsProcessor(fixture);
+        // v2 gains a post-generation command that mints the probe surface — the update path
+        // snapshots the post-command tree through readProjectFiles/readFinalProjectFiles,
+        // which must exclude it (same loop-5 vector on the update/upsert flow).
+        const commandCyan = [
+          'export default function cyan() {',
+          '  return {',
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+          '    commands: [{',
+          "      command: 'bun',",
+          '      args: ["--eval", "await Bun.write(\\"probes/tests.ts\\", \\"// leaked\\"); await Bun.write(\\"probes.yaml\\", \\"contractVersion: 1\\"); await Bun.write(\\"command-ran.txt\\", \\"ok\\")"],',
+          '      allow: true,',
+          '    }],',
+          '  };',
+          '}',
+          '',
+        ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'probe-cmd-upd',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+          v2CyanTs: commandCyan,
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        // A user-owned probe file that predates the update: the engine never manages the
+        // probe surface, so it must survive untouched — only command-CREATED paths are
+        // scrubbed, never pre-existing user content.
+        await mkdir(join(fixture.out, 'probes'), { recursive: true });
+        await writeFile(join(fixture.out, 'probes/user-owned.ts'), '// user file\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+        expect(update.status).toBe('done');
+        // The command ran…
+        expect(await readOut(fixture.out, 'command-ran.txt')).toBe('ok');
+        // …its probe output never reaches state or provenance…
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.files.filter(file => file.path === 'probes.yaml' || file.path.startsWith('probes/'))).toEqual([]);
+        expect(
+          state.provenance.filter(entry => entry.path === 'probes.yaml' || entry.path.startsWith('probes/')),
+        ).toEqual([]);
+        // …the command-created probe files are scrubbed from disk…
+        expect(await exists(join(fixture.out, 'probes/tests.ts'))).toBe(false);
+        expect(await exists(join(fixture.out, 'probes.yaml'))).toBe(false);
+        // …while the user's pre-existing probe file survives.
+        expect(await readOut(fixture.out, 'probes/user-owned.ts')).toBe('// user file\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'generated repos never contain an empty probe directory a post-generation command created (fresh create)',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-command-empty-dir');
+      try {
+        // reviewer-0 loop-6 edge A: a command that creates `probes/` as EMPTY directories (no
+        // regular files inside). A file-only scrub walk (`entry.isFile()`) never discovers them,
+        // so they would survive on disk — and AC5 names `probes/` itself as excluded, so an empty
+        // probe directory is a leak. The reconcile's directory-aware walk removes them.
+        const template = await writeTemplate(fixture, {
+          name: 'probe-empty-dir-command',
+          cyanTs: [
+            'export default function cyan() {',
+            '  return {',
+            "    features: ['tests'],",
+            '    commands: [{',
+            "      command: 'bun',",
+            '      args: ["--eval", "await (await import(\\"node:fs/promises\\")).mkdir(\\"probes/nested\\", { recursive: true }); await Bun.write(\\"command-ran.txt\\", \\"ok\\")"],',
+            '      allow: true,',
+            '    }],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+        expect(result.status).toBe('done');
+        // The command genuinely ran…
+        expect(await readOut(fixture.out, 'command-ran.txt')).toBe('ok');
+        // …but neither the empty `probes/` directory it created nor its nested child survives on disk.
+        expect(await exists(join(fixture.out, 'probes'))).toBe(false);
+        expect(await exists(join(fixture.out, 'probes/nested'))).toBe(false);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update restores a user-owned probe file a post-generation command overwrote in place',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-command-overwrite');
+      try {
+        await writeVarsProcessor(fixture);
+        // reviewer-2 loop-6 edge B: the old scrub snapshotted pre-existing probe PATHS and skipped
+        // them, so a command that overwrites an existing `probes/user-owned.ts` in place changed its
+        // bytes while the path stayed in the pre-existing set — the template-injected content
+        // remained on disk. The reconcile snapshots CONTENT, so the user's original bytes are
+        // restored and the injected content is undone.
+        const commandCyan = [
+          'export default function cyan() {',
+          '  return {',
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+          '    commands: [{',
+          "      command: 'bun',",
+          '      args: ["--eval", "await Bun.write(\\"probes/user-owned.ts\\", \\"// hijacked by template\\"); await Bun.write(\\"command-ran.txt\\", \\"ok\\")"],',
+          '      allow: true,',
+          '    }],',
+          '  };',
+          '}',
+          '',
+        ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'probe-cmd-overwrite',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+          v2CyanTs: commandCyan,
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        // A user-owned probe file that predates the update, with content the engine must preserve.
+        await mkdir(join(fixture.out, 'probes'), { recursive: true });
+        await writeFile(join(fixture.out, 'probes/user-owned.ts'), '// user file\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+        expect(update.status).toBe('done');
+        // The command ran and overwrote the file in place…
+        expect(await readOut(fixture.out, 'command-ran.txt')).toBe('ok');
+        // …but the reconcile restored the user's original bytes, not the template's injected content…
+        expect(await readOut(fixture.out, 'probes/user-owned.ts')).toBe('// user file\n');
+        // …and the probe path never reaches state or provenance.
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.files.filter(file => file.path === 'probes.yaml' || file.path.startsWith('probes/'))).toEqual([]);
+        expect(
+          state.provenance.filter(entry => entry.path === 'probes.yaml' || entry.path.startsWith('probes/')),
+        ).toEqual([]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update restores a user-owned probe file a post-generation command replaced with a directory',
+    async () => {
+      const fixture = await makeFixture('probe-exclusion-command-file-to-dir');
+      try {
+        await writeVarsProcessor(fixture);
+        // reviewer-2 loop-7 edge: the reconcile restores a command-deleted pre-existing probe file
+        // via `writeVfsFile`, but if the command replaced that file with a DIRECTORY at the same
+        // path, `Bun.write` throws `EISDIR` — the reconcile aborted and the user's original file
+        // was lost. The fix removes any directory at the target path before restoring the bytes.
+        const commandCyan = [
+          'export default function cyan() {',
+          '  return {',
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }] }],",
+          '    commands: [{',
+          "      command: 'bun',",
+          '      args: ["--eval", "const fs = await import(\\"node:fs/promises\\"); await fs.rm(\\"probes/user-owned.ts\\", { recursive: true, force: true }); await fs.mkdir(\\"probes/user-owned.ts\\", { recursive: true }); await Bun.write(\\"probes/user-owned.ts/injected.ts\\", \\"// injected by template\\"); await Bun.write(\\"command-ran.txt\\", \\"ok\\")"],',
+          '      allow: true,',
+          '    }],',
+          '  };',
+          '}',
+          '',
+        ].join('\n');
+        const pair = await writeVersionPair(fixture, {
+          name: 'probe-cmd-file-to-dir',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+          v2CyanTs: commandCyan,
+        });
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        // A user-owned probe FILE that predates the update, which the command will clobber with a dir.
+        await mkdir(join(fixture.out, 'probes'), { recursive: true });
+        await writeFile(join(fixture.out, 'probes/user-owned.ts'), '// user file\n', 'utf8');
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+        expect(update.status).toBe('done');
+        // The command ran and replaced the file with a directory…
+        expect(await readOut(fixture.out, 'command-ran.txt')).toBe('ok');
+        // …but the reconcile removed the directory and restored the user's original file bytes…
+        expect(await readOut(fixture.out, 'probes/user-owned.ts')).toBe('// user file\n');
+        // …with no injected directory child left behind…
+        expect(await exists(join(fixture.out, 'probes/user-owned.ts/injected.ts'))).toBe(false);
+        // …and the probe path never reaches state or provenance.
+        const state = await loadGeneratedState(fixture.out);
+        expect(state.files.filter(file => file.path === 'probes.yaml' || file.path.startsWith('probes/'))).toEqual([]);
+        expect(
+          state.provenance.filter(entry => entry.path === 'probes.yaml' || entry.path.startsWith('probes/')),
+        ).toEqual([]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test('globTemplateFiles excludes the probe surface for normalized `..` base aliases', async () => {
+    const { globTemplateFiles } = await import('./scripts/load-cyan-script');
+    const fixture = await makeFixture('probe-exclusion-normalized');
+    try {
+      const templateRoot = join(fixture.templates, 'probe-normalized');
+      await mkdir(join(templateRoot, 'probes'), { recursive: true });
+      await writeFile(join(templateRoot, 'cyan.ts'), '// cyan\n', 'utf8');
+      await writeFile(join(templateRoot, 'probes/tests.ts'), '// probe definition\n', 'utf8');
+      await writeFile(join(templateRoot, 'probes.yaml'), 'contractVersion: 1\nfeatures: []\n', 'utf8');
+
+      // A base that resolves back to the template root via `..` must still see the probe surface
+      // excluded — the check path is derived from the resolved scan root, not the textual base.
+      const rootAlias = await globTemplateFiles(templateRoot, '**/*', { base: 'probes/..', mode: 'copy' });
+      const rootAliasPaths = rootAlias.map(file => file.path);
+      expect(rootAliasPaths).toContain('cyan.ts');
+      expect(rootAliasPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+
+      // A base that resolves *into* the probe directory via `..` yields nothing but probe files —
+      // all of which must be excluded.
+      const intoProbes = await globTemplateFiles(templateRoot, '**/*', { base: 'probes/../probes', mode: 'copy' });
+      expect(intoProbes.map(file => file.path)).toEqual([]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test('globTemplateFiles excludes payload probe paths whose generated-repo output would be probes/**', async () => {
+    const { globTemplateFiles } = await import('./scripts/load-cyan-script');
+    const fixture = await makeFixture('probe-exclusion-payload');
+    try {
+      const templateRoot = join(fixture.templates, 'probe-payload');
+      // Probe files live under a `template/` payload scope, NOT at the template root: a file at
+      // `template/probes/tests.ts` scanned with `base: 'template'` has output path `probes/tests.ts`.
+      // Its template-root-relative source path (`template/probes/tests.ts`) is NOT a probe path, so
+      // only the output-path check keeps it out of the generated repo (reviewer-2's loop-3 finding).
+      await mkdir(join(templateRoot, 'template/probes'), { recursive: true });
+      await writeFile(join(templateRoot, 'template/README.md'), '# Payload\n', 'utf8');
+      await writeFile(join(templateRoot, 'template/probes/tests.ts'), '// probe definition\n', 'utf8');
+      await writeFile(join(templateRoot, 'template/probes.yaml'), 'contractVersion: 1\nfeatures: []\n', 'utf8');
+
+      const payload = await globTemplateFiles(templateRoot, '**/*', { base: 'template', mode: 'copy' });
+      const payloadPaths = payload.map(file => file.path);
+      // The non-probe payload rides along…
+      expect(payloadPaths).toContain('README.md');
+      // …but nothing whose generated-repo output path is the probe surface survives.
+      expect(payloadPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });

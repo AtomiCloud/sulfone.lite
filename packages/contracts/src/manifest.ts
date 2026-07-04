@@ -123,6 +123,7 @@ export type CompatibilityWarning = {
     | 'legacy_coordinator_ignored'
     | 'legacy_server_execution_ignored'
     | 'post_generation_command_skipped'
+    | 'post_generation_probe_output_removed'
     | 'merge_conflicts_pending';
   message: string;
 };

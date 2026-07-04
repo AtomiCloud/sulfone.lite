@@ -1,0 +1,10 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-child-broken
+description: "False-green composition — the child's LWW overwrite neuters the parent's test gate."
+bundledEntry: cyan.ts
+templates:
+  cyanprint/probe-fixture-parent:
+processors:
+  - cyan/default
