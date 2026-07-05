@@ -128,7 +128,13 @@ export function applyProbeSelection(
   const filtered: ResolvedFeatureProbes[] = [];
   for (const feature of resolved) {
     const wholeFeature = featureMatches(feature.feature);
-    const kept = feature.probes.filter(entry => wholeFeature || probeMatches(feature.feature, entry.probe.name));
+    const kept = feature.probes.filter(entry => {
+      // Always call probeMatches for its matched-tracking side effect: a probe selector
+      // for a probe inside an already-fully-selected feature must still be marked matched,
+      // or the unmatched-selector check below would wrongly report it as unmatched.
+      const matchesProbe = probeMatches(feature.feature, entry.probe.name);
+      return wholeFeature || matchesProbe;
+    });
     if (kept.length === 0) {
       continue;
     }

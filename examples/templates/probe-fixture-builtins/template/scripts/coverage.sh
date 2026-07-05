@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Gate: the committed coverage ledger must match the regenerated test count.
-actual=$(cat tests/*.test.js | grep -c '^test(')
+shopt -s nullglob
+actual=$(awk '/^test\(/ { count++ } END { print count + 0 }' tests/*.test.js)
 expected=$(cat coverage/ledger.txt)
 if [[ ${actual} != "${expected}" ]]; then
   echo "❌ coverage gate: ledger says ${expected} but regeneration found ${actual}" >&2

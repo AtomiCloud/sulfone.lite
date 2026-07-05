@@ -98,17 +98,31 @@ export async function executeProbeMatrix(args: {
   const verdicts = new Map<string, ProbeVerdict>();
   const spans: ProbeExecutionSpan[] = [];
   const runRecords: ProbeRunRecord[] = [];
+  // `mapWithConcurrency` is `Promise.all`-backed: a rejecting worker settles the whole
+  // call immediately while sibling workers keep running in the background. Rethrowing
+  // straight out of the mapped callback would race the `finally` below — `source.dispose()`
+  // (which deletes the sandbox root) could run while other `executeRun`s are still using
+  // sandboxes under it. Instead, swallow per-run errors into `firstError` so every worker
+  // runs to completion (every run settles) before dispose, then surface the first error.
+  let firstError: unknown;
   try {
     const parallelism = options.parallelism ?? Math.min(runs.length, availableParallelism());
     await mapWithConcurrency(runs, parallelism, async (run, runIndex) => {
       const startedAt = Date.now();
-      const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, spans, options });
-      runRecords.push({ ...record, runIndex, kind: run.kind, startedAt, endedAt: Date.now() });
+      try {
+        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, spans, options });
+        runRecords.push({ ...record, runIndex, kind: run.kind, startedAt, endedAt: Date.now() });
+      } catch (error) {
+        firstError ??= error;
+      }
     });
   } finally {
     if (!options.keepSandboxes) {
       await source.dispose();
     }
+  }
+  if (firstError) {
+    throw firstError;
   }
   runRecords.sort((left, right) => left.runIndex - right.runIndex);
   return {

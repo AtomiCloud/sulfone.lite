@@ -122,6 +122,10 @@ export async function probeCommand(argv: string[]): Promise<void> {
     const emptyPayload = {
       mode: 'matrix' as const,
       repo: repoPath,
+      source:
+        probeSources.mode === 'declaration'
+          ? { mode: probeSources.mode, template: probeSources.templateDir }
+          : { mode: probeSources.mode, dir: probeSources.dir },
       counts: emptyCounts(),
       report: emptyReport(),
       note: 'no declared features to probe',

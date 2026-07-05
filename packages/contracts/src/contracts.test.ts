@@ -107,6 +107,37 @@ describe('manifest and cyan script contracts', () => {
     ).toThrow('cyan.yaml is invalid');
   });
 
+  test('probeOverrides: a version-qualified override requires an exact-matching versioned dependency', () => {
+    // A versioned override (`@1`) demands an exact version match — a versionless
+    // `templates:` declaration for the same owner/name does not satisfy it, since
+    // `!override.version || dependency.version === override.version` requires equality
+    // once the override names a version. (Dependency refs version as a plain integer,
+    // per DependencyRefSchema — not semver.)
+    expect(() =>
+      parseCyanManifest({
+        cyanprint: 4,
+        kind: 'template',
+        name: 'consumer',
+        bundledEntry: 'cyan.ts',
+        templates: { 'cyanprint/gated': null },
+        probeOverrides: { 'cyanprint/gated@1': { tests: 'probe-overrides/tests.ts' } },
+      }),
+    ).toThrow(/does not declare it under templates/);
+
+    // The same override against the exact matching versioned declaration is accepted.
+    const parsed = parseCyanManifest({
+      cyanprint: 4,
+      kind: 'template',
+      name: 'consumer',
+      bundledEntry: 'cyan.ts',
+      templates: { 'cyanprint/gated@1': null },
+      probeOverrides: { 'cyanprint/gated@1': { tests: 'probe-overrides/tests.ts' } },
+    });
+    expect(parsed.manifest.probeOverrides).toEqual([
+      { owner: 'cyanprint', name: 'gated', version: '1', feature: 'tests', file: 'probe-overrides/tests.ts' },
+    ]);
+  });
+
   test('manifest rejects removed fields: presets, api, commutative', () => {
     const base = { cyanprint: 4, kind: 'template', name: 'demo', bundledEntry: 'cyan.ts' };
     expect(() => parseCyanManifest({ ...base, presets: { templates: {} } })).toThrow('presets: has been removed');
