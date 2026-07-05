@@ -1,3 +1,17 @@
+## [4.7.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.6.0...v4.7.0) (2026-07-05)
+
+
+### ✨ Features ✨
+
+* **probe:** contract, feature declaration, publish surface, fixtures ([f6decb0](https://github.com/AtomiCloud/sulfone.lite/commit/f6decb0dbb05ba7aee4ee544d8ffe7bad56559e3))
+* **probe:** engine — sandbox, matrix, resolution, manifest, built-ins ([52656dd](https://github.com/AtomiCloud/sulfone.lite/commit/52656dd3163f28e9fc904c7422e7fecec381d6e7))
+* **probe:** surface — command, test-flow tier, skill, meta-template ([1974c77](https://github.com/AtomiCloud/sulfone.lite/commit/1974c7786d615f1616b56dad748f9b5f64ebb55f))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **probe:** address CodeRabbit review findings on PR [#8](https://github.com/AtomiCloud/sulfone.lite/issues/8) ([3e8c764](https://github.com/AtomiCloud/sulfone.lite/commit/3e8c7642d22b9dacfbd383b7da986652ee4958dd))
+
 ## [4.6.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.5.0...v4.6.0) (2026-07-03)
 
 
