@@ -30,7 +30,7 @@ invocation:
 
 | Language       | Unit + Functional        | Integration                 | SIT | E2E        |
 | -------------- | ------------------------ | --------------------------- | --- | ---------- |
-| TypeScript/Bun | `bun:test` + `should`    | `bun:test` + Testcontainers | k6  | Playwright |
+| TypeScript/Bun | `bun:test` + `expect`    | `bun:test` + Testcontainers | k6  | Playwright |
 | C#/.NET        | xUnit + FluentAssertions | xUnit + Testcontainers      | k6  | Playwright |
 | Go             | `testing` + testify      | `testing` + testify + TC    | k6  | Playwright |
 
@@ -74,7 +74,7 @@ Full documentation: [testing/](../../../docs/developer/standard/testing/)
 
 Related skills:
 
-- [`/typescript-quality`](../typescript-quality/) — For bun:test, should setup, and Knip workflows
+- [`/typescript-quality`](../typescript-quality/) — For bun:test, expect assertions, and Knip workflows
 - [`/stateless-oop-di`](../stateless-oop-di/) — For testable code design
 - [`/three-layer-architecture`](../three-layer-architecture/) — For testing pure domain logic
 - [`/domain-modeling`](../domain-modeling/) — For domain types used in tests

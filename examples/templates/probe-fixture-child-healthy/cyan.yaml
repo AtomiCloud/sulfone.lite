@@ -1,0 +1,10 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-child-healthy
+description: 'Healthy composition — inherits the gated parent and keeps its gates intact.'
+bundledEntry: cyan.ts
+templates:
+  cyanprint/probe-fixture-gated:
+processors:
+  - cyan/default

@@ -1,0 +1,9 @@
+cases:
+  - name: basic
+    expected: expected
+    merges:
+      - path: scripts/test-gate.sh
+        decision: lww
+        segment: dependency
+    validations:
+      - bash scripts/ci.sh

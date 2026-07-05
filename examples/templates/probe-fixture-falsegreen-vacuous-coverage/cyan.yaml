@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-falsegreen-vacuous-coverage
+description: 'False-green mode: the coverage ledger check reads a committed number nothing regenerates.'
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

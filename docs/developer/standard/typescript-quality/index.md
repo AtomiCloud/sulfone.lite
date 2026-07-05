@@ -6,7 +6,7 @@ title: TypeScript/Bun Quality Gates
 # TypeScript/Bun Quality Gates
 
 This standard defines the default setup for TypeScript projects that use Bun,
-`bun:test`, `should`, and Knip.
+`bun:test` with its built-in `expect` assertions, and Knip.
 
 It is intentionally split into two Knip workflows:
 
@@ -16,37 +16,21 @@ It is intentionally split into two Knip workflows:
 ## Required Dependencies
 
 ```bash
-bun add -D typescript @types/bun should @types/should knip
+bun add -D typescript @types/bun knip
 ```
 
 Use `@types/bun` for Bun's TypeScript declarations.
 
 ## Bun Test Setup
 
-Use `bun:test` with `should` assertions.
-
-### `bunfig.toml`
-
-```toml
-[test]
-preload = ["./test/setup.ts"]
-coverageSkipTestFiles = true
-```
-
-### `test/setup.ts`
-
-```typescript
-import 'should';
-```
-
-The preload enables `.should` assertions, such as `actual.should.equal(expected)`.
-Import `should` directly in a test file only when using the function form, such
-as `should(value).be.null()`.
+Use `bun:test` with its built-in `expect` assertions. No assertion library or
+test preload is required — `expect` ships with the runner and is fully typed by
+`@types/bun`.
 
 ### Test Example
 
 ```typescript
-import { describe, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 
 import { add } from '../../src/add';
 
@@ -59,7 +43,7 @@ describe('add', () => {
     const actual = add(1, 2);
 
     // Assert
-    actual.should.equal(expected);
+    expect(actual).toBe(expected);
   });
 });
 ```
@@ -263,7 +247,7 @@ pre-commit run a-knip --all-files
 
 Expected behavior:
 
-- `bun test` runs tests with `should` assertions available from `test/setup.ts`.
+- `bun test` runs tests with `bun:test`'s built-in `expect` assertions.
 - `knip:agent` may fail with many findings that require human/agent judgment.
 - `knip:precommit` fails only for unused files in default or production mode.
 - production mode flags source files that are reachable only from tests.

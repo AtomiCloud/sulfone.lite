@@ -11,6 +11,7 @@
         "packages/*/src/index.ts",
         "packages/*/src/main.ts",
         "packages/*/src/**/*.test.ts",
+        "packages/core/src/probe/probe-runner.ts",
         "scripts/**/*.ts"
       ],
       "ignore": [

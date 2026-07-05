@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-falsegreen-swallowed-exit
+description: "False-green mode: the test gate swallows its real command's exit code."
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

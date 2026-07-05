@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 import type { PromptAdapter } from '@cyanprint/contracts';
+import { PROBE_RUNNER_SUBCOMMAND, runProbeRunner } from '@cyanprint/core';
 import { Command, CommanderError } from 'commander';
 import { bundleCommand } from './commands/bundle';
 import { cacheCommand } from './commands/cache';
 import { createCommand } from './commands/create';
+import { probeCommand } from './commands/probe';
 import { pushCommand } from './commands/push';
 import { searchCommand } from './commands/search';
 import { testCommand } from './commands/test';
@@ -59,6 +61,7 @@ Examples:
   cyanprint create ./examples/templates/hello --out ./app --headless --answers answers.json
   cyanprint search nextjs --kind template
   cyanprint test ./examples/templates/hello
+  cyanprint probe ./app --probes ./my-template --features features.json
   cyanprint push ./in-tree/official/processors/default --dry-run
 `,
     );
@@ -113,6 +116,16 @@ Examples:
     TEST_OPTIONS,
   ).action(async (target: string, options: OptionValues) => {
     await testCommand([target, ...optionArgv(options, TEST_OPTIONS)]);
+  });
+
+  withOptions(
+    program
+      .command('probe')
+      .argument('[repo]', 'materialized project directory to probe')
+      .description('prove template feature promises against a materialized repo (probe matrix)'),
+    PROBE_OPTIONS,
+  ).action(async (repo: string | undefined, options: OptionValues) => {
+    await probeCommand([...(repo ? [repo] : []), ...optionArgv(options, PROBE_OPTIONS)]);
   });
 
   withOptions(
@@ -204,6 +217,14 @@ Examples:
 }
 
 export async function main(argv: string[] = Bun.argv.slice(2), runtime: ProgramRuntime = {}): Promise<void> {
+  // Hidden re-entry point for the isolated probe runner. A compiled single-file
+  // binary cannot spawn an embedded runner `.ts` path directly, so the probe
+  // executor re-invokes THIS binary with the subcommand + JSON payload. Dispatch
+  // it here, before commander — which would otherwise reject the unknown command
+  // — and exit with the runner's own outcome exit code (see probe-process.ts).
+  if (argv[0] === PROBE_RUNNER_SUBCOMMAND) {
+    process.exit(await runProbeRunner(argv[1]));
+  }
   const jsonErrors = runtime.jsonErrors ?? hasJsonFlag(argv);
   try {
     await createProgram({ ...runtime, jsonErrors }).parseAsync(argv, { from: 'user' });
@@ -333,6 +354,20 @@ const TEST_OPTIONS: CliOptionSpec[] = [
   { flag: 'update-snapshots', description: 'rewrite expected output fixtures' },
   { flag: 'tests', value: '<dir>', description: 'artifact-specific tests directory' },
   { flag: 'parallel', value: '<n>', description: 'run up to N test cases concurrently' },
+  { flag: 'report', value: '<file>', description: 'write JSON report to a file' },
+  { flag: 'json', description: 'print machine-readable JSON' },
+];
+
+const PROBE_OPTIONS: CliOptionSpec[] = [
+  { flag: 'probes', value: '<dir>', description: 'explicit probe source: a template dir or its probes/ folder' },
+  { flag: 'features', value: '<file>', description: 'JSON feature set for explicit-source runs' },
+  { flag: 'template', value: '<dir>', description: 'template dir for declaration-mode runs and --update-manifest' },
+  { flag: 'feature', value: '<names>', description: 'select features to run (comma-separated; name or template#name)' },
+  { flag: 'probe', value: '<names>', description: 'select probes to run (a mutation pulls in its feature baseline)' },
+  { flag: 'keep-sandbox', description: 'retain run sandboxes and the snapshot for debugging' },
+  { flag: 'parallel', value: '<n>', description: 'run up to N matrix runs concurrently' },
+  { flag: 'timeout', value: '<seconds>', description: 'default per-probe timeout in seconds' },
+  { flag: 'update-manifest', description: 'generate/regenerate the committed probes.yaml (requires --template)' },
   { flag: 'report', value: '<file>', description: 'write JSON report to a file' },
   { flag: 'json', description: 'print machine-readable JSON' },
 ];

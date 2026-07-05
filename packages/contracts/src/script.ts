@@ -93,6 +93,13 @@ export type CyanOutput = {
   processors?: CyanArtifactUse[];
   plugins?: CyanArtifactUse[];
   commands?: CyanCommandIntent[];
+  /**
+   * Feature names this template promises its generated repos uphold — flat plain
+   * names, no config objects. Feature identity is per-template (source template,
+   * name): the same name declared by two templates is two different features.
+   * An undeclared feature asserts nothing.
+   */
+  features?: string[];
 };
 
 export type CyanScript = (prompt: CyanPrompter, ctx: CyanPromptContext) => Promise<CyanOutput> | CyanOutput;

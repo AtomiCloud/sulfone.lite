@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2023",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@cyanprint/probe": ["./types/cyanprint-probe.d.ts"]
+    }
+  },
+  "include": ["cyan.ts", "probes", "types"]
+}

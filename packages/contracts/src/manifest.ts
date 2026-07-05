@@ -68,6 +68,14 @@ const RawCyanManifestSchema = z
     entry: SafeRelativePathSchema.default('cyan.ts'),
     bundledEntry: SafeRelativePathSchema,
     templates: z.record(DependencyRefSchema, TemplateDependencyConfigSchema.nullable()).default({}),
+    /**
+     * Explicit probe overrides (FR4): per composed dependency, per feature name →
+     * a probe definition file in THIS template that replaces the dependency
+     * feature's probes. Overrides are part of this template's interface — they
+     * propagate to consumers through composition — and may only name dependencies
+     * declared in `templates:` (checked in `parseCyanManifest`).
+     */
+    probeOverrides: z.record(DependencyRefSchema, z.record(z.string().min(1), SafeRelativePathSchema)).default({}),
     processors: z.array(DependencyRefSchema).default([]),
     plugins: z.array(DependencyRefSchema).default([]),
     resolvers: z.array(ResolverEntrySchema).default([]),
@@ -95,6 +103,14 @@ export type ResolverDeclaration = ArtifactDependency & {
   files: string[];
 };
 
+/** A parsed `probeOverrides:` entry: the targeted dependency + feature, and the overriding file. */
+export type ProbeOverrideDeclaration = ArtifactDependency & {
+  owner: string;
+  feature: string;
+  /** Probe definition file path, relative to the DECLARING template's root. */
+  file: string;
+};
+
 export const CyanManifestSchema = RawCyanManifestSchema.transform(manifest => ({
   ...manifest,
   templates: Object.entries(manifest.templates).map(
@@ -113,6 +129,11 @@ export const CyanManifestSchema = RawCyanManifestSchema.transform(manifest => ({
       files: entry.files,
     }),
   ),
+  probeOverrides: Object.entries(manifest.probeOverrides).flatMap(([ref, features]) =>
+    Object.entries(features).map(
+      ([feature, file]): ProbeOverrideDeclaration => ({ ...parseDependencyRef(ref), feature, file }),
+    ),
+  ),
 }));
 
 export type CyanManifest = z.infer<typeof CyanManifestSchema>;
@@ -123,6 +144,7 @@ export type CompatibilityWarning = {
     | 'legacy_coordinator_ignored'
     | 'legacy_server_execution_ignored'
     | 'post_generation_command_skipped'
+    | 'post_generation_probe_output_removed'
     | 'merge_conflicts_pending';
   message: string;
 };
@@ -164,6 +186,27 @@ export function parseCyanManifest(input: unknown): ParsedManifest {
     throw new CyanError(
       problem('validation', 'invalid_manifest', 'cyan.yaml is invalid', { issues: parsed.error.issues }),
     );
+  }
+
+  // A probe override replaces a COMPOSED dependency's probes: naming a template
+  // this manifest does not depend on is a declaration error, not a silent no-op.
+  for (const override of parsed.data.probeOverrides) {
+    const declared = parsed.data.templates.some(
+      dependency =>
+        dependency.owner === override.owner &&
+        dependency.name === override.name &&
+        (!override.version || dependency.version === override.version),
+    );
+    if (!declared) {
+      throw new CyanError(
+        problem(
+          'validation',
+          'probe_override_undeclared_dependency',
+          `probeOverrides names ${formatDependencyRef(override)}, but cyan.yaml does not declare it under templates:.`,
+          { override: formatDependencyRef(override), feature: override.feature },
+        ),
+      );
+    }
   }
 
   const warnings: CompatibilityWarning[] = [];

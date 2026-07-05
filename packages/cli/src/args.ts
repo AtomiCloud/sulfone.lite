@@ -43,6 +43,18 @@ export function flagBool(flags: Record<string, string | boolean>, name: string):
   return flags[name] === true || flags[name] === 'true';
 }
 
+/** Shared `--parallel N` parser: a positive integer worker count, or undefined when absent. */
+export function parseParallel(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`--parallel must be a positive integer, got "${value}"`);
+  }
+  return parsed;
+}
+
 export async function readAnswersFile(path: string): Promise<Record<string, unknown>> {
   const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

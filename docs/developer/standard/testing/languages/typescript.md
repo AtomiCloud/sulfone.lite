@@ -1,20 +1,19 @@
 # Testing in TypeScript/Bun
 
-## Framework: `bun:test` + `should`
+## Framework: `bun:test` + `expect`
 
-Bun test runner with `should` assertion library.
+Bun test runner with its built-in `expect` assertions.
 
-For package setup, `bunfig.toml`, and the required Knip quality gates, see
+For package setup and the required Knip quality gates, see
 [TypeScript/Bun Quality Gates](../../typescript-quality/).
 
-With the standard preload, use `.should` assertions without importing `should`
-in every test. Import `should` directly only when using function-form assertions
-such as `should(value).be.null()`.
+Import `expect` from `bun:test` alongside `describe`/`it` — no assertion
+library or test preload is required.
 
 ## Test Structure: describe / it
 
 ```typescript
-import { describe, it, beforeEach } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 
 describe('UserService', () => {
   let mockRepo: IUserRepository;
@@ -36,76 +35,73 @@ describe('UserService', () => {
     const actual = await subject.create(input);
 
     // Assert
-    actual.principal.record.name.should.equal(expected);
+    expect(actual.principal.record.name).toBe(expected);
   });
 });
 ```
 
-## Assertions (should)
+## Assertions (expect)
 
 ```typescript
 // Equality
-actual.should.equal(expected); // strict equality
-actual.should.deepEqual(expected); // deep equality
+expect(actual).toBe(expected); // strict equality
+expect(actual).toEqual(expected); // deep equality
 
 // Boolean
-result.should.be.true();
-result.should.be.false();
+expect(result).toBe(true);
+expect(result).toBe(false);
 
-// Function form requires: import should from 'should';
-should(value).be.null();
-should(value).be.undefined();
-value.should.not.be.undefined();
+// Null / undefined
+expect(value).toBeNull();
+expect(value).toBeUndefined();
+expect(value).toBeDefined();
 
 // Truthiness
-value.should.be.ok(); // truthy
-value.should.not.be.ok(); // falsy
+expect(value).toBeTruthy();
+expect(value).toBeFalsy();
 
 // Numbers
-count.should.be.above(5);
-count.should.be.below(10);
-count.should.be.within(1, 10);
+expect(count).toBeGreaterThan(5);
+expect(count).toBeLessThan(10);
+expect(count).toBeGreaterThanOrEqual(1);
 
 // Strings
-text.should.containEql('substring');
-text.should.startWith('prefix');
-text.should.endWith('suffix');
+expect(text).toContain('substring');
+expect(text).toStartWith('prefix');
+expect(text).toEndWith('suffix');
+expect(text).toMatch(/pattern/);
 
 // Arrays
-items.should.have.length(3);
-items.should.containEql('item');
-items.should.be.an.Array();
+expect(items).toHaveLength(3);
+expect(items).toContain('item');
+expect(Array.isArray(items)).toBe(true);
 
 // Objects
-obj.should.have.property('key');
-obj.should.have.property('key', 'value');
+expect(obj).toHaveProperty('key');
+expect(obj).toHaveProperty('key', 'value');
 
 // Types
-value.should.be.a.String();
-value.should.be.a.Number();
-value.should.be.an.Object();
-value.should.be.an.Array();
-value.should.be.a.Function();
+expect(typeof value).toBe('string');
+expect(typeof value).toBe('number');
+expect(value).toBeInstanceOf(SomeClass);
 
-// Function form requires: import should from 'should';
-should(() => fn()).throw();
-should(() => fn()).throw('message');
-should(() => fn()).throw(Error);
+// Errors
+expect(() => fn()).toThrow();
+expect(() => fn()).toThrow('message');
+expect(() => fn()).toThrow(Error);
 
 // Async
-await promise.should.be.resolved();
-await promise.should.be.resolvedWith(value);
-await promise.should.be.rejected();
-await promise.should.be.rejectedWith(Error);
+await expect(promise).resolves.toBe(value);
+await expect(promise).rejects.toThrow(Error);
 
 // Negation
-actual.should.not.equal(other);
+expect(actual).not.toBe(other);
 ```
 
 ## Parameterized Tests — `it.each`
 
 ```typescript
-import { describe, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 
 describe('StatusFormatter', () => {
   it.each([
@@ -115,7 +111,7 @@ describe('StatusFormatter', () => {
   ])('should format status "$input" as "$expected"', async ({ input, expected }) => {
     const subject = new StatusFormatter();
     const actual = subject.format(input);
-    actual.should.equal(expected);
+    expect(actual).toBe(expected);
   });
 });
 ```
@@ -152,7 +148,7 @@ const logged: string[] = [];
 const spyLogger: ILogger = {
   log: (msg: string) => logged.push(msg),
 };
-// Assert: logged.should.deepEqual(['msg1', 'msg2']);
+// Assert: expect(logged).toEqual(['msg1', 'msg2']);
 
 // Capture argument
 let captured: any = null;
@@ -161,7 +157,7 @@ const mockSender: ISender = {
     captured = payload;
   },
 };
-// Assert: captured.should.have.property('id', '123');
+// Assert: expect(captured).toHaveProperty('id', '123');
 
 // Count calls
 let count = 0;
@@ -171,14 +167,13 @@ const mockClient: IClient = {
     throw new Error('fail');
   },
 };
-// Assert: count.should.equal(3);
+// Assert: expect(count).toBe(3);
 ```
 
 ## Functional Test — Contract Test
 
 ```typescript
-import { describe, it, beforeEach } from 'bun:test';
-import should from 'should';
+import { beforeEach, describe, expect, it } from 'bun:test';
 
 function repoContractTests(name: string, createRepo: () => ITaskRepository) {
   describe(`ITaskRepository contract: ${name}`, () => {
@@ -194,8 +189,8 @@ function repoContractTests(name: string, createRepo: () => ITaskRepository) {
       await subject.save(input);
       const actual = await subject.findById(input.id);
 
-      should(actual).not.be.null();
-      actual!.name.should.equal(input.name);
+      expect(actual).not.toBeNull();
+      expect(actual!.name).toBe(input.name);
     });
   });
 }
@@ -207,8 +202,7 @@ repoContractTests('FileRepo', () => new TaskFileRepo(mockFs, mapper, '/tmp/test.
 ## Integration Test — Testcontainers
 
 ```typescript
-import { describe, it, beforeEach, afterEach } from 'bun:test';
-import should from 'should';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { GenericContainer, StartedTestContainer } from 'testcontainers';
 
 describe('PostRepository (Postgres)', () => {
@@ -248,8 +242,8 @@ describe('PostRepository (Postgres)', () => {
     const actual = await subject.get(created.principal.id);
 
     // Assert
-    should(actual).not.be.null();
-    actual!.principal.record.title.should.equal('Test Post');
+    expect(actual).not.toBeNull();
+    expect(actual!.principal.record.title).toBe('Test Post');
   });
 });
 ```

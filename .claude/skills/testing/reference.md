@@ -33,7 +33,7 @@ Each section must be explicitly commented (`// Arrange`, `// Act`, `// Assert`).
 
 | Language       | Unit + Functional        | Integration                 | SIT | E2E        |
 | -------------- | ------------------------ | --------------------------- | --- | ---------- |
-| TypeScript/Bun | `bun:test` + `should`    | `bun:test` + Testcontainers | k6  | Playwright |
+| TypeScript/Bun | `bun:test` + `expect`    | `bun:test` + Testcontainers | k6  | Playwright |
 | C#/.NET        | xUnit + FluentAssertions | xUnit + Testcontainers      | k6  | Playwright |
 | Go             | `testing` + testify      | `testing` + testify + TC    | k6  | Playwright |
 

@@ -68,7 +68,7 @@ it('should calculate order total', () => {
   const actual = subject.calculateTotal(input);
 
   // Assert - verify the result
-  actual.should.eql(expected);
+  expect(actual).toEqual(expected);
 });
 ```
 
@@ -117,7 +117,7 @@ const subject = new Service(spyLogger);
 subject.doSomething();
 
 // Assert - verify what was called
-logs.should.eql(['expected message']);
+expect(logs).toEqual(['expected message']);
 ```
 
 ### Deterministic and Fast
@@ -142,7 +142,7 @@ it('should timeout after deadline', () => {
   const clock = new FakeClock();
   const subject = new Service(clock);
   clock.tick(1001);
-  subject.hasTimedOut().should.be.true();
+  expect(subject.hasTimedOut()).toBe(true);
 });
 ```
 
@@ -436,7 +436,7 @@ See language-specific guides for implementation details:
 - [TypeScript/Bun](./languages/typescript.md) - bun:test
 - [C#/.NET](./languages/csharp.md) - xUnit + FluentAssertions
 - [Go](./languages/go.md) - testing + testify
-- [TypeScript/Bun Quality Gates](../typescript-quality/) - bun:test setup, should preload, and Knip workflows
+- [TypeScript/Bun Quality Gates](../typescript-quality/) - bun:test setup, expect assertions, and Knip workflows
 
 ## Related Articles
 

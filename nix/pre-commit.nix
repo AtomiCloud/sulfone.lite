@@ -89,6 +89,9 @@ pre-commit-lib.run {
         # are compared byte-for-byte against artifact output; reformatting the JSON/text
         # breaks the comparison (e.g. a JSON resolver's output is not prettier-canonical).
         ".*/tests/.*/(input-[0-9]+|expected|current|target)/.*"
+        # Committed probe manifests are machine-generated and drift-checked byte-for-byte
+        # against the probe engine's generator output; reformatting them IS drift.
+        ".*probes\\.yaml$"
       ];
       package = formatter;
     };
