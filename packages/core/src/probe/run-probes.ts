@@ -1,7 +1,8 @@
 import type { ProbeFeatureIdentity, ProbeRunReport } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
-import { executeProbeMatrix, type ProbeExecutionOptions } from './executor';
+import { executeProbeMatrix, type ProbeExecutionOptions, type ProbeRunRecord } from './executor';
 import { buildProbeRunReport } from './manifest';
+import type { ResolvedFeatureProbes } from './matrix';
 import { resolveProbesForTemplate, resolveProbesFromSource, type ProbeOverrideInput } from './resolve';
 
 /**
@@ -18,6 +19,28 @@ import { resolveProbesForTemplate, resolveProbesFromSource, type ProbeOverrideIn
 export type ProbeSourcesInput =
   | { mode: 'declaration'; templateDir: string; workspaceRoot?: string; localFallback?: boolean }
   | { mode: 'explicit-source'; dir: string };
+
+/**
+ * Selection (FR13's debug mode): named features run ALL their probes; a named
+ * mutation probe implicitly pulls in its feature's baselines so the verdict
+ * stays readable. Everything else is dropped from the run — selection is a
+ * debug tool WITHOUT full in-run controls, so verdict parity with the test
+ * flow is defined over full-matrix runs only.
+ */
+export type ProbeSelectionInput = {
+  /** Feature selectors: a bare feature name or `template#name`. */
+  features?: string[];
+  /** Probe selectors: a probe name or `feature/probe`. */
+  probes?: string[];
+};
+
+/** The run report plus the execution facts the report itself cannot carry. */
+export type ProbeMatrixRunResult = {
+  report: ProbeRunReport;
+  runs: ProbeRunRecord[];
+  /** Retained snapshot path (only when `options.keepSandboxes`). */
+  snapshotPath?: string;
+};
 
 /**
  * The single engine API for probing a materialized repo (shared by plan-3's
@@ -37,8 +60,10 @@ export async function runProbeMatrix(args: {
   features: ProbeFeatureIdentity[];
   /** Final-consumer override declarations (declaration mode only). */
   overrides?: ProbeOverrideInput[];
+  /** Debug-mode selection; omitted = the full matrix. */
+  selection?: ProbeSelectionInput;
   options?: ProbeExecutionOptions;
-}): Promise<ProbeRunReport> {
+}): Promise<ProbeMatrixRunResult> {
   if (args.probeSources.mode === 'explicit-source' && args.overrides && args.overrides.length > 0) {
     throw new CyanError(
       problem(
@@ -59,6 +84,77 @@ export async function runProbeMatrix(args: {
           localFallback: args.probeSources.localFallback,
         })
       : await resolveProbesFromSource({ sourceDir: args.probeSources.dir, features: args.features });
-  const execution = await executeProbeMatrix({ repoPath: args.repoPath, features: resolved, options: args.options });
-  return buildProbeRunReport(resolved, execution.verdicts);
+  const selected = args.selection ? applyProbeSelection(resolved, args.selection) : resolved;
+  const execution = await executeProbeMatrix({ repoPath: args.repoPath, features: selected, options: args.options });
+  return {
+    report: buildProbeRunReport(selected, execution.verdicts),
+    runs: execution.runs,
+    snapshotPath: execution.snapshotPath,
+  };
+}
+
+/**
+ * Filter a resolved feature set down to a selection. Every selector must match
+ * something — a selector that names nothing is a hard error, never a silent
+ * no-op run (the debug mode must not fake a green).
+ */
+export function applyProbeSelection(
+  resolved: ResolvedFeatureProbes[],
+  selection: ProbeSelectionInput,
+): ResolvedFeatureProbes[] {
+  const featureSelectors = selection.features ?? [];
+  const probeSelectors = selection.probes ?? [];
+  if (featureSelectors.length === 0 && probeSelectors.length === 0) {
+    return resolved;
+  }
+  const matched = new Set<string>();
+  const featureMatches = (feature: ProbeFeatureIdentity): boolean =>
+    featureSelectors.some(selector => {
+      if (selector === feature.name || selector === `${feature.template}#${feature.name}`) {
+        matched.add(`feature:${selector}`);
+        return true;
+      }
+      return false;
+    });
+  const probeMatches = (feature: ProbeFeatureIdentity, probeName: string): boolean =>
+    probeSelectors.some(selector => {
+      if (selector === probeName || selector === `${feature.name}/${probeName}`) {
+        matched.add(`probe:${selector}`);
+        return true;
+      }
+      return false;
+    });
+
+  const filtered: ResolvedFeatureProbes[] = [];
+  for (const feature of resolved) {
+    const wholeFeature = featureMatches(feature.feature);
+    const kept = feature.probes.filter(entry => wholeFeature || probeMatches(feature.feature, entry.probe.name));
+    if (kept.length === 0) {
+      continue;
+    }
+    // A selected mutation implicitly includes its feature's baselines (FR13):
+    // without the baseline the mutation's verdict is unreadable.
+    const probes = kept.some(entry => entry.probe.kind === 'mutation')
+      ? feature.probes.filter(entry => entry.probe.kind === 'baseline' || kept.includes(entry))
+      : kept;
+    filtered.push({ ...feature, probes });
+  }
+
+  const unmatched = [
+    ...featureSelectors
+      .filter(selector => !matched.has(`feature:${selector}`))
+      .map(selector => `--feature ${selector}`),
+    ...probeSelectors.filter(selector => !matched.has(`probe:${selector}`)).map(selector => `--probe ${selector}`),
+  ];
+  if (unmatched.length > 0) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'probe_selection_unmatched',
+        `Probe selection matched nothing for: ${unmatched.join(', ')}. ` +
+          'Selectors must name a resolved feature (name or template#name) or probe (name or feature/probe).',
+      ),
+    );
+  }
+  return filtered;
 }

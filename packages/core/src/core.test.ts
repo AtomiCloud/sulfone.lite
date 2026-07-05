@@ -4,12 +4,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
 import {
+  activeTemplates,
   applyMergedTree,
   artifactCacheKey,
   artifactCachePath,
   buildGeneratedState,
   createProject,
   createTempSession,
+  currentHistoryEntry,
+  deriveFeaturesForAnswers,
   evaluateTrust,
   executeCyanScript,
   exists,
@@ -124,9 +127,9 @@ const escapeProcessorRuntime =
   'export async function processor(input) { await Bun.write(input.outputDir + "/../README.md", "bad"); }\n';
 
 // Synthesizes fresh probe-surface OUTPUT paths (`probes/tests.ts`, `probes.yaml`) that never
-// existed as template inputs — reviewer-2's loop-4 vector. The input-side `globTemplateFiles`
-// filter cannot catch these because they are minted by the processor, not read off disk; only
-// the generated-tree waist filter keeps them out of the repo (AC5).
+// existed as template inputs. The input-side `globTemplateFiles` filter cannot catch these
+// because they are minted by the processor, not read off disk; only the generated-tree waist
+// filter keeps them out of the repo (AC5).
 const probeEmittingProcessorRuntime = [
   "import { mkdir } from 'node:fs/promises';",
   "import { dirname } from 'node:path';",
@@ -2352,6 +2355,72 @@ describe('update', () => {
   );
 
   test(
+    'answer-only same-version update advances history so declaration-mode features stay in sync',
+    async () => {
+      const fixture = await makeFixture('update-answer-only');
+      try {
+        // Arrange
+        // A feature-GATED template: the `gate` feature is declared only when the
+        // `enableGate` answer is true. No processors — an empty tree is enough; this
+        // regression is entirely about persisted state, not file content.
+        const template = await writeTemplate(fixture, {
+          name: 'answer-gate',
+          cyanTs:
+            'export default async function cyan(prompt) {\n' +
+            "  const enableGate = await prompt.confirm('enableGate', 'Enable the gate?', { default: false });\n" +
+            "  return { features: enableGate ? ['gate'] : [] };\n" +
+            '}\n',
+        });
+        // Create with the gate OFF: zero features, so `.cyan_state.yaml` omits the key.
+        await createProject({ template, outDir: fixture.out, headless: true, answers: { enableGate: false } });
+        const created = await loadGeneratedState(fixture.out);
+        // Precondition guards on the arranged state.
+        expect(created.features).toBeUndefined();
+        expect(created.templates[0]?.history.length).toBe(1);
+
+        // Act
+        // Answer-only, SAME-version update flipping the gate ON. The resolved target
+        // version is unchanged (unversioned local source), so this exercises the
+        // answer-only same-version path — the seam where a stale-history false green can live.
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          answers: { enableGate: true },
+        });
+
+        // Assert
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([]); // No version float.
+
+        const after = await loadGeneratedState(fixture.out);
+        // The persisted union reflects the new generation...
+        expect(after.features).toEqual([{ template: 'cyanprint/answer-gate', name: 'gate' }]);
+        // ...AND the install history advanced with the NEW answers. Before the fix, history
+        // stayed at length 1 with `enableGate: false`, so declaration-mode `cyanprint probe`
+        // (which re-derives from `currentHistoryEntry`) produced an empty set and silently
+        // proved nothing for a feature the current repo state declares — the false green.
+        const entry = activeTemplates(after)[0];
+        if (!entry) {
+          throw new Error('expected an active template after update');
+        }
+        expect(entry.history.length).toBe(2);
+        expect(currentHistoryEntry(entry).answers).toEqual({ enableGate: true });
+        // Re-deriving from the current history entry — the exact input `declaredFeatureSet`
+        // consumes — now yields the gate feature.
+        const rederived = await deriveFeaturesForAnswers(
+          template,
+          currentHistoryEntry(entry).answers,
+          currentHistoryEntry(entry).deterministicState,
+        );
+        expect(rederived).toEqual([{ template: 'cyanprint/answer-gate', name: 'gate' }]);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
     'both-changed lines stay in-file as standard git conflict markers',
     async () => {
       const fixture = await makeFixture('update-conflict');
@@ -2670,6 +2739,77 @@ describe('update', () => {
         // Provenance attributes the command's file to the template that ran it.
         const stampEntry = state.provenance.find(entry => entry.path === 'command-stamp.txt');
         expect(stampEntry?.source).toBe('cyanprint/cmd-upd@2');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'answer-only same-version update re-runs post-generation commands and re-attributes their output',
+    async () => {
+      const fixture = await makeFixture('update-answer-command');
+      try {
+        // Arrange
+        await writeVarsProcessor(fixture);
+        // A template whose tree AND post-generation command output both derive from the
+        // `mode` answer: `source.txt` renders `__MODE__` via the vars processor, and the
+        // command copies `source.txt` into `command-stamp.txt`. An answer-only, same-version
+        // update must regenerate `source.txt` AND re-run the command so the stamp tracks the
+        // new answer — a version-only `changedTargets` predicate would silently skip the
+        // command, leaving `command-stamp.txt` stale and its state attribution frozen at the
+        // old answer.
+        const commandModeCyan =
+          'export default async function cyan(prompt) {\n' +
+          "  const mode = await prompt.text('mode', 'Mode', { default: 'old' });\n" +
+          '  return {\n' +
+          "    processors: [{ name: 'cyanprint/vars', files: [{ root: 'template', glob: '**/*', type: 'Template' }], config: { vars: { MODE: mode } } }],\n" +
+          '    commands: [{ command: "bun", args: ["--eval", "await Bun.write(\\"command-stamp.txt\\", await Bun.file(\\"source.txt\\").text())"], allow: true }],\n' +
+          '  };\n' +
+          '}\n';
+        const template = await writeTemplate(fixture, {
+          name: 'answer-command',
+          files: { 'source.txt': '__MODE__' },
+          cyanTs: commandModeCyan,
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true, answers: { mode: 'old' } });
+        // Precondition guards on the arranged state.
+        expect(await readOut(fixture.out, 'source.txt')).toBe('old');
+        expect(await readOut(fixture.out, 'command-stamp.txt')).toBe('old');
+        const created = await loadGeneratedState(fixture.out);
+        expect(created.templates[0]?.history.length).toBe(1);
+
+        // Act
+        // Answer-only, SAME-version update flipping `mode` to `new`. No version float.
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          answers: { mode: 'new' },
+        });
+
+        // Assert
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([]); // Same version — this is the answer-only seam.
+
+        // The tree regenerated to the new answer...
+        expect(await readOut(fixture.out, 'source.txt')).toBe('new');
+        // ...AND the post-generation command re-ran over it, so the stamp tracks the new
+        // answer. Before the fix, `changedTargets` was empty (version-only) so the command
+        // never ran and this stayed 'old'.
+        expect(await readOut(fixture.out, 'command-stamp.txt')).toBe('new');
+
+        const after = await loadGeneratedState(fixture.out);
+        // History advanced with the new answers (unified predicate)...
+        expect(after.templates[0]?.history.length).toBe(2);
+        expect(currentHistoryEntry(activeTemplates(after)[0]!).answers).toEqual({ mode: 'new' });
+        // ...and the command output stays attributed as generated content (not slipping into
+        // untracked/disk-only state) with the current answer's value recorded.
+        const stamp = after.files.find(file => file.path === 'command-stamp.txt');
+        expect(stamp).toBeDefined();
+        const stampProvenance = after.provenance.find(entry => entry.path === 'command-stamp.txt');
+        expect(stampProvenance?.source).toBe('cyanprint/answer-command@local');
       } finally {
         await fixture.cleanup();
       }
@@ -3622,6 +3762,52 @@ describe('probe surface', () => {
     }
   });
 
+  test('generated state omits an empty feature union entirely (byte-identical to a legacy repo) and persists only a non-empty one', async () => {
+    // Arrange
+    // An empty union is OMITTED entirely (spec.md:103–107): a zero-feature
+    // generation writes a `.cyan_state.yaml` with NO `features` key, byte-identical
+    // to a pre-feature (legacy) repo. Declaration-mode `cyanprint probe` reads a
+    // present-but-zero-feature state as a repo that declared nothing and resolves
+    // to `[]` DIRECTLY — it does NOT re-derive from the repo's answers (which
+    // would invent a promise if the template later declared a feature for them).
+    // A non-empty union IS persisted so it can be read back directly.
+
+    // Act
+    const emptyUnion = buildGeneratedState({ templates: [], files: [], provenance: [], features: [] });
+    const legacy = buildGeneratedState({ templates: [], files: [], provenance: [] });
+    const declared = buildGeneratedState({
+      templates: [],
+      files: [],
+      provenance: [],
+      features: [{ template: 'owner/name', name: 'gate' }],
+    });
+
+    // Assert — the in-memory build drops an empty union and keeps a non-empty one.
+    expect(emptyUnion.features).toBeUndefined();
+    expect(legacy.features).toBeUndefined();
+    expect(declared.features).toEqual([{ template: 'owner/name', name: 'gate' }]);
+
+    // Assert (persistence) — the empty-union and legacy state files are byte-for-byte
+    // identical, and a non-empty union survives a write → load round-trip.
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-state-features-'));
+    try {
+      await writeGeneratedState(dir, emptyUnion);
+      const emptyText = await Bun.file(join(dir, '.cyan_state.yaml')).text();
+      expect(emptyText).not.toContain('features:');
+      expect((await loadGeneratedState(dir)).features).toBeUndefined();
+
+      await writeGeneratedState(dir, legacy);
+      expect(await Bun.file(join(dir, '.cyan_state.yaml')).text()).toBe(emptyText);
+      expect((await loadGeneratedState(dir)).features).toBeUndefined();
+
+      await writeGeneratedState(dir, declared);
+      expect(await Bun.file(join(dir, '.cyan_state.yaml')).text()).toContain('features:');
+      expect((await loadGeneratedState(dir)).features).toEqual([{ template: 'owner/name', name: 'gate' }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test(
     'generated repos never contain the template probe surface (probes/**, probes.yaml)',
     async () => {
@@ -3679,7 +3865,7 @@ describe('probe surface', () => {
       try {
         // A processor that MINTS `probes/tests.ts` + `probes.yaml` as fresh output paths — they
         // never exist as template inputs, so the input-side scope filter cannot see them. Only the
-        // generated-tree waist filter keeps them out of the repo (reviewer-0/reviewer-2 loop-4 finding).
+        // generated-tree waist filter keeps them out of the repo.
         await writeArtifact(fixture, { kind: 'processor', name: 'probe-emit', runtime: probeEmittingProcessorRuntime });
         const template = await writeTemplate(fixture, {
           name: 'probe-emit-bearing',
@@ -3725,7 +3911,7 @@ describe('probe surface', () => {
         // A post-generation command that writes `probes/tests.ts` + `probes.yaml` AFTER the
         // filtered generated tree landed on disk — the generateTemplateTree waist never sees
         // these paths, and the post-command snapshot would otherwise read them straight back
-        // into files/state/provenance (reviewer-0/reviewer-2 loop-5 finding).
+        // into files/state/provenance.
         const template = await writeTemplate(fixture, {
           name: 'probe-command-bearing',
           cyanTs: [
@@ -3777,7 +3963,7 @@ describe('probe surface', () => {
         await writeVarsProcessor(fixture);
         // v2 gains a post-generation command that mints the probe surface — the update path
         // snapshots the post-command tree through readProjectFiles/readFinalProjectFiles,
-        // which must exclude it (same loop-5 vector on the update/upsert flow).
+        // which must exclude it (same post-command snapshot vector on the update/upsert flow).
         const commandCyan = [
           'export default function cyan() {',
           '  return {',
@@ -3837,7 +4023,7 @@ describe('probe surface', () => {
     async () => {
       const fixture = await makeFixture('probe-exclusion-command-empty-dir');
       try {
-        // reviewer-0 loop-6 edge A: a command that creates `probes/` as EMPTY directories (no
+        // Empty-directory edge: a command that creates `probes/` as EMPTY directories (no
         // regular files inside). A file-only scrub walk (`entry.isFile()`) never discovers them,
         // so they would survive on disk — and AC5 names `probes/` itself as excluded, so an empty
         // probe directory is a leak. The reconcile's directory-aware walk removes them.
@@ -3878,7 +4064,7 @@ describe('probe surface', () => {
       const fixture = await makeFixture('probe-exclusion-command-overwrite');
       try {
         await writeVarsProcessor(fixture);
-        // reviewer-2 loop-6 edge B: the old scrub snapshotted pre-existing probe PATHS and skipped
+        // In-place-overwrite edge: a path-only scrub snapshots pre-existing probe PATHS and skips
         // them, so a command that overwrites an existing `probes/user-owned.ts` in place changed its
         // bytes while the path stayed in the pre-existing set — the template-injected content
         // remained on disk. The reconcile snapshots CONTENT, so the user's original bytes are
@@ -3938,7 +4124,7 @@ describe('probe surface', () => {
       const fixture = await makeFixture('probe-exclusion-command-file-to-dir');
       try {
         await writeVarsProcessor(fixture);
-        // reviewer-2 loop-7 edge: the reconcile restores a command-deleted pre-existing probe file
+        // File-replaced-by-directory edge: the reconcile restores a command-deleted pre-existing probe file
         // via `writeVfsFile`, but if the command replaced that file with a DIRECTORY at the same
         // path, `Bun.write` throws `EISDIR` — the reconcile aborted and the user's original file
         // was lost. The fix removes any directory at the target path before restoring the bytes.
@@ -4027,7 +4213,7 @@ describe('probe surface', () => {
       // Probe files live under a `template/` payload scope, NOT at the template root: a file at
       // `template/probes/tests.ts` scanned with `base: 'template'` has output path `probes/tests.ts`.
       // Its template-root-relative source path (`template/probes/tests.ts`) is NOT a probe path, so
-      // only the output-path check keeps it out of the generated repo (reviewer-2's loop-3 finding).
+      // only the output-path check keeps it out of the generated repo.
       await mkdir(join(templateRoot, 'template/probes'), { recursive: true });
       await writeFile(join(templateRoot, 'template/README.md'), '# Payload\n', 'utf8');
       await writeFile(join(templateRoot, 'template/probes/tests.ts'), '// probe definition\n', 'utf8');

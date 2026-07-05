@@ -75,15 +75,37 @@ export async function runDetachedCommand(args: {
     }, args.timeoutMs);
   }
   try {
-    const [stdoutText, stderrText, exitCode] = await Promise.all([stdout.text, stderr.text, proc.exited]);
+    // Observe the command's OWN exit independently of its output pipes. A
+    // descendant that escaped the kill boundary can inherit the command's
+    // stdout/stderr fds and hold the pipes open long after the command itself
+    // exits — even with NO timeout in play (a normal exit that backgrounded an
+    // in-group child). Joining on the pipes (the old `Promise.all([...text,
+    // proc.exited])`) would then hang the result forever; wait on `proc.exited`,
+    // then drain each pipe with a bounded grace so the read can never outlive the
+    // command.
+    const exitCode = await proc.exited;
+    // Clear the timeout the instant the command's OWN process exits, BEFORE any
+    // kill/drain work — matching `probe-process.ts`. Once the owner has exited the
+    // deadline no longer applies: leaving the timer armed across the awaits below
+    // (`await killed`, then `drainPipe`'s up-to-grace wait for a held pipe) would
+    // let it fire against an already-exited command, flip `timedOut` true, and
+    // cancel the pipes — mislabelling a clean `exitCode: 0` as a timeout. A genuine
+    // timeout has already fired here (the timer resolved before `proc.exited`), so
+    // this clear is a no-op in that case and `timedOut`/`killed` stay set.
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
     // A timed-out command's result is only reported once the kill fully settled:
     // the caller must be able to trust that nothing the kill covers can still
     // mutate the sandbox after `exec` resolved.
     if (killed !== undefined) {
       await killed;
     }
+    const [stdoutText, stderrText] = await Promise.all([drainPipe(stdout), drainPipe(stderr)]);
     return { exitCode, stdout: stdoutText, stderr: stderrText, timedOut };
   } finally {
+    // Belt-and-suspenders: the try body clears the timer immediately on exit; this
+    // covers only the early-throw path before that clear ran.
     if (timer !== undefined) {
       clearTimeout(timer);
     }
@@ -121,6 +143,35 @@ export function collectPipe(stream: ReadableStream<Uint8Array>): { text: Promise
       void reader.cancel().catch(() => undefined);
     },
   };
+}
+
+/**
+ * How long to keep draining a pipe after the process that owns its write end has
+ * exited, before force-cancelling it (see {@link drainPipe}). In the common case
+ * the pipe reaches EOF the instant the owner exits and `text` resolves well
+ * inside this window at no latency cost; only a pipe an escaped descendant is
+ * still holding open ever pays the full grace.
+ */
+const PIPE_DRAIN_GRACE_MS = 200;
+
+/**
+ * Read a collected pipe to EOF, BUT bounded: call this only after the process
+ * that owns the pipe's write end has exited. Its own bytes are already flushed to
+ * the OS buffer and drain immediately; if a descendant that inherited the fd
+ * holds the pipe open past {@link PIPE_DRAIN_GRACE_MS}, cancel so the read cannot
+ * outlive the owner (FR10: a completed/timed-out command yields a bounded result,
+ * never a hang). `text` then resolves with everything decoded up to the cancel.
+ */
+export async function drainPipe(
+  pipe: { text: Promise<string>; cancel: () => void },
+  graceMs = PIPE_DRAIN_GRACE_MS,
+): Promise<string> {
+  const timer = setTimeout(() => pipe.cancel(), graceMs);
+  try {
+    return await pipe.text;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

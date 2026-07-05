@@ -24,6 +24,8 @@ import {
   upsertInstalledTemplate,
   writeGeneratedState,
 } from '../state/generated-state';
+import { unionFeatureIdentities } from '../probe/features';
+import { stableConfig } from '../util';
 import { gitThreeWayMerge } from './git-merge';
 
 export type UpdateProjectResult = {
@@ -134,18 +136,48 @@ export async function updateProject(args: {
   const merge = await gitThreeWayMerge({ base: base.files, ours, theirs: theirs.files });
   await applyMergedTree(args.projectDir, merge);
 
-  // Persist new state only for templates that actually changed version, and only when
-  // the merge is conflict-free: with in-file markers pending, state must stay at the old
-  // versions so a retry re-merges from the ORIGINAL base rather than treating the
-  // half-accepted incoming tree as the new baseline.
+  // Persist new state only for templates whose regeneration actually changed
+  // (the `regenerationChanged` predicate below — version float OR answer/
+  // deterministic-state/feature-attribution change, NOT version alone), and only
+  // when the merge is conflict-free: with in-file markers pending, state must stay
+  // at the old versions so a retry re-merges from the ORIGINAL base rather than
+  // treating the half-accepted incoming tree as the new baseline.
+  // A template's regeneration is "changed" when its version floats OR its regeneration
+  // inputs (answers/deterministicState, compared via `stableConfig`) differ from the
+  // latest history entry. Every update sub-effect — post-generation command execution,
+  // state-file attribution, feature-union write, and history advancement — keys off THIS
+  // single predicate so they can never disagree. Previously `changedTargets` selected
+  // command execution by version-only while history/features advanced on input changes;
+  // that split silently skipped commands for an answer-only same-version update, leaving
+  // command-derived output stale and un-attributed while history/features reflected the
+  // new answers. An answer-only, same-version update is the seam this guards.
+  const regenerationChanged = (item: (typeof theirsGenerations)[number]): boolean => {
+    if (item.toVersion !== item.entry.version) {
+      return true;
+    }
+    const current = currentHistoryEntry(item.entry);
+    return (
+      stableConfig(item.generation.answers) !== stableConfig(current.answers) ||
+      stableConfig(item.generation.deterministicState) !== stableConfig(current.deterministicState) ||
+      // A same-version, same-answer regeneration whose DECLARED FEATURES differ
+      // still changed: the freshly-written union below reflects the new
+      // generation, so the install's per-install attribution must advance with
+      // it or declaration-mode probing would read stale promises. This is also
+      // the migration seam for legacy entries written before per-install
+      // attribution existed — their first update backfills the field.
+      stableConfig(unionFeatureIdentities([item.generation.features])) !== stableConfig(current.features ?? [])
+    );
+  };
+
   let commandFailure: CyanError | undefined;
   if (merge.conflicts.length === 0) {
-    // Run the post-generation commands of the templates that actually changed version,
-    // over the merged working tree (children's commands first), then snapshot the
-    // post-command tree — parity with create, so command output lands in state and a
-    // later update sees it as generated content rather than untracked user files.
+    // Run the post-generation commands of the templates whose regeneration changed
+    // (the same `regenerationChanged` predicate, not version-only), over the merged
+    // working tree (children's commands first), then snapshot the post-command tree —
+    // parity with create, so command output lands in state and a later update sees it
+    // as generated content rather than untracked user files.
     const commandWarnings: CompatibilityWarning[] = [];
-    const changedTargets = theirsGenerations.filter(item => item.toVersion !== item.entry.version);
+    const changedTargets = theirsGenerations.filter(regenerationChanged);
     const preCommandFiles = await readProjectFiles(args.projectDir);
     // Run each changed template's command batch separately and snapshot the tree between
     // batches, so every file a command created or rewrote is attributed to the template
@@ -176,7 +208,18 @@ export async function updateProject(args: {
     const time = new Date().toISOString();
     let templates = state.templates;
     for (const item of theirsGenerations) {
-      if (item.toVersion === item.entry.version) {
+      // Advance the install's history whenever its regeneration changed (version float OR
+      // input change — the same `regenerationChanged` predicate that selected command
+      // execution above). An answer-only, same-version update still regenerates the tree
+      // with the NEW answers, so `state.features` below reflects the new generation.
+      // Persisting a new history entry ONLY on a version float would leave the latest
+      // history entry carrying the OLD answers — inconsistent with the freshly-written
+      // feature union. Declaration-mode `cyanprint probe` re-derives each install's
+      // features from that latest history entry's answers (`declaredFeatureSetForRepo`),
+      // so stale answers would make it derive an empty set and silently prove NOTHING for a
+      // feature the current repo state actually declares — a false green. Keying history,
+      // features, and commands off one predicate keeps all update sub-effects consistent.
+      if (!regenerationChanged(item)) {
         continue;
       }
       templates = upsertInstalledTemplate(templates, {
@@ -188,6 +231,10 @@ export async function updateProject(args: {
         answers: item.generation.answers,
         deterministicState: item.generation.deterministicState,
         artifacts: item.generation.artifacts,
+        // Per-install attribution advances with the history entry: the fresh
+        // regeneration's own features (deps included), so declaration-mode
+        // probing always reads attribution consistent with the entry's answers.
+        features: unionFeatureIdentities([item.generation.features]),
       });
     }
     await writeGeneratedState(
@@ -200,6 +247,9 @@ export async function updateProject(args: {
           { files: finalFiles, decisions: theirs.decisions },
           commandSources,
         ),
+        // Update regenerates every installed template, so the persisted union
+        // stays the full composed feature set (FR3) across version floats.
+        features: unionFeatureIdentities(theirsGenerations.map(item => item.generation.features)),
       }),
     );
     reportWarnings(commandWarnings, args.json);

@@ -1,5 +1,6 @@
 cases:
   - name: basic
+    probe: true
     expected: expected
     validations:
       - bash scripts/ci.sh

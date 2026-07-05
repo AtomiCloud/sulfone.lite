@@ -45,7 +45,13 @@ function verdictOf(report: ProbeRunReport, feature: string, probe: string): stri
 
 describe('built-in probe library (AC10)', () => {
   test('every declared feature resolves to the built-in tier (origin `built-in`)', async () => {
-    const resolved = await resolveProbesForTemplate({ templateDir: fixtureDir, features: FEATURES });
+    // Arrange
+    const input = { templateDir: fixtureDir, features: FEATURES };
+
+    // Act
+    const resolved = await resolveProbesForTemplate(input);
+
+    // Assert
     expect(resolved).toHaveLength(4);
     for (const feature of resolved) {
       expect(feature.probes.length).toBeGreaterThanOrEqual(2);
@@ -58,11 +64,16 @@ describe('built-in probe library (AC10)', () => {
   test(
     'healthy repo: built-ins prove every baseline and catch every sabotage',
     async () => {
-      const report = await runProbeMatrix({
+      // Arrange — the healthy repo generated once in beforeAll
+
+      // Act
+      const { report } = await runProbeMatrix({
         repoPath: healthyRepo,
         probeSources: { mode: 'declaration', templateDir: fixtureDir },
         features: FEATURES,
       });
+
+      // Assert
       expect(verdictOf(report, 'tests', 'builtin-tests-baseline-green')).toContain('proven');
       expect(verdictOf(report, 'tests', 'builtin-deleting-tests-reddens-gate')).toContain('caught');
       expect(verdictOf(report, 'coverage', 'builtin-coverage-baseline-green')).toContain('proven');
@@ -79,16 +90,21 @@ describe('built-in probe library (AC10)', () => {
   test(
     'neutered repo: with every gate stubbed to exit 0, the same built-ins report `missed`',
     async () => {
+      // Arrange
       const neutered = join(workRoot, 'neutered');
       await cp(healthyRepo, neutered, { recursive: true });
       for (const gate of ['tests', 'coverage', 'lint', 'ci']) {
         await writeFile(join(neutered, `scripts/${gate}.sh`), '#!/usr/bin/env bash\nexit 0\n', 'utf8');
       }
-      const report = await runProbeMatrix({
+
+      // Act
+      const { report } = await runProbeMatrix({
         repoPath: neutered,
         probeSources: { mode: 'declaration', templateDir: fixtureDir },
         features: FEATURES,
       });
+
+      // Assert
       expect(verdictOf(report, 'tests', 'builtin-deleting-tests-reddens-gate')).toContain('missed');
       expect(verdictOf(report, 'coverage', 'builtin-corrupting-coverage-ledger-reddens-gate')).toContain('missed');
       expect(verdictOf(report, 'lint', 'builtin-lint-error-reddens-gate')).toContain('missed');
@@ -100,6 +116,7 @@ describe('built-in probe library (AC10)', () => {
   test(
     'the package.json-scripts gate convention also resolves',
     async () => {
+      // Arrange
       const scriptedRepo = join(workRoot, 'package-scripts');
       await cp(healthyRepo, scriptedRepo, { recursive: true });
       // Move the tests gate behind a package.json script (no scripts/tests.sh).
@@ -109,11 +126,15 @@ describe('built-in probe library (AC10)', () => {
         `${JSON.stringify({ name: 'probe-builtins-scripted', scripts: { tests: 'bun test tests' } }, null, 2)}\n`,
         'utf8',
       );
-      const report = await runProbeMatrix({
+
+      // Act
+      const { report } = await runProbeMatrix({
         repoPath: scriptedRepo,
         probeSources: { mode: 'declaration', templateDir: fixtureDir },
         features: [{ template: BUILTINS, name: 'tests' }],
       });
+
+      // Assert
       expect(verdictOf(report, 'tests', 'builtin-tests-baseline-green')).toContain('proven');
       expect(verdictOf(report, 'tests', 'builtin-deleting-tests-reddens-gate')).toContain('caught');
     },

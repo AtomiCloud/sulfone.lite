@@ -77,6 +77,7 @@ const SLEEP_PROBE = (name: string, kind: 'baseline' | 'mutation', ms: number) =>
 
 describe('probe timeouts kill the whole process tree (AC6)', () => {
   test('a probe spawning a long-lived child+grandchild ends broken within its timeout, tree dead', async () => {
+    // Arrange
     const timeoutMs = 1_500;
     // The exec'd sh (child, in the runner's group) records its own pid, then
     // backgrounds a grandchild sh that records ITS pid; both block on a long sleep.
@@ -95,6 +96,7 @@ describe('probe timeouts kill the whole process tree (AC6)', () => {
       }]`,
     );
 
+    // Act
     const startedAt = Date.now();
     const execution = await executeProbeMatrix({
       repoPath: repo,
@@ -103,6 +105,7 @@ describe('probe timeouts kill the whole process tree (AC6)', () => {
     });
     const elapsed = Date.now() - startedAt;
 
+    // Assert
     expect(verdictOf(execution, 'hang', 'hanging-mutation')).toBe('broken');
     // Ends within the timeout window (plus kill-escalation + subprocess overhead).
     expect(elapsed).toBeLessThan(timeoutMs + 8_000);
@@ -126,6 +129,8 @@ describe('timeout isolation is an absolute boundary', () => {
     // Regression: an async probe that continues past its deadline.
     // Under isolation the whole process is killed at the deadline, so `late.txt` is
     // never written and the next probe in the run never overlaps it.
+
+    // Arrange
     const feature = await inlineFeature(
       'boundary',
       `[
@@ -148,6 +153,7 @@ describe('timeout isolation is an absolute boundary', () => {
       ]`,
     );
 
+    // Act
     const startedAt = Date.now();
     const execution = await executeProbeMatrix({
       repoPath: repo,
@@ -156,6 +162,7 @@ describe('timeout isolation is an absolute boundary', () => {
     });
     const elapsed = Date.now() - startedAt;
 
+    // Assert
     // The overrunning probe is broken; the whole baseline run is untrusted with it.
     expect(verdictOf(execution, 'boundary', 'overruns-timeout')).toBe('broken');
     expect(verdictOf(execution, 'boundary', 'runs-after')).toBe('broken');
@@ -182,6 +189,8 @@ describe('timeout isolation is an absolute boundary', () => {
     // Regression: a probe that blocks the event loop forever. An
     // in-thread timer can never fire; only an external kill stops it. If isolation
     // failed this test would hang and time out.
+
+    // Arrange
     const feature = await inlineFeature(
       'spin',
       `[{
@@ -193,10 +202,12 @@ describe('timeout isolation is an absolute boundary', () => {
       }]`,
     );
 
+    // Act
     const startedAt = Date.now();
     const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
     const elapsed = Date.now() - startedAt;
 
+    // Assert
     expect(verdictOf(execution, 'spin', 'blocks-forever')).toBe('broken');
     // Bounded: timeout + SIGTERM→SIGKILL grace + overhead, nowhere near a hang.
     expect(elapsed).toBeLessThan(15_000);
@@ -216,6 +227,8 @@ describe('post-run group kill reaps what a probe left in its process group', () 
     // started) and would write `late.txt` at ~1500ms; the parent's post-exit group
     // kill must take it down before then. The probe waits for the alive marker so
     // the worker is provably running when the runner exits.
+
+    // Arrange
     const feature = await inlineFeature(
       'daemon',
       `[{
@@ -233,12 +246,14 @@ describe('post-run group kill reaps what a probe left in its process group', () 
       }]`,
     );
 
+    // Act
     const execution = await executeProbeMatrix({
       repoPath: repo,
       features: [feature],
       options: { keepSandboxes: true, sandboxRoot: join(workRoot, 'group-reap') },
     });
 
+    // Assert
     // The probe itself passed — the post-exit group kill is invisible to healthy verdicts.
     expect(verdictOf(execution, 'daemon', 'backgrounder')).toBe('proven');
 
@@ -262,6 +277,7 @@ describe('post-run group kill reaps what a probe left in its process group', () 
 // FR10/FR11 limitation.
 describe('timeout verdict is bounded even when an escaped descendant holds inherited pipes', () => {
   test('a probe leaving an out-of-group child on the runner stderr pipe still lands broken at its deadline', async () => {
+    // Arrange
     const timeoutMs = 1_000;
     const feature = await inlineFeature(
       'escape',
@@ -279,18 +295,63 @@ describe('timeout verdict is bounded even when an escaped descendant holds inher
       }]`,
     );
 
+    // Act
     const startedAt = Date.now();
     const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
     const elapsed = Date.now() - startedAt;
 
+    // Assert
     expect(verdictOf(execution, 'escape', 'pipe-holder')).toBe('broken');
     // Bounded: deadline + kill grace + engine overhead — never the escapee's 15s hold.
     expect(elapsed).toBeLessThan(timeoutMs + 9_000);
   }, 30_000);
 });
 
+// Regression: a probe whose own `run()` COMPLETES SUCCESSFULLY but leaves behind
+// a backgrounded, out-of-group child that inherited the runner's stderr pipe. The
+// runner exits at once with a passing code, yet the inherited pipe stays open
+// until the escapee dies. Joining the verdict on the pipe (the old
+// `Promise.all([proc.exited, stderrPipe.text])`) stalled the finished probe until
+// the escapee exited — long enough for the per-probe timeout to fire and report a
+// genuine `proven` as `broken`. The verdict must follow the runner's OWN exit,
+// landing well inside the deadline.
+describe('a successful probe is not turned into a false timeout by a child holding the stderr pipe', () => {
+  test('a passing baseline that backgrounds an out-of-group pipe-holder still lands proven at once', async () => {
+    // Arrange
+    const timeoutMs = 10_000;
+    const feature = await inlineFeature(
+      'quick-escape',
+      `[{
+        name: 'passes-then-leaves-holder',
+        description: 'Backgrounds an out-of-group child on the inherited stderr pipe, then returns normally.',
+        kind: 'baseline',
+        timeoutMs: ${timeoutMs},
+        run: async () => {
+          // detached => NEW process group (escapes the post-run group kill) while
+          // stderr: 'inherit' keeps the runner's stderr pipe open for 15s. run()
+          // itself returns immediately — a healthy, passing baseline.
+          Bun.spawn(['sh', '-c', 'sleep 15'], { stdin: 'ignore', stdout: 'ignore', stderr: 'inherit', detached: true });
+        },
+      }]`,
+    );
+
+    // Act
+    const startedAt = Date.now();
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+    const elapsed = Date.now() - startedAt;
+
+    // Assert
+    // The probe's own run succeeded, so the verdict is proven — NOT a false timeout.
+    expect(verdictOf(execution, 'quick-escape', 'passes-then-leaves-holder')).toBe('proven');
+    // It landed on the runner's exit (plus the pipe-drain grace + overhead), not at
+    // the 10s deadline and nowhere near the escapee's 15s pipe hold.
+    expect(elapsed).toBeLessThan(timeoutMs);
+  }, 30_000);
+});
+
 describe('parallelism (AC11)', () => {
   test('runs execute concurrently by default and probes within a run never overlap', async () => {
+    // Arrange
     const features = [
       await inlineFeature(
         'one',
@@ -301,8 +362,11 @@ describe('parallelism (AC11)', () => {
         `[${SLEEP_PROBE('two-base', 'baseline', 300)}, ${SLEEP_PROBE('two-mut', 'mutation', 300)}]`,
       ),
     ];
+
+    // Act
     const execution = await executeProbeMatrix({ repoPath: repo, features });
 
+    // Assert
     // Observed overlap between runs: at least one pair of probe spans from
     // different runs executed at the same time.
     const crossRunOverlap = execution.spans.some(left =>
@@ -325,6 +389,7 @@ describe('parallelism (AC11)', () => {
   }, 30_000);
 
   test('parallelism: 1 serializes runs', async () => {
+    // Arrange
     const features = [
       await inlineFeature(
         'one',
@@ -332,7 +397,11 @@ describe('parallelism (AC11)', () => {
       ),
       await inlineFeature('two', `[${SLEEP_PROBE('two-mut', 'mutation', 150)}]`),
     ];
+
+    // Act
     const execution = await executeProbeMatrix({ repoPath: repo, features, options: { parallelism: 1 } });
+
+    // Assert
     const ordered = [...execution.runs].sort((left, right) => left.startedAt - right.startedAt);
     for (let index = 1; index < ordered.length; index += 1) {
       expect(ordered[index]!.startedAt).toBeGreaterThanOrEqual(ordered[index - 1]!.endedAt);
@@ -351,18 +420,28 @@ describe('sandbox hygiene (NFC3)', () => {
     );
 
   test('engine-managed sandboxes are removed after a matrix run by default', async () => {
+    // Arrange
     const sandboxRoot = join(workRoot, 'hygiene-default');
+
+    // Act
     await executeProbeMatrix({ repoPath: repo, features: [await tidyFeatures()], options: { sandboxRoot } });
+
+    // Assert
     expect(await readdir(sandboxRoot)).toEqual([]);
   }, 30_000);
 
   test('keepSandboxes retains the snapshot and run sandboxes', async () => {
+    // Arrange
     const sandboxRoot = join(workRoot, 'hygiene-keep');
+
+    // Act
     const execution = await executeProbeMatrix({
       repoPath: repo,
       features: [await tidyFeatures()],
       options: { sandboxRoot, keepSandboxes: true },
     });
+
+    // Assert
     expect(execution.snapshotPath && (await exists(execution.snapshotPath))).toBe(true);
     for (const run of execution.runs) {
       expect(run.sandboxPath && (await exists(run.sandboxPath))).toBe(true);
@@ -372,6 +451,7 @@ describe('sandbox hygiene (NFC3)', () => {
 
 describe('setup failures mark affected runs broken', () => {
   test('a failing setup.pre marks every probe of every run broken', async () => {
+    // Arrange
     const feature = await inlineFeature(
       'doomed',
       `[
@@ -380,18 +460,27 @@ describe('setup failures mark affected runs broken', () => {
       ]`,
     );
     feature.definition.setup = { pre: ['exit 9'] };
+
+    // Act
     const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+
+    // Assert
     expect(verdictOf(execution, 'doomed', 'doomed-base')).toBe('broken');
     expect(verdictOf(execution, 'doomed', 'doomed-mut')).toBe('broken');
   }, 30_000);
 
   test('a failing setup.post marks the affected runs broken', async () => {
+    // Arrange
     const feature = await inlineFeature(
       'doomed-post',
       `[{ name: 'post-base', description: 'never runs', kind: 'baseline', run: () => {} }]`,
     );
     feature.definition.setup = { post: ['exit 3'] };
+
+    // Act
     const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+
+    // Assert
     expect(verdictOf(execution, 'doomed-post', 'post-base')).toBe('broken');
   }, 30_000);
 });

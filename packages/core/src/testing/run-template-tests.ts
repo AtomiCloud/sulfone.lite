@@ -1,19 +1,34 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { Answers, Provenance } from '@cyanprint/contracts';
+import type { Answers, ProbeFeatureIdentity, ProbeRunReport, Provenance } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { createProject } from '../create/create-project';
+import { featureIdentityKey } from '../probe/features';
+import { checkProbeManifestDrift } from '../probe/manifest';
+import { summarizeProbeReport, type ProbeReportSummary } from '../probe/report';
+import { runProbeMatrix } from '../probe/run-probes';
 import { STATE_FILE, loadGeneratedState } from '../state/generated-state';
 import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, writeText } from '../util';
 import { parseGitignore } from './gitignore';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
+
+/**
+ * A probing case's per-verdict counts plus the full run report, attached to the
+ * case entry — additive to the existing `{ passed, failed, skipped, cases }`
+ * envelope so `cyanprint test --json` surfaces probe outcomes without breaking
+ * pre-probe consumers (FR8), and full-matrix verdict parity with `cyanprint
+ * probe` stays checkable from the report itself (FR13). The shape is the generic
+ * probe-domain `ProbeReportSummary` (`probe/report.ts`) — the test tier just
+ * names it in its own vocabulary.
+ */
+export type TemplateCaseProbeOutcome = ProbeReportSummary;
 
 export type TemplateTestReport = {
   passed: number;
   failed: number;
   skipped: number;
   snapshotUpdated: number;
-  cases: Array<{ name: string; status: 'passed' | 'failed'; message?: string }>;
+  cases: Array<{ name: string; status: 'passed' | 'failed'; message?: string; probes?: TemplateCaseProbeOutcome }>;
 };
 
 export async function runTemplateTest(args: {
@@ -87,6 +102,12 @@ export type TemplateCase = {
   /** Escape hatch: accept lww-overrides that are not asserted in merges. Discouraged. */
   allowUnassertedLww: boolean;
   validations: CommandValidation[];
+  /**
+   * Opt-in probe tier (FR8): after validations, run the manifest drift gate and
+   * the full probe matrix against this case's generated output. Default false —
+   * probe-free cases run byte-identically to pre-probe CyanPrint.
+   */
+  probe: boolean;
 };
 
 async function runTemplateManifestTests(args: {
@@ -109,6 +130,10 @@ async function runTemplateManifestTests(args: {
     runTemplateCase(args, testCase),
   );
   const results = perCase.map(entry => entry.case);
+  const coverageFailure = coverageByProofFailure(perCase);
+  if (coverageFailure) {
+    results.push(coverageFailure);
+  }
   return {
     passed: results.filter(testCase => testCase.status === 'passed').length,
     failed: results.filter(testCase => testCase.status === 'failed').length,
@@ -118,13 +143,109 @@ async function runTemplateManifestTests(args: {
   };
 }
 
+/**
+ * Coverage-by-proof (FR8): every feature that ANY case's generation declared
+ * must be PROVEN by at least one passing `probe: true` case — where "proven"
+ * (see `featureIsProven`) means the feature's report carries BOTH a `proven`
+ * baseline AND a `caught` mutation. A declared feature nobody probes, whose
+ * only probing case asserted nothing, or whose probe set never actually catches
+ * a sabotage, is exactly the unproven promise the epic exists to kill.
+ * Templates declaring no features are untouched (additivity).
+ *
+ * Exported for the focused coverage keying/adequacy regression tests: the
+ * collision and baseline-only holes are subtle enough to warrant asserting the
+ * pure decision directly, not only through a full generation.
+ */
+export function coverageByProofFailure(
+  perCase: Array<{ case: TemplateTestReport['cases'][number]; features: ProbeFeatureIdentity[]; probe: boolean }>,
+): TemplateTestReport['cases'][number] | undefined {
+  const declared = new Map<string, ProbeFeatureIdentity>();
+  const proven = new Set<string>();
+  for (const entry of perCase) {
+    for (const feature of entry.features) {
+      // Collision-free identity key: an ad hoc `${template}#${name}` join lets
+      // distinct identities collapse into one, so a proof for one feature could
+      // satisfy coverage for another. Share `probe/features.ts`'s scheme.
+      const key = featureIdentityKey(feature);
+      declared.set(key, feature);
+      // A passing case is NOT enough: it must have produced a `proven` baseline
+      // AND a `caught` mutation for THIS feature (see featureIsProven). A run can
+      // pass with only `invalid` verdicts or with a baseline-only probe that never
+      // sabotages anything — neither exercises drift detection, so neither
+      // satisfies coverage.
+      if (entry.probe && entry.case.status === 'passed' && featureIsProven(entry.case.probes?.report, key)) {
+        proven.add(key);
+      }
+    }
+  }
+  const unproven = [...declared.entries()]
+    .filter(([key]) => !proven.has(key))
+    .map(([, feature]) => `${feature.template}#${feature.name}`);
+  if (declared.size === 0 || unproven.length === 0) {
+    return undefined;
+  }
+  return {
+    name: 'coverage-by-proof',
+    status: 'failed',
+    message:
+      `Declared features proven by no probing case: ${unproven.sort().join(', ')}. ` +
+      'Every declared feature must be proven by a passing `probe: true` case that produces BOTH a `proven` ' +
+      'baseline AND a `caught` mutation for it (FR8) — a baseline-only probe or an all-`invalid` run asserts ' +
+      "nothing about drift detection. Add or fix a mutation probe that catches a sabotage of the feature's " +
+      'gate, or stop declaring the feature.',
+  };
+}
+
+/**
+ * A declared feature is proven only when its probing case's report carries BOTH:
+ *  - a `proven` verdict — a baseline passed, so the healthy gate is green
+ *    (`proven` is exclusively a baseline verdict — executor.ts `baselineVerdict`); AND
+ *  - a `caught` verdict — a mutation's sabotage was detected, so the gate
+ *    actually reddens on drift (`caught` is exclusively a mutation verdict —
+ *    executor.ts `mutationVerdict`).
+ * Requiring the `caught` closes the baseline-only false green: a feature whose
+ * only probe is a baseline (or whose mutations never apply) can pass every case
+ * yet never exercise the drift-detection path the probe tier exists to prove.
+ * `invalid` / `broken` are not proof either way.
+ */
+function featureIsProven(report: ProbeRunReport | undefined, key: string): boolean {
+  const feature = report?.features.find(entry => featureIdentityKey(entry) === key);
+  if (!feature) {
+    return false;
+  }
+  const hasProvenBaseline = feature.probes.some(probe => probe.verdict === 'proven');
+  const catchesSabotage = feature.probes.some(probe => probe.verdict === 'caught');
+  return hasProvenBaseline && catchesSabotage;
+}
+
 async function runTemplateCase(
   args: { template: string; answers?: string; outDir: string; updateSnapshots?: boolean; cases: TemplateCase[] },
   testCase: TemplateCase,
-): Promise<{ case: TemplateTestReport['cases'][number]; snapshotUpdated: boolean }> {
+): Promise<{
+  case: TemplateTestReport['cases'][number];
+  snapshotUpdated: boolean;
+  /** Features this case's generation declared — the coverage-by-proof input. */
+  features: ProbeFeatureIdentity[];
+  probe: boolean;
+}> {
   // safeJoin: the case name comes from cyan.test.yaml and is immediately rm -rf'd — a name
   // like "../../x" must never resolve outside the test output directory.
   const outDir = args.cases.length === 1 ? args.outDir : safeJoin(args.outDir, testCase.name);
+  let features: ProbeFeatureIdentity[] = [];
+  const finish = (
+    entry: TemplateTestReport['cases'][number],
+    snapshotUpdated = false,
+  ): {
+    case: TemplateTestReport['cases'][number];
+    snapshotUpdated: boolean;
+    features: ProbeFeatureIdentity[];
+    probe: boolean;
+  } => ({
+    case: entry,
+    snapshotUpdated,
+    features,
+    probe: testCase.probe,
+  });
   try {
     await rm(outDir, { recursive: true, force: true });
     await mkdir(outDir, { recursive: true });
@@ -133,39 +254,92 @@ async function runTemplateCase(
       testCase.deterministicState,
       'deterministicState',
     );
-    await createProject({ template: args.template, outDir, headless: true, answers, deterministicState });
+    const created = await createProject({
+      template: args.template,
+      outDir,
+      headless: true,
+      answers,
+      deterministicState,
+    });
+    features = created.features;
 
     const mergeFailure = await checkMergeAssertions(outDir, testCase);
     if (mergeFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: mergeFailure }, snapshotUpdated: false };
+      return finish({ name: testCase.name, status: 'failed', message: mergeFailure });
     }
 
     if (!testCase.expected) {
-      return {
-        case: { name: testCase.name, status: 'failed', message: 'Test case needs expected output.' },
-        snapshotUpdated: false,
-      };
+      return finish({ name: testCase.name, status: 'failed', message: 'Test case needs expected output.' });
     }
     const excluded = await buildExclusionFilter(outDir, testCase.ignore);
     const actual = await readFileTree(outDir, excluded);
     if (!args.updateSnapshots) {
       const diff = compareFileTrees(await readFileTree(testCase.expected, excluded), actual);
       if (diff) {
-        return { case: { name: testCase.name, status: 'failed', message: diff }, snapshotUpdated: false };
+        return finish({ name: testCase.name, status: 'failed', message: diff });
       }
     }
     const validationFailure = await runCommandValidations(outDir, testCase.validations);
     if (validationFailure) {
-      return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
+      return finish({ name: testCase.name, status: 'failed', message: validationFailure });
+    }
+    let probeOutcome: TemplateCaseProbeOutcome | undefined;
+    if (testCase.probe) {
+      const tier = await runProbeTierForCase(args.template, outDir, features);
+      probeOutcome = tier.outcome;
+      if (tier.failure) {
+        return finish({ name: testCase.name, status: 'failed', message: tier.failure, probes: probeOutcome });
+      }
     }
     if (args.updateSnapshots) {
       await writeFileTree(testCase.expected, actual);
-      return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: true };
+      return finish({ name: testCase.name, status: 'passed', probes: probeOutcome }, true);
     }
-    return { case: { name: testCase.name, status: 'passed' }, snapshotUpdated: false };
+    return finish({ name: testCase.name, status: 'passed', probes: probeOutcome });
   } catch (error) {
-    return { case: { name: testCase.name, status: 'failed', message: String(error) }, snapshotUpdated: false };
+    return finish({ name: testCase.name, status: 'failed', message: String(error) });
   }
+}
+
+/**
+ * The opt-in probe tier (FR8), layered on top of the untouched validation tier:
+ * first the manifest drift gate — the SAME rule as `cyanprint probe` in
+ * declaration mode (FR6: a feature-declaring template must carry a committed,
+ * drift-free probes.yaml; the two entry points must never disagree) — then the
+ * full probe matrix against the case's generated output through the shared
+ * `runProbeMatrix` engine (FR13). Any `missed`/`broken` verdict fails the case
+ * with the offending probes named.
+ */
+async function runProbeTierForCase(
+  template: string,
+  outDir: string,
+  features: ProbeFeatureIdentity[],
+): Promise<{ failure?: string; outcome?: TemplateCaseProbeOutcome }> {
+  if (features.length === 0) {
+    // Nothing declared — nothing to gate or prove; probing is a no-op.
+    return {};
+  }
+  // Throws with the drift diff on a drifted or missing manifest; runTemplateCase's
+  // catch turns that into the case failure (FR6's "fails the gate").
+  await checkProbeManifestDrift(template);
+  const { report } = await runProbeMatrix({
+    repoPath: outDir,
+    probeSources: { mode: 'declaration', templateDir: template },
+    features,
+  });
+  const outcome = summarizeProbeReport(report);
+  const offenders: string[] = [];
+  for (const feature of report.features) {
+    for (const probe of feature.probes) {
+      if (probe.verdict === 'missed' || probe.verdict === 'broken') {
+        offenders.push(`${feature.template}#${feature.name}/${probe.name}=${probe.verdict}`);
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    return { failure: `probe verdicts: ${offenders.join(', ')}`, outcome };
+  }
+  return { outcome };
 }
 
 /**
@@ -277,7 +451,18 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
     merges: readMergeAssertions(record.merges, `cases[${index}].merges`),
     allowUnassertedLww: record.allowUnassertedLww === true,
     validations: readCommandValidations(record.validations, `cases[${index}].validations`),
+    probe: readOptionalBoolean(record.probe, `cases[${index}].probe`),
   };
+}
+
+function readOptionalBoolean(value: unknown, label: string): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  if (typeof value !== 'boolean') {
+    throw new Error(`${label} must be a boolean.`);
+  }
+  return value;
 }
 
 function readStringList(value: unknown, label: string): string[] {

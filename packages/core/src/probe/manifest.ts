@@ -6,7 +6,8 @@ import { createProject } from '../create/create-project';
 import { withTempSession } from '../sessions/temp-session';
 import { loadTemplateTestCases, readCaseRecord } from '../testing/run-template-tests';
 import { unifiedDiff } from '../util/unified-diff';
-import { comparePaths, exists, readText, writeText } from '../util';
+import { exists, readText, writeText } from '../util';
+import { unionFeatureIdentities } from './features';
 import { probeKey, type ResolvedFeatureProbes } from './matrix';
 import { resolveProbesForTemplate, type ProbeOverrideInput } from './resolve';
 
@@ -36,30 +37,51 @@ export async function deriveTemplateFeatureSet(templateDir: string): Promise<Pro
       ),
     );
   }
-  const union = new Map<string, ProbeFeatureIdentity>();
+  const perCase: ProbeFeatureIdentity[][] = [];
   for (const testCase of cases) {
     const answers = await readCaseRecord<Answers>(testCase.answers, 'answers');
     const deterministicState = await readCaseRecord<Record<string, unknown>>(
       testCase.deterministicState,
       'deterministicState',
     );
-    const features = await withTempSession(async session => {
-      const result = await createProject({
-        template: templateDir,
-        outDir: join(session.path, 'out'),
-        headless: true,
-        answers,
-        deterministicState,
-      });
-      return result.features;
-    });
-    for (const feature of features) {
-      union.set(`${feature.template}\u0000${feature.name}`, feature);
-    }
+    perCase.push(await deriveFeaturesForAnswers(templateDir, answers, deterministicState));
   }
-  return [...union.values()].sort(
-    (left, right) => comparePaths(left.template, right.template) || comparePaths(left.name, right.name),
-  );
+  // Same (source template, name) identity + deterministic order as the persisted
+  // state union — one shared invariant (probe/features.ts), never a parallel copy.
+  return unionFeatureIdentities(perCase);
+}
+
+/**
+ * The feature set a single headless generation of `templateDir` with the given
+ * answers declares (per-template identity, deterministic order). This is the
+ * generic re-derivation primitive; it is NOT how declaration mode handles a
+ * feature-OFF repo. A present `.cyan_state.yaml` that records zero features
+ * resolves to `[]` DIRECTLY (see `declaredFeatureSetForRepo`) — this helper is
+ * never called for it, precisely so a template that later declares a feature for
+ * the same answers cannot invent a promise the repo never made. Its actual
+ * callers are: the no-state-file profile-union fallback (`deriveTemplateFeatureSet`)
+ * and the recorded/legacy drift check, which re-derives an install's answers to
+ * confirm every persisted promise is still produced. Features are a deterministic
+ * function of the answers (the same property the manifest drift check relies on),
+ * so this reproduces exactly what the original generation declared.
+ */
+export async function deriveFeaturesForAnswers(
+  templateDir: string,
+  answers: Answers,
+  deterministicState: Record<string, unknown>,
+): Promise<ProbeFeatureIdentity[]> {
+  return await withTempSession(async session => {
+    const result = await createProject({
+      template: templateDir,
+      outDir: join(session.path, 'out'),
+      headless: true,
+      answers,
+      deterministicState,
+    });
+    // Deduplicate + order under the shared identity invariant, matching the
+    // persisted-state union's shape exactly.
+    return unionFeatureIdentities([result.features]);
+  });
 }
 
 /**

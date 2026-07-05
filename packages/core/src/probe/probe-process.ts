@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { ProbeFeatureIdentity } from '@cyanprint/contracts';
-import { OUTCOME_BY_EXIT, type ProbeOutcome } from './probe-runner-protocol';
-import { collectPipe, killProcessTree } from './spawn';
+import { OUTCOME_BY_EXIT, PROBE_RUNNER_SUBCOMMAND, type ProbeOutcome } from './probe-runner-protocol';
+import { collectPipe, drainPipe, killProcessTree } from './spawn';
 import type { ProbeSource } from './matrix';
 
 // The outcome vocabulary and exit-code mapping live in `probe-runner-protocol.ts`,
@@ -10,6 +10,30 @@ import type { ProbeSource } from './matrix';
 export type { ProbeOutcome } from './probe-runner-protocol';
 
 const RUNNER_PATH = fileURLToPath(new URL('./probe-runner.ts', import.meta.url));
+
+/**
+ * True when this module is running inside a `bun build --compile` single-file
+ * binary. Such a binary loads its modules from a virtual filesystem (`$bunfs` on
+ * POSIX, `~BUN` on Windows) rather than a real path, and — critically — cannot be
+ * asked to execute an embedded `.ts` path passed as a spawn argument: the
+ * argument reaches the CyanPrint CLI as an unknown command. So the runner spawn
+ * branches on this: a compiled binary re-enters ITSELF through the hidden
+ * `PROBE_RUNNER_SUBCOMMAND`; a source/`bun run` process spawns the runner file
+ * directly (unchanged, so tests and `bun run` keep their existing path).
+ */
+const IS_COMPILED_BINARY = import.meta.url.includes('$bunfs') || import.meta.url.includes('~BUN');
+
+/**
+ * The argv that runs ONE probe in an isolated child. In a compiled binary
+ * `process.execPath` IS the CyanPrint executable, so we pass the re-entry
+ * subcommand; in a source process `process.execPath` is `bun`, so we hand it the
+ * runner file to execute. The JSON payload is the final argument in both.
+ */
+function runnerSpawnArgs(payload: string): string[] {
+  return IS_COMPILED_BINARY
+    ? [process.execPath, PROBE_RUNNER_SUBCOMMAND, payload]
+    : [process.execPath, RUNNER_PATH, payload];
+}
 
 /**
  * Run ONE probe in an isolated child process and return its raw outcome.
@@ -47,7 +71,7 @@ export async function runProbeInSubprocess(args: {
     sandboxPath: args.sandboxPath,
     timeoutMs: args.timeoutMs,
   });
-  const proc = Bun.spawn([process.execPath, RUNNER_PATH, payload], {
+  const proc = Bun.spawn(runnerSpawnArgs(payload), {
     stdin: 'ignore',
     stdout: 'ignore',
     stderr: 'pipe',
@@ -69,7 +93,18 @@ export async function runProbeInSubprocess(args: {
   let exitCode: number | null;
   let stderr = '';
   try {
-    [exitCode, stderr] = await Promise.all([proc.exited, stderrPipe.text]);
+    // Observe the runner's OWN exit independently of its stderr pipe, then cancel
+    // the timeout the instant it exits. A descendant that escaped the group (a
+    // backgrounded, re-sessioned child) can inherit the runner's stderr fd and
+    // hold the pipe open long after the runner itself completes; joining on the
+    // pipe (the old `Promise.all([proc.exited, stderrPipe.text])`) stalled a
+    // finished probe until the escapee died AND let the timer fire against an
+    // already-successful run — reporting a genuine `proven`/`caught` as `timeout`.
+    // With the timer cleared on exit, `drainPipe` bounds the stderr read so it can
+    // never outlive the runner.
+    exitCode = await proc.exited;
+    clearTimeout(timer);
+    stderr = await drainPipe(stderrPipe);
   } finally {
     clearTimeout(timer);
     // Belt-and-suspenders: signal the group again in case the probe backgrounded

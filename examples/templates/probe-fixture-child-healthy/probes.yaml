@@ -6,8 +6,14 @@ features:
     name: docs
     probes:
       - name: baseline-usage-doc-present
-        description: The generated repo documents usage in docs/USAGE.md.
+        description: The untouched repo passes its docs gate.
         kind: baseline
+        origin:
+          kind: local
+      - name: stripped-usage-heading-fails-doc-check
+        description: Removing the Usage heading from docs/USAGE.md must turn the docs
+          gate red.
+        kind: mutation
         origin:
           kind: local
   - template: cyanprint/probe-fixture-gated

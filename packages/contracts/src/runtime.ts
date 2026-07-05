@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ProbeFeatureIdentity } from './probe';
 
 export const PromptKindSchema = z.enum(['text', 'confirm', 'select', 'multiselect', 'number']);
 export type PromptKind = z.infer<typeof PromptKindSchema>;
@@ -123,6 +124,23 @@ export type TemplateHistoryEntry = {
   time: string;
   answers: Answers;
   deterministicState: Record<string, unknown>;
+  /**
+   * Features THIS install's generation declared (per-template identity, so a
+   * dependency's feature is tagged with the dependency's ref) — the per-install
+   * attribution the flat `GeneratedState.features` union deliberately lacks.
+   * Recorded when the install's generation declared at least one feature and
+   * OMITTED when it declared none, so a zero-feature repo's `.cyan_state.yaml`
+   * stays byte-identical to a pre-feature (legacy) repo. Declaration-mode
+   * `cyanprint probe` treats this as the authoritative record of what the
+   * probed `--template`'s install promised: any recorded feature its
+   * re-derivation no longer produces — its own OR a dependency's, regardless of
+   * how many installs the repo has — is template drift and fails loudly.
+   * Entries written before this field existed carry no attribution;
+   * declaration mode then falls back to intersecting the flat union with
+   * re-derived features, which can only attribute self-ref/sole-install drops
+   * (see `declaredFeatureSetForRepo`).
+   */
+  features?: ProbeFeatureIdentity[];
 };
 
 /** One installed template in a project. Projects track N templates (multi-install). */
@@ -148,4 +166,25 @@ export type GeneratedState = {
   templates: InstalledTemplate[];
   files: Array<{ path: string; sha256: string }>;
   provenance: Provenance[];
+  /**
+   * Union of features declared by every composed template's generation, under
+   * per-template identity (FR3) — the persisted, generation-time record of the
+   * full composed feature set. Present ONLY when the generation declared at least
+   * one feature; an empty union is OMITTED entirely (spec.md:103–107) so a
+   * zero-feature repo's `.cyan_state.yaml` stays byte-identical to a pre-feature
+   * (legacy) repo.
+   *
+   * This flat union carries no per-install attribution — it cannot separate a
+   * sibling install's feature from a same-named dependency feature. The
+   * authoritative per-install record lives on each install's history entry
+   * (`TemplateHistoryEntry.features`), which is what declaration-mode
+   * `cyanprint probe` scopes by (see `declaredFeatureSetForRepo`); the union
+   * remains the whole-repo view (FR3) and the legacy fallback for state files
+   * written before per-install attribution existed. In that fallback the union
+   * is intersected with features re-derived from the install's recorded
+   * answers, and a dropped feature that cannot be a sibling install's fails
+   * loudly (`probe_declared_feature_drift`) rather than silently shrinking the
+   * proven matrix.
+   */
+  features?: ProbeFeatureIdentity[];
 };

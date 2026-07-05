@@ -4,6 +4,7 @@ const required = [
   'docs/user/create.md',
   'docs/user/push.md',
   'docs/user/try-test.md',
+  'docs/user/probe.md',
   'docs/user/update.md',
   'docs/user/auth-tokens.md',
   'docs/user/migration.md',

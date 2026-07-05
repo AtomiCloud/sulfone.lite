@@ -1,10 +1,10 @@
 ---
 name: typescript-quality
-description: Set up and use TypeScript/Bun quality gates: bun:test with should assertions, loose two-pass Knip for agents, and conservative two-pass Knip for pre-commit.
+description: Set up and use TypeScript/Bun quality gates: bun:test with built-in expect assertions, loose two-pass Knip for agents, and conservative two-pass Knip for pre-commit.
 invocation:
   - typescript-quality
   - bun-test
-  - should
+  - expect
   - knip
   - dead-code
   - unused-code
@@ -20,7 +20,6 @@ Use this skill when setting up or reviewing TypeScript projects that use:
 
 - Bun
 - `bun:test`
-- `should`
 - Knip
 - dead-code cleanup
 - pre-commit quality gates
@@ -30,25 +29,15 @@ Use this skill when setting up or reviewing TypeScript projects that use:
 Install the baseline dev dependencies:
 
 ```bash
-bun add -D typescript @types/bun should @types/should knip
+bun add -D typescript @types/bun knip
 ```
 
-Use `bunfig.toml` to preload `should`:
-
-```toml
-[test]
-preload = ["./test/setup.ts"]
-coverageSkipTestFiles = true
-```
-
-Use `test/setup.ts`:
+Use `bun:test`'s built-in `expect` assertions — no assertion library or test
+preload is required. Import `expect` from `bun:test` alongside `describe`/`it`:
 
 ```typescript
-import 'should';
+import { describe, expect, it } from 'bun:test';
 ```
-
-The preload enables `.should` assertions. Import `should` directly in a test file
-only when using function-form assertions like `should(value).be.null()`.
 
 ## Required Scripts
 
@@ -133,6 +122,6 @@ the pattern in the reference standard.
 
 ## Related Skills
 
-- [`/testing`](../testing/) - test structure and `should` assertion style
+- [`/testing`](../testing/) - test structure and `expect` assertion style
 - [`/linting`](../linting/) - pre-commit hooks
 - [`/nix`](../nix/) - adding Bun and pre-commit hooks through Nix

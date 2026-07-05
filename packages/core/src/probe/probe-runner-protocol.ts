@@ -37,6 +37,18 @@ export const RUNNER_EXIT = {
   engineFailed: 13,
 } as const;
 
+/**
+ * Hidden re-entry subcommand the parent uses to run the probe runner INSIDE a
+ * compiled single-file binary. A `bun build --compile` executable embeds the
+ * runner but cannot execute an embedded `.ts` path passed as a spawn argument —
+ * `process.execPath` is the CyanPrint binary, which reads that path as an unknown
+ * CLI command. So under compilation the parent re-invokes the binary itself with
+ * this argv marker, and the CLI entry dispatches it to the runner before command
+ * parsing. In a source/`bun run` process the parent spawns the runner file
+ * directly and this marker is unused.
+ */
+export const PROBE_RUNNER_SUBCOMMAND = '__probe-runner';
+
 /** Runner exit code → outcome. `timeout` is added by the parent, never the child. */
 export const OUTCOME_BY_EXIT: Record<number, ProbeOutcome> = {
   [RUNNER_EXIT.passed]: 'passed',

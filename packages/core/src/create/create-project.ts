@@ -40,6 +40,7 @@ import {
   upsertInstalledTemplate,
   writeGeneratedState,
 } from '../state/generated-state';
+import { unionFeatureIdentities } from '../probe/features';
 import { gitThreeWayMerge, type GitThreeWayMergeResult } from '../update/git-merge';
 import {
   assertRootSafeDelete,
@@ -146,9 +147,14 @@ async function createFreshProject(options: CreateProjectOptions): Promise<Create
         answers: generation.answers,
         deterministicState: generation.deterministicState,
         artifacts: generation.artifacts,
+        // Per-install attribution: this install's OWN generation features (deps
+        // included), recorded on its history entry so declaration-mode probing
+        // knows exactly which persisted promises this install made.
+        features: unionFeatureIdentities([generation.features]),
       }),
       files: finalFiles,
       provenance,
+      features: unionFeatureIdentities([generation.features]),
     }),
   );
 
@@ -262,6 +268,9 @@ async function createIntoExistingProject(options: CreateProjectOptions): Promise
           answers: nextGeneration.answers,
           deterministicState: nextGeneration.deterministicState,
           artifacts: nextGeneration.artifacts,
+          // The incoming install's OWN generation features — sibling installs
+          // keep the attribution their own history entries already carry.
+          features: unionFeatureIdentities([nextGeneration.features]),
         }),
         files: finalFiles,
         provenance: assembleTierProvenance(
@@ -269,6 +278,10 @@ async function createIntoExistingProject(options: CreateProjectOptions): Promise
           { files: finalFiles, decisions: theirs.decisions },
           commandSources,
         ),
+        // Every sibling install's regeneration participates, so the persisted
+        // union covers ALL composed templates' features (FR3), not just the
+        // incoming template's generation.
+        features: unionFeatureIdentities(theirsGenerations.map(item => item.generation.features)),
       }),
     );
   }

@@ -2,9 +2,14 @@ import type { Probe, ProbeDefinition, ProbeFeatureIdentity } from '@cyanprint/co
 import { isProbeInapplicable } from '@cyanprint/contracts';
 import { builtInProbeDefinition } from './builtins';
 import { loadProbeDefinitionFile } from './load-probe';
-import { RUNNER_EXIT } from './probe-runner-protocol';
+import { PROBE_RUNNER_SUBCOMMAND, RUNNER_EXIT } from './probe-runner-protocol';
 import { createProbeRepo, ProbeRepoOpError } from './repo-helper';
 import type { ProbeSource } from './matrix';
+
+// Re-exported so the CLI entry can dispatch the compiled-binary re-entry point
+// through the same public `@cyanprint/core` surface it imports `runProbeRunner`
+// from — one import site, no reach into an internal protocol module.
+export { PROBE_RUNNER_SUBCOMMAND } from './probe-runner-protocol';
 
 /**
  * The isolated probe runner (child process). One probe runs per subprocess:
@@ -48,11 +53,17 @@ async function loadProbe(payload: ProbeRunnerPayload): Promise<Probe> {
   return probe;
 }
 
-async function main(): Promise<number> {
-  // The payload rides argv, NEVER the environment: probes' gate commands inherit
-  // this process's env, and FR11 requires it strictly untouched — no
-  // engine-injected variable of any kind.
-  const raw = process.argv[2];
+/**
+ * Run one probe from its serialized payload and return the runner exit code.
+ *
+ * The payload rides an argument, NEVER the environment: probes' gate commands
+ * inherit this process's env, and FR11 requires it strictly untouched — no
+ * engine-injected variable of any kind. Exported (rather than only executed on
+ * import) so a compiled single-file binary can dispatch here in-process through
+ * the {@link PROBE_RUNNER_SUBCOMMAND} re-entry point; a source/`bun run` process
+ * still spawns this file directly and runs the `import.meta.main` block below.
+ */
+export async function runProbeRunner(raw: string | undefined): Promise<number> {
   if (!raw) {
     console.error('probe-runner: missing payload argument');
     return RUNNER_EXIT.engineFailed;
@@ -98,6 +109,12 @@ async function main(): Promise<number> {
   }
 }
 
-// Exit explicitly: a probe may have left the event loop non-empty (a stray timer,
-// an unawaited handle), and the run's verdict is already decided by the code here.
-process.exit(await main());
+// Direct-spawn entry (source / `bun run`): the parent runs this file as its own
+// process-group leader with the payload on argv. Guard it with `import.meta.main`
+// so importing `runProbeRunner` (as the compiled binary's dispatcher does) does
+// NOT auto-execute. Exit explicitly: a probe may have left the event loop
+// non-empty (a stray timer, an unawaited handle), and the run's verdict is
+// already decided by the code here.
+if (import.meta.main) {
+  process.exit(await runProbeRunner(process.argv[2]));
+}

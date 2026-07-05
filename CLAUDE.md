@@ -37,7 +37,7 @@ Pre-commit hooks enforce code quality via treefmt, shellcheck, gitlint, and infi
 
 # TypeScript/Bun Quality
 
-TypeScript/Bun projects use `bun:test` with `should`, plus two Knip workflows: a loose, noisy two-pass agent workflow and a conservative two-pass pre-commit workflow. Agents must inspect Knip false positives and must not add them to Knip suppression lists. See [docs/developer/standard/typescript-quality/](docs/developer/standard/typescript-quality/) for details.
+TypeScript/Bun projects use `bun:test` with its built-in `expect`, plus two Knip workflows: a loose, noisy two-pass agent workflow and a conservative two-pass pre-commit workflow. Agents must inspect Knip false positives and must not add them to Knip suppression lists. See [docs/developer/standard/typescript-quality/](docs/developer/standard/typescript-quality/) for details.
 
 # Semantic Release
 

@@ -4,6 +4,7 @@ import type {
   Answers,
   GeneratedState,
   InstalledTemplate,
+  ProbeFeatureIdentity,
   Provenance,
   TemplateHistoryEntry,
   VfsFile,
@@ -16,12 +17,30 @@ export function buildGeneratedState(args: {
   templates: InstalledTemplate[];
   files: VfsFile[];
   provenance: Provenance[];
+  features?: ProbeFeatureIdentity[];
 }): GeneratedState {
   return {
     cyanprint: 4,
     templates: args.templates,
     files: args.files.map(file => ({ path: file.path, sha256: fileSha(file) })),
     provenance: args.provenance,
+    // Persist the feature union ONLY when it is non-empty; an empty union is
+    // OMITTED entirely (spec.md:103–107). A generation that declared zero
+    // features therefore writes a `.cyan_state.yaml` byte-identical to a
+    // pre-feature (legacy) repo — no `features` key at all — preserving AC6
+    // additivity for every code path that reads the state file, not just the
+    // template-test byte compare.
+    //
+    // A feature-OFF repo is consequently indistinguishable from a legacy repo
+    // by the state file alone (both omit the key). Declaration-mode
+    // `cyanprint probe` treats a present-but-zero-feature state file as a repo
+    // that declared nothing to probe: when the flat union is absent AND the
+    // probed install carries no recorded attribution it resolves to the EMPTY
+    // set (see `declaredFeatureSetForRepo`), never re-deriving against the
+    // current template — which would invent a promise the repo never made if the
+    // template later declared a feature for those same answers. Only a repo with
+    // NO state file at all falls back to the template's profile-union derivation.
+    ...(args.features && args.features.length > 0 ? { features: args.features } : {}),
   };
 }
 
@@ -92,6 +111,15 @@ export function upsertInstalledTemplate(
     answers: Answers;
     deterministicState: Record<string, unknown>;
     artifacts: InstalledTemplate['artifacts'];
+    /**
+     * The features this install's own generation declared (per-template
+     * identity, dependencies included) — the per-install attribution the flat
+     * state union lacks. Recorded on the history entry ONLY when non-empty, so
+     * an install that declared nothing writes an entry byte-identical to a
+     * pre-feature one (AC6 additivity; a feature-free repo's state never gains
+     * the key anywhere).
+     */
+    features?: ProbeFeatureIdentity[];
   },
 ): InstalledTemplate[] {
   const historyEntry: TemplateHistoryEntry = {
@@ -99,6 +127,7 @@ export function upsertInstalledTemplate(
     time: entry.time,
     answers: entry.answers,
     deterministicState: entry.deterministicState,
+    ...(entry.features && entry.features.length > 0 ? { features: entry.features } : {}),
   };
   const existing = templates.find(template => template.owner === entry.owner && template.name === entry.name);
   if (existing) {
