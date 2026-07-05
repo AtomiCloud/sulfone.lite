@@ -22,6 +22,29 @@ export const PROBE_CONTRACT_VERSION = 1;
 export const ProbeVerdictSchema = z.enum(['proven', 'caught', 'missed', 'invalid', 'broken']);
 export type ProbeVerdict = z.infer<typeof ProbeVerdictSchema>;
 
+/**
+ * The sanctioned "this experiment does not apply here" signal. A probe that
+ * discovers its precondition is absent (nothing to sabotage, no gate to consult)
+ * throws `probeInapplicable(...)` and the engine records the verdict `invalid` —
+ * the probe asserts nothing. The marker is a plain property (not an instanceof
+ * check) so it survives bundling across module realms.
+ */
+const PROBE_INAPPLICABLE_MARKER = 'cyanprintProbeInapplicable';
+
+export function probeInapplicable(reason: string): Error {
+  const error = new Error(reason);
+  Object.defineProperty(error, PROBE_INAPPLICABLE_MARKER, { value: true, enumerable: false });
+  return error;
+}
+
+export function isProbeInapplicable(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<string, unknown>)[PROBE_INAPPLICABLE_MARKER] === true
+  );
+}
+
 /** Exit code and captured output of a command run inside the probe sandbox. */
 export type ProbeExecResult = {
   exitCode: number;
@@ -38,7 +61,14 @@ export type ProbeExecResult = {
  * its cwd pinned to the sandbox root and the environment inherited untouched.
  */
 export type ProbeRepo = {
-  /** Run a shell command in the sandbox; never throws on non-zero exit. */
+  /**
+   * Run a shell command in the sandbox; never throws on non-zero exit. On timeout
+   * (per-command `timeoutMs`, or the enclosing per-probe timeout) the engine kills
+   * the command's spawned process group / PPID-connected subtree — descendants
+   * that leave it (`setsid`, daemonization) escape the kill, a documented
+   * limitation: tracking them would need an engine-injected environment marker,
+   * which the untouched-environment guarantee above rules out.
+   */
   exec(command: string, opts?: { timeoutMs?: number }): Promise<ProbeExecResult>;
   /** Read a sandbox file as UTF-8 text. */
   read(path: string): Promise<string>;
@@ -169,7 +199,25 @@ export const ProbeDefinitionSchema: z.ZodType<ProbeDefinition> = z
     contractVersion: z.number().int().positive(),
     sandbox: ProbeSandboxConfigSchema.optional(),
     setup: ProbeSetupConfigSchema.optional(),
-    probes: z.array(ProbeSchema).min(1),
+    // Probe names must be unique within a definition: verdicts, the run matrix,
+    // and the manifest all key a probe by `(template, feature, name)`, so two
+    // probes sharing a name would silently overwrite each other's verdicts (an
+    // FR7 violation). Rejected loudly here, naming the duplicates.
+    probes: z
+      .array(ProbeSchema)
+      .min(1)
+      .superRefine((probes, ctx) => {
+        const seen = new Set<string>();
+        for (const probe of probes) {
+          if (seen.has(probe.name)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `duplicate probe name "${probe.name}" — probe names must be unique within a definition (verdicts are keyed by name)`,
+            });
+          }
+          seen.add(probe.name);
+        }
+      }),
   })
   .strict();
 

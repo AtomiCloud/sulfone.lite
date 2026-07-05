@@ -189,6 +189,37 @@ export async function assertRootSafeDelete(root: string, relPath: string): Promi
 }
 
 /**
+ * Throw if reading `relPath` under `root` would escape the project through a symlink in ANY
+ * path component — a symlinked parent OR a symlinked leaf. `readFile`/`read` follow the link
+ * transparently, so a leaf `secret -> /etc/passwd` or a parent `assets -> /tmp/outside` reads
+ * bytes from outside the managed tree. Unlike {@link assertRootSafeWrite} this checks symlinks
+ * only (a hard-linked or single-link regular file is a safe read target), and unlike
+ * {@link assertRootSafeDelete} it includes the leaf (following a symlink leaf escapes on read).
+ */
+export async function assertRootSafeRead(root: string, relPath: string): Promise<void> {
+  const parts = relPath.split(/[\\/]+/).filter(part => part && part !== '.');
+  const resolvedRoot = resolve(root);
+  let current = resolvedRoot;
+  for (const part of parts) {
+    current = join(current, part);
+    const info = await lstat(current).catch(() => undefined);
+    if (!info) {
+      // A missing component means nothing deeper exists to traverse either.
+      return;
+    }
+    if (info.isSymbolicLink()) {
+      const at = relative(resolvedRoot, current)
+        .split(/[\\/]+/)
+        .join('/');
+      throw new Error(
+        `Refusing to read through a symlink inside the project: "${relPath}" ("${at}" is a symlink). ` +
+          `Remove the symlink and retry — CyanPrint does not read through symlinks in the managed tree.`,
+      );
+    }
+  }
+}
+
+/**
  * Remove ancestor directories a deletion emptied, so a path a directory occupied is free
  * for a file write. `rmdir` refuses non-empty directories, so sibling content survives.
  */

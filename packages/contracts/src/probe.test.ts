@@ -5,6 +5,8 @@ import {
   ProbeManifestSchema,
   ProbeRunReportSchema,
   ProbeVerdictSchema,
+  isProbeInapplicable,
+  probeInapplicable,
 } from './probe';
 import type { ProbeDefinition } from './probe';
 import type { CyanOutput } from './script';
@@ -170,5 +172,50 @@ describe('probe contract', () => {
       probes: [{ ...definition.probes[0], description: 'line one\nline two' }],
     };
     expect(ProbeDefinitionSchema.safeParse(multiLineDescription).success).toBe(false);
+  });
+
+  // Loop-2 HIGH: verdicts are keyed by (template, feature, probe name), so two
+  // probes sharing a name would overwrite each other's verdicts (FR7 violation).
+  // The schema rejects duplicates loudly, naming the offending probe.
+  test('probe definition rejects duplicate probe names, naming the duplicate', () => {
+    const probe = (name: string, kind: 'baseline' | 'mutation') => ({
+      name,
+      description: 'Probe description.',
+      kind,
+      run: () => undefined,
+    });
+    const duplicated = {
+      contractVersion: PROBE_CONTRACT_VERSION,
+      probes: [probe('same', 'baseline'), probe('same', 'mutation')],
+    };
+    const result = ProbeDefinitionSchema.safeParse(duplicated);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map(issue => issue.message).join('\n')).toContain('duplicate probe name "same"');
+    }
+
+    const distinct = {
+      contractVersion: PROBE_CONTRACT_VERSION,
+      probes: [probe('a-baseline', 'baseline'), probe('a-mutation', 'mutation')],
+    };
+    expect(ProbeDefinitionSchema.safeParse(distinct).success).toBe(true);
+  });
+});
+
+describe('probe inapplicability signal', () => {
+  test('probeInapplicable errors are recognized across module realms via the marker property', () => {
+    const error = probeInapplicable('no test files found to delete');
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('no test files found to delete');
+    expect(isProbeInapplicable(error)).toBe(true);
+    // Marker-based, not instanceof-based: a structurally equivalent object from a
+    // bundled probe realm is recognized too.
+    expect(isProbeInapplicable({ cyanprintProbeInapplicable: true })).toBe(true);
+  });
+
+  test('ordinary errors and non-errors are not inapplicable', () => {
+    expect(isProbeInapplicable(new Error('gate stayed green'))).toBe(false);
+    expect(isProbeInapplicable(undefined)).toBe(false);
+    expect(isProbeInapplicable('inapplicable')).toBe(false);
   });
 });

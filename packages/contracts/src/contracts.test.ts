@@ -67,6 +67,46 @@ describe('manifest and cyan script contracts', () => {
     });
   });
 
+  test('probeOverrides: parses per-dependency per-feature override files', () => {
+    const parsed = parseCyanManifest({
+      cyanprint: 4,
+      kind: 'template',
+      name: 'consumer',
+      bundledEntry: 'cyan.ts',
+      templates: { 'cyanprint/gated': null },
+      probeOverrides: { 'cyanprint/gated': { tests: 'probe-overrides/tests.ts' } },
+    });
+    expect(parsed.manifest.probeOverrides).toEqual([
+      { owner: 'cyanprint', name: 'gated', version: undefined, feature: 'tests', file: 'probe-overrides/tests.ts' },
+    ]);
+  });
+
+  test('probeOverrides: rejects an override naming a dependency absent from templates:', () => {
+    expect(() =>
+      parseCyanManifest({
+        cyanprint: 4,
+        kind: 'template',
+        name: 'consumer',
+        bundledEntry: 'cyan.ts',
+        templates: { 'cyanprint/gated': null },
+        probeOverrides: { 'cyanprint/undeclared': { tests: 'probe-overrides/tests.ts' } },
+      }),
+    ).toThrow(/undeclared/);
+  });
+
+  test('probeOverrides: rejects escaping override file paths', () => {
+    expect(() =>
+      parseCyanManifest({
+        cyanprint: 4,
+        kind: 'template',
+        name: 'consumer',
+        bundledEntry: 'cyan.ts',
+        templates: { 'cyanprint/gated': null },
+        probeOverrides: { 'cyanprint/gated': { tests: '../outside/tests.ts' } },
+      }),
+    ).toThrow('cyan.yaml is invalid');
+  });
+
   test('manifest rejects removed fields: presets, api, commutative', () => {
     const base = { cyanprint: 4, kind: 'template', name: 'demo', bundledEntry: 'cyan.ts' };
     expect(() => parseCyanManifest({ ...base, presets: { templates: {} } })).toThrow('presets: has been removed');

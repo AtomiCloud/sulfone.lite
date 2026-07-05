@@ -1,0 +1,8 @@
+cyanprint: 4
+kind: template
+owner: cyanprint
+name: probe-fixture-builtins
+description: 'Probe-less gate-bearing fixture — every declared feature resolves to the built-in probe library.'
+bundledEntry: cyan.ts
+processors:
+  - cyan/default

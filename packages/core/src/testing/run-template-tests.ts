@@ -76,7 +76,7 @@ type MergeAssertion = {
   segment?: 'processor' | 'dependency' | 'sibling';
 };
 
-type TemplateCase = {
+export type TemplateCase = {
   name: string;
   answers?: string | Answers;
   deterministicState?: string | Record<string, unknown>;
@@ -237,7 +237,11 @@ async function readAnswersRecord(path: string): Promise<Record<string, unknown>>
   return parsed as Record<string, unknown>;
 }
 
-async function loadTemplateTestCases(template: string): Promise<TemplateCase[]> {
+/**
+ * Load a template's curated test profiles from cyan.test.yaml. Exported for the
+ * probe engine, whose manifest derivation runs the same profiles headlessly.
+ */
+export async function loadTemplateTestCases(template: string): Promise<TemplateCase[]> {
   const testManifestPath = join(template, 'cyan.test.yaml');
   if (!(await exists(testManifestPath))) {
     return [];
@@ -360,7 +364,8 @@ function readOptionalPathOrRecord(
   throw new Error(`${label} must be a path string or mapping.`);
 }
 
-async function readCaseRecord<T extends Record<string, unknown>>(
+/** Resolve a test case's inline record / JSON-file path to the record itself. */
+export async function readCaseRecord<T extends Record<string, unknown>>(
   value: string | Record<string, unknown> | undefined,
   label: string,
 ): Promise<T> {

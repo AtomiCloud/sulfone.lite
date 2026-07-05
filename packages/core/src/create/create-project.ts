@@ -18,6 +18,7 @@ import type {
   CyanManifest,
   InstalledTemplate,
   KindedArtifactRef,
+  ProbeFeatureIdentity,
   PromptAdapter,
   Provenance,
   ResolverDeclaration,
@@ -97,6 +98,12 @@ export type CreateProjectResult = {
   outputPath: string;
   files: VfsFile[];
   artifactBundles: ArtifactBundleRef[];
+  /**
+   * Features declared by this generation's composed templates (per-template
+   * identity), for the probe engine. On create-into-existing-project this
+   * carries the INCOMING template's generation only; plan-3 adds persistence.
+   */
+  features: ProbeFeatureIdentity[];
   /** Paths left with in-file git conflict markers (create into an existing project only). */
   conflicts: string[];
   docker: false;
@@ -155,6 +162,7 @@ async function createFreshProject(options: CreateProjectOptions): Promise<Create
     outputPath: options.outDir,
     files: finalFiles,
     artifactBundles: generation.bundles,
+    features: generation.features,
     conflicts: [],
     docker: false,
     daemon: false,
@@ -275,6 +283,7 @@ async function createIntoExistingProject(options: CreateProjectOptions): Promise
     outputPath: options.outDir,
     files: merge.files,
     artifactBundles: nextGeneration.bundles,
+    features: nextGeneration.features,
     conflicts: merge.conflicts,
     docker: false,
     daemon: false,
@@ -372,6 +381,12 @@ export type TreeGeneration = {
   answers: Answers;
   deterministicState: Record<string, unknown>;
   warnings: CompatibilityWarning[];
+  /**
+   * Union of `CyanOutput.features` across every composed template, each tagged
+   * with its source template's identity (feature identity is per-template).
+   * Consumed by the probe engine's manifest derivation; plan-3 adds persistence.
+   */
+  features: ProbeFeatureIdentity[];
 };
 
 type GenerationContext = {
@@ -380,6 +395,7 @@ type GenerationContext = {
   interactive: boolean;
   bundles: Map<string, ArtifactBundleRef>;
   warnings: CompatibilityWarning[];
+  features: ProbeFeatureIdentity[];
   localFallback?: boolean;
   promptAdapter?: PromptAdapter;
   seenTemplateRefs: Set<string>;
@@ -412,6 +428,7 @@ export async function generateTemplateTree(options: {
     interactive: options.headless === false,
     bundles: new Map(),
     warnings: [],
+    features: [],
     localFallback: options.localFallback,
     promptAdapter: options.promptAdapter,
     seenTemplateRefs: new Set(),
@@ -450,6 +467,7 @@ export async function generateTemplateTree(options: {
     answers: context.answers,
     deterministicState: context.deterministicState,
     warnings: context.warnings,
+    features: context.features,
   };
 }
 
@@ -538,6 +556,14 @@ async function generateTemplateLayers(
     context.interactive,
     context.promptAdapter,
   );
+
+  // Feature declarations are collected per composed template, tagged with the
+  // SOURCE template's identity — the same flat name declared by two templates is
+  // two different features (probe identity is (source template, name)).
+  const selfIdentity = `${manifest.owner}/${manifest.name}`;
+  for (const name of new Set(cyan.features ?? [])) {
+    context.features.push({ template: selfIdentity, name });
+  }
 
   const cyanProcessors = normalizeReturnedArtifactUses(cyan.processors, manifest.owner);
   const cyanPlugins = normalizeReturnedArtifactUses(cyan.plugins, manifest.owner);
@@ -1442,16 +1468,35 @@ async function templateBundleRef(templateDir: string, manifest: CyanManifest): P
 // Dev-time template dir resolution (registry-free fallback)
 // ---------------------------------------------------------------------------
 
-async function resolveDevTemplateDir(args: {
+/** A resolved dev-time template dir plus how it was found. */
+export type ResolvedDevTemplate = {
+  dir: string;
+  /**
+   * True when the dir came from the artifact-bundle cache (a hydrated published
+   * artifact), false when it came from a local template-root scan. The probe
+   * engine uses this to decide whether a template's probe files must be bundled
+   * (`compileRuntimeBundle`) before import (artifact-shipped) or can be imported
+   * directly (local dev).
+   */
+  fromArtifactCache: boolean;
+};
+
+/**
+ * Resolve a composed template dependency to its on-disk template directory
+ * (bundle-index cache first, then local template-root scan), reporting which
+ * source supplied it. Exported for the probe engine, whose three-tier resolution
+ * walks the same composition graph.
+ */
+export async function resolveDevTemplate(args: {
   workspaceRoot: string;
   templateDir: string;
   dependency: ArtifactDependency;
   defaultOwner: string;
   localFallback?: boolean;
-}): Promise<string> {
+}): Promise<ResolvedDevTemplate> {
   const cached = await readCachedTemplateDir(args.templateDir, args.dependency, args.defaultOwner);
   if (cached) {
-    return cached;
+    return { dir: cached, fromArtifactCache: true };
   }
   if (args.localFallback === false || process.env.CYANPRINT_DISABLE_LOCAL_ARTIFACT_FALLBACK === '1') {
     throw new Error(
@@ -1475,13 +1520,28 @@ async function resolveDevTemplateDir(args: {
         manifest.name === args.dependency.name &&
         (!args.dependency.version || manifest.version === args.dependency.version)
       ) {
-        return candidate;
+        return { dir: candidate, fromArtifactCache: false };
       }
     }
   }
   throw new Error(
     `Unable to resolve child template ${args.dependency.owner ?? args.defaultOwner}/${args.dependency.name}`,
   );
+}
+
+/**
+ * Resolve a composed template dependency to its on-disk directory (bundle-index
+ * cache first, then local template-root scan). Thin wrapper over
+ * {@link resolveDevTemplate} for callers that only need the path.
+ */
+export async function resolveDevTemplateDir(args: {
+  workspaceRoot: string;
+  templateDir: string;
+  dependency: ArtifactDependency;
+  defaultOwner: string;
+  localFallback?: boolean;
+}): Promise<string> {
+  return (await resolveDevTemplate(args)).dir;
 }
 
 async function readCachedTemplateDir(
