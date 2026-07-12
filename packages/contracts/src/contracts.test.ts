@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { readTemplateTarFiles, validateTemplateTarPayload } from './archive';
 import { parseCyanManifest } from './manifest';
 import { artifactVersionId } from './registry';
+import type { PromptAdapter } from './runtime';
+import { makePromptContext } from './script';
 
 describe('manifest and cyan script contracts', () => {
   test('manifest accepts author-time dependency declarations without versions', () => {
@@ -169,6 +171,70 @@ describe('manifest and cyan script contracts', () => {
         processors: ['cyanprint/uppercase@04'],
       }),
     ).toThrow('cyan.yaml is invalid');
+  });
+});
+
+describe('deterministic state hermetic gateway', () => {
+  const adapter: PromptAdapter = {
+    ask: () => Promise.reject(new Error('prompts are not under test here')),
+  };
+
+  test('load computes once, pins the value, and never re-executes the producer on replay', async () => {
+    const state: Record<string, unknown> = {};
+    let calls = 0;
+    const ctx = makePromptContext(adapter, {}, state);
+    const first = await ctx.deterministic.load('port', () => {
+      calls += 1;
+      return 4180;
+    });
+    expect(first).toBe(4180);
+    expect(state.port).toBe(4180);
+
+    // Replay: a fresh context over the SAME persisted state — the producer must not run again.
+    const replay = makePromptContext(adapter, {}, state);
+    const second = await replay.deterministic.load('port', () => {
+      calls += 1;
+      return 9999;
+    });
+    expect(second).toBe(4180);
+    expect(calls).toBe(1);
+  });
+
+  test('load supports async producers (external queries) and pins their result', async () => {
+    const state: Record<string, unknown> = {};
+    const ctx = makePromptContext(adapter, {}, state);
+    const repos = await ctx.deterministic.load('repoList', async () => ['sulfone.lite', 'sulfone.iridium']);
+    expect(repos).toEqual(['sulfone.lite', 'sulfone.iridium']);
+    expect(state.repoList).toEqual(['sulfone.lite', 'sulfone.iridium']);
+  });
+
+  test('a pinned undefined value is replayed, not recomputed', async () => {
+    const state: Record<string, unknown> = {};
+    let calls = 0;
+    const ctx = makePromptContext(adapter, {}, state);
+    await ctx.deterministic.load('maybe', () => {
+      calls += 1;
+      return undefined;
+    });
+    const replayed = await ctx.deterministic.load('maybe', () => {
+      calls += 1;
+      return 'recomputed';
+    });
+    expect(replayed).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  test('a producer failure does not pin anything, so the next load retries', async () => {
+    const state: Record<string, unknown> = {};
+    const ctx = makePromptContext(adapter, {}, state);
+    await expect(
+      ctx.deterministic.load('flaky', () => {
+        throw new Error('network down');
+      }),
+    ).rejects.toThrow('network down');
+    expect('flaky' in state).toBe(false);
+    const recovered = await ctx.deterministic.load('flaky', () => 'ok');
+    expect(recovered).toBe('ok');
   });
 });
 
