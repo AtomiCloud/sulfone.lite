@@ -1,3 +1,23 @@
+## [4.8.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.7.0...v4.8.0) (2026-07-12)
+
+
+### 📜 Documentation 📜
+
+* **testing:** configFile also accepts YAML config files ([f8bd4dd](https://github.com/AtomiCloud/sulfone.lite/commit/f8bd4dd46a17495527d0199b631f8eaa6a8efc38))
+* **skills:** hermeticity, pinning, features, and bespoke kind skills ([128bbb5](https://github.com/AtomiCloud/sulfone.lite/commit/128bbb5fae9e89e53e7ffd3378085994d265789f))
+
+
+### ✨ Features ✨
+
+* **contracts:** add async deterministic.load hermetic gateway ([02b085b](https://github.com/AtomiCloud/sulfone.lite/commit/02b085b6a5cbd9b7ea93df2448d3deb7f548365c))
+* **worker:** seed default cyan account from a deploy-provided hash ([b2b3bb3](https://github.com/AtomiCloud/sulfone.lite/commit/b2b3bb35c4d4d26685c755c7f1c8f68db752c887))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **review:** address CodeRabbit findings on PR [#10](https://github.com/AtomiCloud/sulfone.lite/issues/10) ([345111f](https://github.com/AtomiCloud/sulfone.lite/commit/345111f15aa5450ef2f48b8aad860eae5249d5a4))
+* **testing:** reject sibling segment in template merge assertions ([2db5b36](https://github.com/AtomiCloud/sulfone.lite/commit/2db5b365e448f17e8b639cfcd238d0cc78c0ab2c))
+
 ## [4.7.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.6.0...v4.7.0) (2026-07-05)
 
 
