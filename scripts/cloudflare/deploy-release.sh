@@ -17,6 +17,11 @@ else
   printf '%s\n' 'CYANPRINT_GITHUB_CLIENT_SECRET not set locally; assuming existing Cloudflare Worker secret.'
 fi
 if [[ -n ${CYANPRINT_DEFAULT_TOKEN_HASH:-} ]]; then
+  # Must be a SHA-256 hex digest — a typo (or worse, the raw token) must never be stored.
+  if [[ ! $CYANPRINT_DEFAULT_TOKEN_HASH =~ ^[0-9a-f]{64}$ ]]; then
+    printf '%s\n' 'CYANPRINT_DEFAULT_TOKEN_HASH must be a lowercase SHA-256 hex digest (64 hex chars).' >&2
+    exit 1
+  fi
   printf '%s' "$CYANPRINT_DEFAULT_TOKEN_HASH" | bunx wrangler secret put CYANPRINT_DEFAULT_TOKEN_HASH --config .tmp/cloudflare/worker.wrangler.toml
 else
   printf '%s\n' 'CYANPRINT_DEFAULT_TOKEN_HASH not set locally; the default cyan account will not be (re)seeded.'

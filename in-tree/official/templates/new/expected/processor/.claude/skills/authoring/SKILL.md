@@ -60,7 +60,7 @@ processors: [
 ],
 ```
 
-`input.config` receives exactly that `config` object; the file scopes decide what lands in `fs.read()`. Reference config shape: the official `cyan/default` takes `vars` (the substitution map, rendered into contents AND paths) plus optional `parser.varSyntax` (the substitution tag pair) — everything the template can vary lives in config.
+`input.config` receives exactly that `config` object; the file scopes decide what lands in `fs.read()`. Reference config shape: the official `cyan/default` takes `vars` (the substitution map, rendered into contents AND paths) plus optional `parser.varSyntax` (the substitution tag pair) — option-like variability lives in config, while the files themselves arrive through the `files:` scopes.
 
 ## What makes a good processor
 

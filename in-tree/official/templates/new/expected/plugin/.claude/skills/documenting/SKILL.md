@@ -17,14 +17,16 @@ Keep `README.md` short and consumer-focused — it is how template authors who f
   ```
 
   ```ts
-  // cyan.ts — returned from the template's cyan function
-  plugins: [
-    {
-      name: 'acme/license',
-      config: { holder: 'ACME Corp', year: 2026 },
-      files: [{ root: 'assets', glob: '**/*', type: 'Copy' }], // only if the plugin consumes archive files
-    },
-  ],
+  // cyan.ts — inside the template's cyan function
+  return {
+    plugins: [
+      {
+        name: 'acme/license',
+        config: { holder: 'ACME Corp', year: 2026 },
+        files: [{ root: 'assets', glob: '**/*', type: 'Copy' }], // only if the plugin consumes archive files
+      },
+    ],
+  };
   ```
 
 - **Every `config` option** — a table of: option, what it means, its default, an example value. The config IS your public API: document it as strictly as you validate it.

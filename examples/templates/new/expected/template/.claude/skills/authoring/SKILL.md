@@ -45,7 +45,7 @@ const repoList = await ctx.deterministic.load('repoList', () => listOrgRepos('At
 const repo = await prompt.select('repo', 'Which repo?', { options: repoList });
 ```
 
-Producers may be async; never branch on a raw nondeterministic value — pin it, then branch.
+Producers may be async; never branch on a raw nondeterministic value — pin it, then branch. Deterministic keys are composition-shared like answer keys: a shared key means a shared pinned value — namespace keys that must stay private to this template (e.g. `acme-app:port`).
 
 ## Rules
 

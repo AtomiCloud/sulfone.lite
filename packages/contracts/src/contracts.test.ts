@@ -224,6 +224,14 @@ describe('deterministic state hermetic gateway', () => {
     expect(calls).toBe(1);
   });
 
+  test('keys shadowing Object.prototype properties compute instead of returning inherited values', async () => {
+    const state: Record<string, unknown> = {};
+    const ctx = makePromptContext(adapter, {}, state);
+    const value = await ctx.deterministic.load('toString', () => 'computed');
+    expect(value).toBe('computed');
+    expect(state.toString).toBe('computed');
+  });
+
   test('a producer failure does not pin anything, so the next load retries', async () => {
     const state: Record<string, unknown> = {};
     const ctx = makePromptContext(adapter, {}, state);

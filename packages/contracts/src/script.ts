@@ -179,7 +179,9 @@ export function makePromptContext(
         deterministicState[key] = value;
       },
       load: async (key, produce) => {
-        if (key in deterministicState) {
+        // Object.hasOwn: `key in state` would also match inherited Object.prototype
+        // properties ('toString', 'constructor', ...) and skip the producer.
+        if (Object.hasOwn(deterministicState, key)) {
           return deterministicState[key] as never;
         }
         const value = await produce();

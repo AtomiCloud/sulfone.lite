@@ -57,7 +57,7 @@ For each path with more than one variation, every contributing template nominate
 ## What makes a good resolver
 
 - **Target the common shared files**: resolvers earn their keep on paths MANY templates predictably touch — package manifests (`package.json`), `.gitignore`, nix files, `CLAUDE.md`, `README.md`. Name and describe this resolver after the files it merges so template authors searching for them find it.
-- **Consensus is byte-strict on config** — contributors must nominate identical config, so keep the config surface small and canonical (few keys, stable defaults); every extra option is another way for consensus to fail into LWW.
+- **Consensus needs identical canonical config** — contributor configs are compared by canonical JSON serialization (object keys sorted), so keep the config surface small and canonical (few keys, stable defaults); every extra option is another way for consensus to fail into LWW.
 - **Validate `input.config` first** and fail with an error naming the offending key and the expected shape.
 - **Merge by meaning, not by text** where the format allows it (parse JSON/YAML and merge structurally); order deterministically by `origin.layer`, never by anything else.
 - **Errors beat silent damage**: if the variations cannot be merged coherently, throw with a message naming the path and the conflict — a loud failure is recoverable, a mangled merge is not.

@@ -53,7 +53,7 @@ plugins: [
 ],
 ```
 
-`input.config` receives exactly that `config` object. Everything the template can vary lives there — pick config keys as carefully as a CLI picks flags.
+`input.config` receives exactly that `config` object, while archive inputs arrive separately through the `files:` scopes. Option-like variability lives in config — pick config keys as carefully as a CLI picks flags.
 
 ## What makes a good plugin
 

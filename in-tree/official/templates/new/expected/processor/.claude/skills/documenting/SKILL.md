@@ -17,14 +17,16 @@ Keep `README.md` short and consumer-focused — it is how template authors who f
   ```
 
   ```ts
-  // cyan.ts — returned from the template's cyan function
-  processors: [
-    {
-      name: 'acme/uppercase',
-      files: [{ root: 'template', glob: '**/*.md', type: 'Template' }],
-      config: { locale: 'en-US' },
-    },
-  ],
+  // cyan.ts — inside the template's cyan function
+  return {
+    processors: [
+      {
+        name: 'acme/uppercase',
+        files: [{ root: 'template', glob: '**/*.md', type: 'Template' }],
+        config: { locale: 'en-US' },
+      },
+    ],
+  };
   ```
 
 - **Every `config` option** — a table of: option, what it means, its default, an example value. The config IS your public API: document it as strictly as you validate it. (Reference: for the official `cyan/default`, the config is `vars` — the substitution map — plus `parser.varSyntax` — the substitution tag pair.)

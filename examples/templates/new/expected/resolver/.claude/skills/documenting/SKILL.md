@@ -20,7 +20,7 @@ Keep `README.md` short and consumer-focused — it is how template authors who f
 
   Remind consumers that a resolver only runs on **consensus** — every contributor must nominate the same ref with identical `config`, otherwise the path falls back to last-writer-wins.
 
-- **Every `config` option** — a table of: option, what it means, its default, an example value. The config IS your public API, and consensus compares it byte-for-byte: document it as strictly as you validate it.
+- **Every `config` option** — a table of: option, what it means, its default, an example value. The config IS your public API, and consensus compares its canonical JSON serialization (object keys sorted): document it as strictly as you validate it.
 - **The merge semantics**: how variations combine (ordering, conflicts within the merge, how `origin` layers are used) and any inputs it rejects (binary is never resolver-merged).
 - A minimal example: two (or more) variations in → the merged output out.
 - **Every dependency** declared in `cyan.yaml`, and why it is used.

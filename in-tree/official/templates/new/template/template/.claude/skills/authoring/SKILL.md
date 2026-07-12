@@ -103,7 +103,7 @@ if (coin > 0.5) {
 }
 ```
 
-Producers may be async (prompts already are) — `load` awaits them. A failed producer pins nothing, so the next run retries. `get`/`set` remain for reading and seeding pinned values, but reach for `load` by default: it makes compute-once-replay-forever impossible to get wrong. The state is shared across the whole composition, and a parent can seed a direct child's deterministic state through its `templates:` entry (see below).
+Producers may be async (prompts already are) — `load` awaits them. A failed producer pins nothing, so the next run retries. `get`/`set` remain for reading and seeding pinned values, but reach for `load` by default: it makes compute-once-replay-forever impossible to get wrong. The state is shared across the whole composition, and a parent can seed a direct child's deterministic state through its `templates:` entry (see below). Choose keys as deliberately as answer keys: a shared key means a shared pinned value across every template in the composition (that sharing is how seeding works) — namespace keys that must stay private to this template (e.g. `acme-app:port`).
 
 ## Template files and the default processor
 

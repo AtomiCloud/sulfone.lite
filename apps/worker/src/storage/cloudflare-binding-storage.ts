@@ -107,14 +107,19 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     if (!secretHash) {
       return;
     }
+    // Canonical upserts: every deploy re-asserts the full account/token shape, so a
+    // drifted row (e.g. a flipped admin bit or a re-pointed token) is corrected in place.
     await db
-      .prepare('INSERT OR IGNORE INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)')
+      .prepare(
+        `INSERT INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET handle = excluded.handle, login = excluded.login, admin = excluded.admin`,
+      )
       .bind('svc:cyan', 'cyan', null, 0)
       .run();
     await db
       .prepare(
         `INSERT INTO tokens (id, user_id, name, secret_hash, revoked) VALUES (?, ?, ?, ?, 0)
-         ON CONFLICT(id) DO UPDATE SET secret_hash = excluded.secret_hash, revoked = 0`,
+         ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, name = excluded.name, secret_hash = excluded.secret_hash, revoked = 0`,
       )
       .bind('token_cyan_default', 'svc:cyan', 'default', secretHash)
       .run();
