@@ -16,6 +16,11 @@ if [[ -n ${CYANPRINT_GITHUB_CLIENT_SECRET:-} ]]; then
 else
   printf '%s\n' 'CYANPRINT_GITHUB_CLIENT_SECRET not set locally; assuming existing Cloudflare Worker secret.'
 fi
+if [[ -n ${CYANPRINT_DEFAULT_TOKEN_HASH:-} ]]; then
+  printf '%s' "$CYANPRINT_DEFAULT_TOKEN_HASH" | bunx wrangler secret put CYANPRINT_DEFAULT_TOKEN_HASH --config .tmp/cloudflare/worker.wrangler.toml
+else
+  printf '%s\n' 'CYANPRINT_DEFAULT_TOKEN_HASH not set locally; the default cyan account will not be (re)seeded.'
+fi
 bunx wrangler d1 migrations apply DB --config .tmp/cloudflare/worker.wrangler.toml --remote
 OPEN_NEXT_DEPLOY=true bunx wrangler deploy --config .tmp/cloudflare/worker.wrangler.toml
 
