@@ -538,6 +538,35 @@ describe('tokens user profile session admin permission artifact registry batch r
     }
   });
 
+  test('D1-backed default account seeds from CYANPRINT_DEFAULT_TOKEN_HASH and rotates with the hash', async () => {
+    const rawToken = 'cp4_default_seed_test_token';
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      bindings.CYANPRINT_DEFAULT_TOKEN_HASH = sha256(rawToken);
+      const storage = createCloudflareBindingStorage(bindings);
+
+      // findTokenByHash is exactly what bearer auth (requireToken) resolves through:
+      // the seeded default token authenticates as the non-admin `cyan` user.
+      const seededToken = await storage.findTokenByHash(sha256(rawToken));
+      expect(seededToken).toMatchObject({ userId: 'svc:cyan', name: 'default', revoked: false });
+      expect(await storage.getUser('svc:cyan')).toMatchObject({ handle: 'cyan', admin: false });
+
+      // Rotation: a new hash + fresh storage (re-deploy) replaces the secret in place —
+      // the old raw token stops resolving, the new one resolves to the same user.
+      const rotatedToken = 'cp4_default_seed_rotated_token';
+      bindings.CYANPRINT_DEFAULT_TOKEN_HASH = sha256(rotatedToken);
+      const rotatedStorage = createCloudflareBindingStorage(bindings);
+      expect(await rotatedStorage.findTokenByHash(sha256(rawToken))).toBeUndefined();
+      expect(await rotatedStorage.findTokenByHash(sha256(rotatedToken))).toMatchObject({
+        userId: 'svc:cyan',
+        name: 'default',
+        revoked: false,
+      });
+    } finally {
+      bindings.close();
+    }
+  });
+
   test('upload sessions validate parts and finalize with server-assigned versions', async () => {
     const token = (await localToken('upload-flow')).token;
     const manifest = 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: upload-flow\nbundledEntry: cyan.ts\n';

@@ -54,8 +54,16 @@ For each path with more than one variation, every contributing template nominate
 - `input.config` is the agreed config from those declarations.
 - `origin` tells you where each variation came from: template ref, layer, and — in the `processor` segment — the source processor's ref + invocation index. Use layers for deterministic ordering, never randomness or clocks.
 
+## What makes a good resolver
+
+- **Target the common shared files**: resolvers earn their keep on paths MANY templates predictably touch — package manifests (`package.json`), `.gitignore`, nix files, `CLAUDE.md`, `README.md`. Name and describe this resolver after the files it merges so template authors searching for them find it.
+- **Consensus needs identical canonical config** — contributor configs are compared by canonical JSON serialization (object keys sorted), so keep the config surface small and canonical (few keys, stable defaults); every extra option is another way for consensus to fail into LWW.
+- **Validate `input.config` first** and fail with an error naming the offending key and the expected shape.
+- **Merge by meaning, not by text** where the format allows it (parse JSON/YAML and merge structurally); order deterministically by `origin.layer`, never by anything else.
+- **Errors beat silent damage**: if the variations cannot be merged coherently, throw with a message naming the path and the conflict — a loud failure is recoverable, a mangled merge is not.
+
 ## Rules
 
 - **Deterministic and side-effect free** — no filesystem, network, or global state. Same variations + config ⇒ byte-identical output; update's base regeneration depends on it.
 - Handle any number of variations (2+), text only.
-- Cover merges with `variations:` cases in `cyan.test.yaml` (see the testing skill).
+- Cover merges with `variations:` cases in `cyan.test.yaml`, covering each meaningful config shape (see the testing skill).

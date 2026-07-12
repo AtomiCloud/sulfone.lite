@@ -55,6 +55,15 @@ const probeInapplicable = (reason: string): Error =>
   Object.assign(new Error(reason), { cyanprintProbeInapplicable: true });
 ```
 
+## How probes are selected (the matrix)
+
+- **Feature declaration is the primary gate, and it is automatic**: `probes/<feature>.ts` runs ONLY against profiles whose generation declares `<feature>`. A probe never runs where its feature is absent — you never signal inapplicable for "the feature wasn't enabled".
+- **`probeInapplicable` is for variant mismatch WITHIN a declared feature**: the profile declares the feature, but this variant of the generated repo lacks the exact thing THIS probe targets. Two kinds:
+  - **Sabotage target absent** — e.g. `lint` is declared by two profiles, but one answer picks eslint and the other biome; the corrupt-`.eslintrc` mutation has nothing to corrupt on the biome variant.
+  - **Gate absent** — the command this probe would run is not wired in this variant.
+  - Composition can also move or rename a target (a child template overwrote the file this probe patches).
+- Either way the verdict is `invalid` — never a fake `proven`/`caught`/`missed`.
+
 ## Rules that keep probes honest
 
 - **Non-vacuous**: every mutation must assert the gate REDDENS, and pair with a baseline on the same gate. Sabotage what a user would break (source files, committed artifacts) — never rewrite the gate you then run.
@@ -80,3 +89,4 @@ Drift between the committed manifest and the resolved probes fails both `cyanpri
 - `cyanprint probe <generated-repo> --template .` proves an already materialized repo. If the template stops declaring a feature that repo's `.cyan_state.yaml` still records, the run fails with `probe_declared_feature_drift` instead of silently proving a smaller matrix — realign the template, regenerate the repo (`cyanprint update`), or fall back to the explicit-source debug loop.
 - Debug loop: `cyanprint probe <repo> --probes . --features <file>` (explicit source, manifest gate skipped), plus `--probe <name>` to select one mutation (its baseline comes along), and `--keep-sandbox` to inspect the sabotaged tree. Selection output is labelled `selection` — it is a debug view, not matrix results.
 - Composition is covered: features inherited from composed templates are proven against the final combined repo, so a child overwrite that neuters an inherited gate surfaces as `missed`.
+- **Probes run in CI**: probing cases (`probe: true`) execute as part of `cyanprint test`, which the scaffolded CI gate runs — keep probing cases in the CI path; never strip them to speed CI up. Probes are code: exercising them in CI is what tests the probes themselves.

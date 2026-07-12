@@ -1,0 +1,39 @@
+name: registry-push
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'in-tree/official/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-push
+
+jobs:
+  push-artifacts:
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-atomi-nix-store-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: AtomiCloud/actions.setup-nix@v3
+      - run: nix develop .#ci -c bun install --frozen-lockfile
+      # Dependency order: cyan/new declares cyan/default, and push batch-resolves
+      # declared deps against the registry — the processor must exist first.
+      # Tests are skipped here because the CI workflow already gates them.
+      # CYANPRINT_TOKEN is scoped to the two publishing steps only.
+      - name: Push cyan/default (processor)
+        env:
+          CYANPRINT_TOKEN: ${{ secrets.CYANPRINT_TOKEN }}
+        run: nix develop .#ci -c bun packages/cli/src/main.ts push in-tree/official/processors/default --no-test
+      - name: Push cyan/new (template)
+        env:
+          CYANPRINT_TOKEN: ${{ secrets.CYANPRINT_TOKEN }}
+        run: nix develop .#ci -c bun packages/cli/src/main.ts push in-tree/official/templates/new --no-test

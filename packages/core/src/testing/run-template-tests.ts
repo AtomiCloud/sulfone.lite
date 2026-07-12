@@ -88,7 +88,9 @@ type MergeAssertion = {
   path: string;
   decision: 'resolver' | 'lww';
   resolver?: string;
-  segment?: 'processor' | 'dependency' | 'sibling';
+  // Template tests generate in isolation, so sibling collisions can never occur in a case —
+  // only the processor and dependency segments are assertable.
+  segment?: 'processor' | 'dependency';
 };
 
 export type TemplateCase = {
@@ -493,8 +495,10 @@ function readMergeAssertions(value: unknown, label: string): MergeAssertion[] {
       throw new Error(`${label}[${index}].decision must be "resolver" or "lww".`);
     }
     const segment = record.segment;
-    if (segment !== undefined && segment !== 'processor' && segment !== 'dependency' && segment !== 'sibling') {
-      throw new Error(`${label}[${index}].segment must be processor, dependency, or sibling.`);
+    if (segment !== undefined && segment !== 'processor' && segment !== 'dependency') {
+      throw new Error(
+        `${label}[${index}].segment must be processor or dependency (template tests generate in isolation, so sibling merges cannot occur).`,
+      );
     }
     const resolver = record.resolver;
     if (resolver !== undefined && (typeof resolver !== 'string' || resolver.length === 0)) {

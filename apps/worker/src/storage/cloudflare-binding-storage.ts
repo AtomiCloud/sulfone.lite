@@ -58,6 +58,7 @@ export type WorkerBindings = {
   CYANPRINT_GITHUB_ADMIN_LOGINS?: string;
   CYANPRINT_AUTH_RETURN_ORIGINS?: string;
   CYANPRINT_WEB_URL?: string;
+  CYANPRINT_DEFAULT_TOKEN_HASH?: string;
 };
 
 export function createCloudflareBindingStorage(env: WorkerBindings): RegistryStorage {
@@ -72,6 +73,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   }
 
   async function seed(): Promise<void> {
+    await seedDefaultAccount();
     if (env.CYANPRINT_ENABLE_REGISTRY_SEEDS !== '1') {
       return;
     }
@@ -94,6 +96,33 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         await persistArtifact(artifact);
       }
     }
+  }
+
+  // The default publishing account. Deploys provide ONLY the SHA-256 hash of the raw
+  // `cyan` token (the raw token lives in CI secrets and is never stored server-side).
+  // Idempotent: re-deploys are no-ops, and rotating the hash + redeploying rotates the
+  // token in place. Nothing runs when the env is absent (local dev, tests without it).
+  async function seedDefaultAccount(): Promise<void> {
+    const secretHash = env.CYANPRINT_DEFAULT_TOKEN_HASH;
+    if (!secretHash) {
+      return;
+    }
+    // Canonical upserts: every deploy re-asserts the full account/token shape, so a
+    // drifted row (e.g. a flipped admin bit or a re-pointed token) is corrected in place.
+    await db
+      .prepare(
+        `INSERT INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET handle = excluded.handle, login = excluded.login, admin = excluded.admin`,
+      )
+      .bind('svc:cyan', 'cyan', null, 0)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO tokens (id, user_id, name, secret_hash, revoked) VALUES (?, ?, ?, ?, 0)
+         ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, name = excluded.name, secret_hash = excluded.secret_hash, revoked = 0`,
+      )
+      .bind('token_cyan_default', 'svc:cyan', 'default', secretHash)
+      .run();
   }
 
   async function findArtifactByIdentity(

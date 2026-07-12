@@ -63,6 +63,13 @@ export type CyanPromptContext = {
   deterministic: {
     get<T>(key: string): T | undefined;
     set(key: string, value: unknown): void;
+    /**
+     * Load-or-compute-and-persist: the hermetic gateway for every nondeterministic or
+     * external value (randomness, time, network/CLI queries). On first generation the
+     * producer runs once and its value is pinned; on replay (update's base regeneration)
+     * the pinned value is returned and the producer is NEVER re-executed.
+     */
+    load<T>(key: string, produce: () => T | Promise<T>): Promise<T>;
   };
 };
 
@@ -170,6 +177,16 @@ export function makePromptContext(
       get: key => deterministicState[key] as never,
       set: (key, value) => {
         deterministicState[key] = value;
+      },
+      load: async (key, produce) => {
+        // Object.hasOwn: `key in state` would also match inherited Object.prototype
+        // properties ('toString', 'constructor', ...) and skip the producer.
+        if (Object.hasOwn(deterministicState, key)) {
+          return deterministicState[key] as never;
+        }
+        const value = await produce();
+        deterministicState[key] = value;
+        return value;
       },
     },
   };

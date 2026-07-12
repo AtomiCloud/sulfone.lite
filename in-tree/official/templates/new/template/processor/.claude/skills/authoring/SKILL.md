@@ -39,8 +39,39 @@ Any valid export form loads (const arrow, function expression, re-export); the n
 - `input.config` is the per-use config a template passes (`config: {...}` on the processor use). Validate it and document the contract in your README.
 - Escape hatch: `input.inputDir` / `input.outputDir` are real paths when you need raw filesystem access.
 
+## How templates use this processor
+
+A consuming template declares this processor in its `cyan.yaml` (the declaration is what gets downloaded, and it carries the version pin) and invokes it from `cyan.ts` with file scopes and per-use `config` — design both halves as your public API and show them verbatim in the README:
+
+```yaml
+# consumer's cyan.yaml
+processors:
+  - acme/uppercase@1
+```
+
+```ts
+// consumer's cyan.ts return
+processors: [
+  {
+    name: 'acme/uppercase',
+    files: [{ root: 'template', glob: '**/*.md', type: 'Template' }],
+    config: { locale: 'en-US' },
+  },
+],
+```
+
+`input.config` receives exactly that `config` object; the file scopes decide what lands in `fs.read()`. Reference config shape: the official `cyan/default` takes `vars` (the substitution map, rendered into contents AND paths) plus optional `parser.varSyntax` (the substitution tag pair) — option-like variability lives in config, while the files themselves arrive through the `files:` scopes.
+
+## What makes a good processor
+
+- **One transform**: a single, nameable mapping over the scoped files (render variables, format, code-mod, rewrite a manifest). Templates compose processors in declared order — small beats sprawling.
+- **Validate `input.config` first** and fail with an error naming the offending key and the expected shape — a template author should never have to read your source to fix their config.
+- **Leave what you don't transform untouched**: files outside your concern pass through byte-identical; binary (`bytesBase64`) is never mangled. (`cyan/default` models this: unknown placeholders are left as-is.)
+- **Tolerate any scope**: templates choose the `files:` globs, so handle empty scopes and unexpected file kinds gracefully instead of crashing.
+- **Errors name the file**: when a transform fails, say which path and why — the consumer debugs with your message, not your stack trace.
+
 ## Rules
 
 - **Hermetic**: same input file set + `input.config` ⇒ byte-identical output. `cyanprint update` re-executes old versions to build its merge base — nondeterminism creates phantom conflicts for every user of every template that depends on you.
 - Folder-in / folder-out only; no network, no clock, no randomness, no global state.
-- Add a fixture under `tests/` and keep `cyan.test.yaml` in sync (see the testing skill).
+- Add a fixture under `tests/` covering each meaningful config shape, and keep `cyan.test.yaml` in sync (see the testing skill).

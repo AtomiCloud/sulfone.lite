@@ -34,7 +34,13 @@ export default async function cyan(prompt, ctx) {
 }
 ```
 
-Any valid export form loads (const arrow, function expression); the default-function declaration above is the convention. `cyan.ts` may return only `processors`, `plugins`, and `commands` — returning `templates` is a hard error (`templates cannot be returned from cyan.ts; declare them in cyan.yaml`).
+Any valid export form loads (const arrow, function expression); the default-function declaration above is the convention. `cyan.ts` may return only `processors`, `plugins`, `commands`, and `features` — returning `templates` is a hard error (`templates cannot be returned from cyan.ts; declare them in cyan.yaml`).
+
+## Features
+
+The returned object may declare `features: ['tests', 'ci', ...]` — each name is a **promise about the generated repo** ("it has a real test gate", "CI actually runs the gates"), scoped to this template: the same name declared by two templates is two different features. An undeclared feature asserts nothing. Return the features that the chosen answers actually produce — answer-gated features appear only on the paths that enable them — and prove every declared feature with probes (see the probing skill).
+
+When you alter this template, update `cyan.test.yaml` **and** the probes as part of the same change — behavior or feature changes without matching tests and probes are incomplete.
 
 ## Prompts and shared answers
 
@@ -68,18 +74,36 @@ const port = await prompt.number('port', 'Which port should the dev server use?'
 
 Answers are **shared across the whole composition**: dependencies generate first, so when a deep dependency asks a question, this template (and its ancestors) reuse that answer instead of re-asking. Use the same answer key for the same concept everywhere. In headless runs (`--headless --answers file.json`) every prompt must be answered by the file or a default.
 
-## Deterministic state
+## Hermeticity: pin every external value
 
-`ctx.deterministic.get(key)` / `ctx.deterministic.set(key, value)` store random-but-stable values (generated ports, IDs, colors). The state is shared across the composition and persisted to `.cyan_state.yaml`, so `cyanprint update` regenerates the same values. Never derive output from timestamps or raw randomness — route it through deterministic state:
+The WHOLE template must be **hermetic**: `answers` + deterministic state are a complete replay tape. `cyanprint update` re-executes your old version from that recorded state as its merge base, so any value that can differ between runs — randomness, time, environment, network or CLI queries — MUST be pinned through `ctx.deterministic` **before** it influences anything: control flow, prompt options, or output.
+
+`await ctx.deterministic.load(key, produce)` is the gateway — load-or-compute-and-persist. On first generation the producer runs once and the value is pinned to `.cyan_state.yaml`; on replay the pinned value is returned and the producer NEVER re-executes (no clock read, no network call):
 
 ```ts
-if (ctx.deterministic.get('port') === undefined) {
-  ctx.deterministic.set('port', 3000 + Math.floor(Math.random() * 1000));
-}
-const port = ctx.deterministic.get('port');
+// Random-but-stable values (generated ports, IDs, colors):
+const port = await ctx.deterministic.load('port', () => 3000 + Math.floor(Math.random() * 1000));
+
+// Time — never read the clock into output directly:
+const year = await ctx.deterministic.load('copyrightYear', () => new Date().getFullYear());
+
+// External queries — pin the result, THEN prompt over it. Replay never hits the network:
+const repoList = await ctx.deterministic.load('repoList', () => listOrgRepos('AtomiCloud'));
+const repo = await prompt.select('repo', 'Which repo does this project belong to?', { options: repoList });
 ```
 
-A parent can also seed a direct child's deterministic state through its `templates:` entry (see below).
+The same rule covers branching — never branch on a raw nondeterministic value, pin it first:
+
+```ts
+// WRONG: replay may take the other branch — a phantom conflict for every user on every update.
+// if (Math.random() > 0.5) { extra = await prompt.text('extra', '...'); }
+const coin = await ctx.deterministic.load('coin', () => Math.random());
+if (coin > 0.5) {
+  extra = await prompt.text('extra', '...');
+}
+```
+
+Producers may be async (prompts already are) — `load` awaits them. A failed producer pins nothing, so the next run retries. `get`/`set` remain for reading and seeding pinned values, but reach for `load` by default: it makes compute-once-replay-forever impossible to get wrong. The state is shared across the whole composition, and a parent can seed a direct child's deterministic state through its `templates:` entry (see below). Choose keys as deliberately as answer keys: a shared key means a shared pinned value across every template in the composition (that sharing is how seeding works) — namespace keys that must stay private to this template (e.g. `acme-app:port`).
 
 ## Template files and the default processor
 
@@ -105,9 +129,27 @@ templates:
 - Children generate **before** this template's `cyan.ts`, so child answers always bubble up for reuse.
 - **One dep = one configuring parent** — global uniqueness means each template (`owner/name`, version ignored) may appear only once in the entire tree; two branches pulling the same template is a hard error. Influence deeper descendants via shared answer keys, not direct targeting.
 - **Cycle detection** — self-referential compositions fail fast.
-- Every processor/plugin returned from `cyan.ts` must be declared in `cyan.yaml` (`undeclared_artifact` otherwise).
+- Every processor/plugin returned from `cyan.ts` must be declared in `cyan.yaml` — see "Declare and pin in cyan.yaml".
 
 A `kind: template-group` artifact (the kind in its own manifest header) is a template whose only job is composing children.
+
+## Declare and pin in cyan.yaml
+
+`cyan.yaml` is the **install manifest**: running a template downloads ONLY its declared dependencies, before `cyan.ts` ever executes. An undeclared artifact is never downloaded, so invoking it fails — which is why **everything your `cyan.ts` can return in the Cyan object must also be declared in `cyan.yaml`** (`processors:`, `plugins:`), including artifacts only used on some answer paths after the prompts. Returning an undeclared ref is the hard error `undeclared_artifact`.
+
+```yaml
+processors:
+  - cyan/default@2 # pinned
+plugins:
+  - acme/license # unpinned: floats while authoring; cyanprint push pins it
+```
+
+`cyan.yaml` is also the **single source of version pins** — the runtime cannot know a pin on its own, so it resolves every returned use against the declarations:
+
+- Return **unpinned** → the use inherits the declaration's pinned version.
+- Return **pinned** and declaration **pinned** → the versions MUST match; a mismatch fails as `undeclared_artifact`.
+- Return **pinned** but declaration **unpinned** → fails; the declaration leads — carry the pin in `cyan.yaml` (and then the return may simply omit it).
+- **Both unpinned** → fine while authoring: `cyanprint push` pins the declaration at publish time (concrete version + integrity recorded in the registry), and runtime matches returned uses against that recorded pin.
 
 ## Merge and resolvers
 
@@ -133,7 +175,8 @@ Return `commands: [{ command: 'bun', args: ['install'], allow: true }]` to run s
 `cyanprint update <project>` floats every active template to latest (`--interactive` picks versions per template; `--template <ref>` targets one). It is a real git three-way merge: **base** = the old versions re-executed from the answers + deterministic state recorded in `.cyan_state.yaml`, **theirs** = the new versions (only new questions prompt; prior values as defaults), **ours** = the user's files on disk — with rename detection, and conflicts left **in-file as standard `<<<<<<<` markers** (the command exits non-zero listing them). `cyanprint create` into a directory that already has `.cyan_state.yaml` upserts another template into it (multi-install out of the box), layered via tier-3 resolution. Design for it:
 
 - Keep output **deterministic**: same answers + deterministic state ⇒ byte-identical output. Nondeterminism shows up as phantom conflicts on every update.
-- Do **not** attach resolvers to files users are expected to edit — git merges user edits during update. Resolvers are only for paths where template layers collide.
+- Resolvers act at **layering time only** — update's three-way merge of user edits happens **after** resolution, so whether users are expected to edit a file is irrelevant when deciding to attach a resolver.
+- You don't always need a resolver: an incidental collision falling back to LWW is fine when it is asserted in tests. But for common files MANY templates are expected to touch — package manifests (`package.json`), `.gitignore`, nix files, `CLAUDE.md`, `README.md` — you SHOULD search the registry and attach an existing resolver rather than let LWW clobber another template's contribution.
 - Never remove answer keys between versions — old state must still satisfy new prompts (add defaults for new questions).
 
 ## Debugging
@@ -144,6 +187,6 @@ Return `commands: [{ command: 'bun', args: ['install'], allow: true }]` to run s
 
 ## Rules
 
-- Deterministic given the same answers + deterministic state — update depends on it.
-- Declare every dependency in `cyan.yaml`; keep `cyan.ts` pure data.
-- Cover answer combinations and assert every expected merge decision in `cyan.test.yaml` (see the testing skill).
+- Hermetic given the same answers + deterministic state — update depends on it. Pin every nondeterministic or external value (randomness, time, network/CLI queries) with `await ctx.deterministic.load(key, produce)` before it influences control flow, prompts, or output.
+- Declare every dependency in `cyan.yaml` — it is both the install manifest and the pin record; keep `cyan.ts` pure data.
+- Cover answer combinations and assert every expected merge decision in `cyan.test.yaml` (see the testing skill); prove every declared feature with probes (see the probing skill). Tests and probes ship with every change.
