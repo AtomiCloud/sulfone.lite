@@ -27,6 +27,37 @@ export async function plugin(input: PluginInput, helper: PluginHelper) {
 - Commands must be idempotent — safe to run again on an already-generated project.
 - `helper.read()` / `helper.write()` operate on the plugin's folder; escape hatch is `input.outputDir`.
 
+## How templates use this plugin
+
+A consuming template declares this plugin in its `cyan.yaml` (the declaration is what gets downloaded, and it carries the version pin) and invokes it from `cyan.ts` with per-use `config` — design both halves as your public API and show them verbatim in the README:
+
+```yaml
+# consumer's cyan.yaml
+plugins:
+  - acme/license@1
+```
+
+```ts
+// consumer's cyan.ts return
+plugins: [
+  {
+    name: 'acme/license',
+    config: { holder: 'ACME Corp', year: 2026 },
+    files: [{ root: 'assets', glob: '**/*', type: 'Copy' }], // only if this plugin consumes archive files
+  },
+],
+```
+
+`input.config` receives exactly that `config` object. Everything the template can vary lives there — pick config keys as carefully as a CLI picks flags.
+
+## What makes a good plugin
+
+- **One job**: a single, nameable post-processing effect (init a repo, stamp a license, format the tree). Compose small plugins over building a kitchen sink.
+- **Validate `input.config` first** and fail with an error naming the offending key and the expected shape — a template author should never have to read your source to fix their config.
+- **Touch only what you must**: never rewrite files unrelated to your job; pass binary (`bytesBase64`) through untouched.
+- **Idempotent commands only** — `helper.exec` runs again on every regeneration; guard anything that would fail or duplicate on a second run.
+- **Deterministic output** — any variable value must come in through `config` (the template sources it from answers or deterministic state); no clock, network, or randomness of your own.
+
 ## Rules
 
 - Keep effects deterministic and documented.

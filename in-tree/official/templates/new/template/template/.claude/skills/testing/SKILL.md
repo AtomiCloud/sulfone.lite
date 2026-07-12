@@ -21,7 +21,7 @@ cases:
       - path: package.json
         decision: resolver # resolver | lww
         resolver: cyanprint/json-merge
-        segment: dependency # processor | dependency | sibling
+        segment: dependency # processor | dependency
       - path: README.md
         decision: lww
         segment: processor
@@ -31,6 +31,7 @@ cases:
 
 - `answers` may be an inline mapping or a path to a JSON file; `deterministicState` is optional for deterministic prompts.
 - Cover the meaningful combinations of answers, and assert every expected merge decision in `merges:` so resolver use and LWW are always intentional.
+- Merge assertions cover the **processor** and **dependency** segments only — template tests generate in isolation, so **sibling** collisions can never occur in a case.
 - **Strict by default**: any `lww-override` in the generation's persisted provenance that is not asserted in `merges:` fails the case — attach a resolver or assert the LWW. A per-case `allowUnassertedLww: true` escape hatch exists but is discouraged.
 - The folder compare is exact bytes AND tree shape, excluding `ignore:` globs and paths matched by the output's own `.gitignore`.
 - Run `cyanprint test .` — add `--parallel N` to run many cases concurrently.
