@@ -23,11 +23,11 @@ cases:
     variations:
       - { path: tests/merge/input-1, origin: { template: acme/a@1, layer: 0 } }
       - { path: tests/merge/input-2, origin: { template: acme/b@1, layer: 1 } }
-    configFile: tests/merge/config.json # or a path to a JSON config file
+    configFile: tests/merge/config.json # JSON, or a .yaml/.yml file parsed as YAML
     expected: tests/merge/expected
 ```
 
-- **Choose the config per case**: `config:` (inline mapping) or `configFile:` (path to a JSON file). Convention-based cases (a `tests/<case>/` folder with no manifest entry) pick up `tests/<case>/config.json` automatically. The case invokes the artifact with exactly that config.
+- **Choose the config per case**: `config:` (inline mapping) or `configFile:` (path to a JSON or YAML file — `.yaml`/`.yml` parse as YAML). Convention-based cases (a `tests/<case>/` folder with no manifest entry) pick up `tests/<case>/config.json` automatically. The case invokes the artifact with exactly that config.
 - The config is your public API — cover each meaningful config shape with its own case, including the no-config default if you support one.
 - Resolver origins may also carry `processor: { ref, invocation }` to exercise tier-1 (processor-output) merges. Cover 3+ variations when merge order matters.
 - Run `cyanprint test .` — add `--parallel N` to run many cases concurrently.

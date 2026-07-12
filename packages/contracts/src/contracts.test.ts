@@ -229,7 +229,7 @@ describe('deterministic state hermetic gateway', () => {
     const ctx = makePromptContext(adapter, {}, state);
     const value = await ctx.deterministic.load('toString', () => 'computed');
     expect(value).toBe('computed');
-    expect(state.toString).toBe('computed');
+    expect(state['toString']).toBe('computed');
   });
 
   test('a producer failure does not pin anything, so the next load retries', async () => {
