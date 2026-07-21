@@ -309,8 +309,9 @@ async function runTemplateCase(
  * declaration mode (FR6: a feature-declaring template must carry a committed,
  * drift-free probes.yaml; the two entry points must never disagree) — then the
  * full probe matrix against the case's generated output through the shared
- * `runProbeMatrix` engine (FR13). Any `missed`/`broken` verdict fails the case
- * with the offending probes named.
+ * `runProbeMatrix` engine (FR13). Any direct `missed`/`broken` verdict or
+ * independently broken unexpected control event fails the case with the
+ * offending probes named.
  */
 async function runProbeTierForCase(
   template: string,
@@ -324,7 +325,7 @@ async function runProbeTierForCase(
   // Throws with the drift diff on a drifted or missing manifest; runTemplateCase's
   // catch turns that into the case failure (FR6's "fails the gate").
   await checkProbeManifestDrift(template);
-  const { report } = await runProbeMatrix({
+  const { report, events } = await runProbeMatrix({
     repoPath: outDir,
     probeSources: { mode: 'declaration', templateDir: template },
     features,
@@ -336,6 +337,13 @@ async function runProbeTierForCase(
       if (probe.verdict === 'missed' || probe.verdict === 'broken') {
         offenders.push(`${feature.template}#${feature.name}/${probe.name}=${probe.verdict}`);
       }
+    }
+  }
+  for (const event of events) {
+    if (event.attribution?.kind === 'unexpected-control') {
+      offenders.push(
+        `${event.feature}/${event.probe}=broken (control for ${event.attribution.mutation.feature}/${event.attribution.mutation.probe})`,
+      );
     }
   }
   if (offenders.length > 0) {

@@ -263,6 +263,41 @@ describe('test-flow probe tier (FR8)', () => {
   );
 
   test(
+    'an unexpected broken control fails the case without replacing the caught mutation verdict',
+    async () => {
+      const dir = await writeSynthetic('synth-unexpected-control', {
+        features: ['mutator', 'control'],
+        probes: {
+          mutator:
+            `export default { contractVersion: 1, probes: [` +
+            `{ name: 'mutator-baseline', description: 'Healthy mutator baseline.', kind: 'baseline', run: () => {} },` +
+            `{ name: 'mutator-sabotage', description: 'Plants a fault the mutation catches.', kind: 'mutation', ` +
+            `run: async (repo) => { await repo.write('fault.txt', 'on'); } }` +
+            `] };\n`,
+          control:
+            `export default { contractVersion: 1, probes: [` +
+            `{ name: 'control-baseline', description: 'Rejects the planted fault.', kind: 'baseline', ` +
+            `run: async (repo) => { if ((await repo.glob('fault.txt')).length > 0) throw new Error('unexpected fault'); } },` +
+            `{ name: 'control-sabotage', description: 'Keeps control mutation-bearing.', kind: 'mutation', run: () => {} }` +
+            `] };\n`,
+        },
+        cases: [{ name: 'probing', expected: 'expected', probe: true }],
+      });
+      await writeProbeManifest(dir);
+
+      const report = await runTemplateTest({ template: dir, outDir: join(workRoot, 'out-unexpected-control') });
+      const probing = report.cases.find(entry => entry.name === 'probing');
+
+      expect(probing?.status).toBe('failed');
+      expect(probing?.message).toContain(
+        'cyanprint/synth-unexpected-control#control/control-baseline=broken (control for cyanprint/synth-unexpected-control#mutator/mutator-sabotage)',
+      );
+      expect(probing?.probes).toMatchObject({ proven: 2, caught: 2, broken: 0 });
+    },
+    T,
+  );
+
+  test(
     'coverage-by-proof: a proven+caught probe set satisfies coverage but a lone caught (no proven baseline) does not',
     async () => {
       // Arrange
