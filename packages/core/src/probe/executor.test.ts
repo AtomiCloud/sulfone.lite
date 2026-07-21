@@ -163,9 +163,14 @@ describe('timeout isolation is an absolute boundary', () => {
     const elapsed = Date.now() - startedAt;
 
     // Assert
-    // The overrunning probe is broken; the whole baseline run is untrusted with it.
+    // The overrunning probe is broken, while its independently passing sibling remains proven.
     expect(verdictOf(execution, 'boundary', 'overruns-timeout')).toBe('broken');
-    expect(verdictOf(execution, 'boundary', 'runs-after')).toBe('broken');
+    expect(verdictOf(execution, 'boundary', 'runs-after')).toBe('proven');
+    expect(execution.events.find(event => event.probe === 'overruns-timeout')).toMatchObject({
+      role: 'baseline',
+      outcome: 'timeout',
+      verdict: 'broken',
+    });
 
     // It was killed at its deadline, not after its 4s of async work.
     expect(elapsed).toBeLessThan(4_000);
@@ -212,6 +217,34 @@ describe('timeout isolation is an absolute boundary', () => {
     // Bounded: timeout + SIGTERM→SIGKILL grace + overhead, nowhere near a hang.
     expect(elapsed).toBeLessThan(15_000);
   }, 30_000);
+});
+
+describe('child diagnostics', () => {
+  test('exit code and the final 4 KiB of stdout/stderr are retained per child', async () => {
+    const feature = await inlineFeature(
+      'diagnostics',
+      `[{
+        name: 'noisy-baseline',
+        description: 'Emits enough output to exercise bounded diagnostic tails.',
+        kind: 'baseline',
+        run: () => {
+          console.log('x'.repeat(5000) + 'stdout-end');
+          console.error('y'.repeat(5000) + 'stderr-end');
+        },
+      }]`,
+    );
+
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+    const event = execution.events.find(candidate => candidate.probe === 'noisy-baseline');
+
+    expect(event).toBeDefined();
+    expect(event?.exitCode).toBe(0);
+    expect(event?.verdict).toBe('proven');
+    expect(Buffer.byteLength(event?.stdoutTail ?? '', 'utf8')).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(event?.stderrTail ?? '', 'utf8')).toBeLessThanOrEqual(4096);
+    expect(event?.stdoutTail.endsWith('stdout-end\n')).toBe(true);
+    expect(event?.stderrTail.endsWith('stderr-end\n')).toBe(true);
+  });
 });
 
 // Containment boundary (FR10/FR11 resolution, 2026-07-04, option 2): the kill

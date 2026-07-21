@@ -183,11 +183,11 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
   );
 
   test(
-    'scenario 4 — a red in-run control WITHOUT expectedImpact marks the run broken, never caught',
+    'scenario 4 — a red control is independently broken without replacing a caught mutation',
     async () => {
       // Same sabotage as the fixture's deleting-tests mutation, but with the
-      // attribution carrier stripped: the red coverage control is unattributed,
-      // so the conservative rule reports the run `broken`.
+      // attribution carrier stripped: the red coverage control is independently
+      // attributed as broken, but it cannot overwrite the mutation child.
       const testsFeature = await customFeature(
         GATED,
         'tests',
@@ -209,15 +209,24 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       const execution = await executeProbeMatrix({ repoPath: repoOf('probe-fixture-gated'), features });
       expect(
         execution.verdicts.get(probeKey({ template: GATED, name: 'tests' }, 'deleting-tests-without-attribution')),
-      ).toBe('broken');
-      // The attributed twin in scenario 1 proves the positive case: with
-      // expectedImpact ['coverage', 'ci'] the identical sabotage is `caught`.
+      ).toBe('caught');
+      expect(
+        execution.events.find(
+          event =>
+            event.probe === 'baseline-coverage-gate-green' &&
+            event.attribution?.mutation.probe === 'deleting-tests-without-attribution',
+        ),
+      ).toMatchObject({
+        role: 'control',
+        verdict: 'broken',
+        attribution: { kind: 'unexpected-control' },
+      });
     },
     T,
   );
 
   test(
-    'scenario 5 — a failing baseline marks its whole run untrusted (broken)',
+    'scenario 5 — a failing baseline is attributed without replacing a passing sibling',
     async () => {
       const phantom = await customFeature(
         GATED,
@@ -240,10 +249,16 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       expect(execution.verdicts.get(probeKey({ template: GATED, name: 'phantom' }, 'baseline-gate-red'))).toBe(
         'broken',
       );
-      // The healthy lint baseline shares the untrusted run: `broken`, not `proven`.
+      // The healthy lint baseline remains independently proven.
       expect(execution.verdicts.get(probeKey({ template: GATED, name: 'lint' }, 'baseline-lint-gate-green'))).toBe(
-        'broken',
+        'proven',
       );
+      expect(execution.events.find(event => event.probe === 'baseline-gate-red')).toMatchObject({
+        role: 'baseline',
+        outcome: 'author-failed',
+        verdict: 'broken',
+        exitCode: 12,
+      });
     },
     T,
   );
@@ -255,7 +270,7 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       // declares expectedImpact ['coverage'] must NOT excuse a red `coverage`
       // control that belongs to template B — that same-name feature is a DIFFERENT
       // feature. The cross-template collapse would wrongly report `caught`; the fix
-      // keeps it conservative: `broken`.
+      // keeps the control independently attributable without replacing the mutation.
       const OTHER = 'cyanprint/some-other-template';
       const crossTemplate = await customFeature(
         GATED,
@@ -283,7 +298,14 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
         execution.verdicts.get(
           probeKey({ template: GATED, name: 'tests' }, 'deleting-tests-attributes-only-own-template'),
         ),
-      ).toBe('broken');
+      ).toBe('caught');
+      expect(
+        execution.events.find(
+          event =>
+            event.feature === `${OTHER}#coverage` &&
+            event.attribution?.mutation.probe === 'deleting-tests-attributes-only-own-template',
+        ),
+      ).toMatchObject({ verdict: 'broken', attribution: { kind: 'unexpected-control' } });
     },
     T,
   );
@@ -294,11 +316,11 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       // Regression: expectedImpact must attribute ONLY a legitimate
       // author-level red gate. A control that failed for an infrastructure/validity
       // reason — `op-failed`, `engine-failed`, `inapplicable`, `timeout` — proves
-      // nothing about legitimate overlap and must still untrust the run, EVEN when
+      // nothing about legitimate overlap and remains an unexpected child, EVEN when
       // its feature is listed in expectedImpact. Here the coverage control fails with
       // `op-failed` (a sandbox read of a nonexistent path throws ProbeRepoOpError);
-      // with expectedImpact ['coverage'] the buggy predicate would swallow it as
-      // attributed overlap and report `caught`. The fix keeps it conservative: broken.
+      // with expectedImpact ['coverage'] it still remains an unexpected broken
+      // child, but it cannot replace the mutation's direct verdict.
       const testsFeature = await customFeature(
         GATED,
         'tests',
@@ -328,13 +350,29 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
           run: async (repo) => {
             await repo.read('this-file-does-not-exist-in-the-sandbox.txt');
           },
+        }, {
+          name: 'coverage-gate-marker',
+          description: 'Keeps this gate-like feature eligible as a mutation control source.',
+          kind: 'mutation',
+          run: async () => {},
         }]`,
       );
       const features = [testsFeature, coverageOpFailed];
       const execution = await executeProbeMatrix({ repoPath: repoOf('probe-fixture-gated'), features });
       expect(
         execution.verdicts.get(probeKey({ template: GATED, name: 'tests' }, 'deleting-tests-with-coverage-impact')),
-      ).toBe('broken');
+      ).toBe('caught');
+      expect(
+        execution.events.find(
+          event =>
+            event.probe === 'baseline-op-failed' &&
+            event.attribution?.mutation.probe === 'deleting-tests-with-coverage-impact',
+        ),
+      ).toMatchObject({
+        outcome: 'op-failed',
+        verdict: 'broken',
+        attribution: { kind: 'unexpected-control' },
+      });
     },
     T,
   );

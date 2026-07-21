@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   PROBE_CONTRACT_VERSION,
   ProbeDefinitionSchema,
+  ProbeFeatureIdentitySchema,
   ProbeManifestSchema,
   ProbeRunReportSchema,
   ProbeVerdictSchema,
@@ -51,6 +52,23 @@ describe('probe contract', () => {
 
     // Assert
     expect(actual).toEqual(['tests', 'lint']);
+  });
+
+  test('feature identity preserves known evidence classes and rejects unknown ones', () => {
+    expect(
+      ProbeFeatureIdentitySchema.parse({
+        template: 'cyanprint/probe-fixture-gated',
+        name: 'tests',
+        class: 'smoke',
+      }),
+    ).toEqual({ template: 'cyanprint/probe-fixture-gated', name: 'tests', class: 'smoke' });
+    expect(
+      ProbeFeatureIdentitySchema.safeParse({
+        template: 'cyanprint/probe-fixture-gated',
+        name: 'tests',
+        class: 'unknown',
+      }).success,
+    ).toBe(false);
   });
 
   test('manifest accepts a valid fixture for each resolution origin kind', () => {

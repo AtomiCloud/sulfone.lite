@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import type { ProbeFeatureIdentity, ProbeRunReport } from '@cyanprint/contracts';
+import type { ProbeEvidenceClass, ProbeFeatureIdentity, ProbeRunReport } from '@cyanprint/contracts';
 import { CyanError, PROBE_CONTRACT_VERSION, problem } from '@cyanprint/contracts';
 import {
   checkProbeManifestDrift,
@@ -128,6 +128,7 @@ export async function probeCommand(argv: string[]): Promise<void> {
           : { mode: probeSources.mode, dir: probeSources.dir },
       counts: emptyCounts(),
       report: emptyReport(),
+      events: [],
       note: 'no declared features to probe',
     };
     const reportPath = flagString(flags, 'report');
@@ -178,14 +179,16 @@ export async function probeCommand(argv: string[]): Promise<void> {
         : { mode: probeSources.mode, dir: probeSources.dir },
     counts,
     report: result.report,
+    events: result.events,
     ...(options.keepSandboxes ? { snapshotPath: result.snapshotPath, sandboxes } : {}),
   };
+  const unexpectedControls = result.events.filter(event => event.attribution?.kind === 'unexpected-control');
 
   const reportPath = flagString(flags, 'report');
   if (reportPath) {
     await writeFile(reportPath, JSON.stringify(payload, null, 2), 'utf8');
   }
-  const failed = counts.missed > 0 || counts.broken > 0;
+  const failed = counts.missed > 0 || counts.broken > 0 || unexpectedControls.length > 0;
   if (json) {
     printJson(payload);
   } else {
@@ -201,6 +204,17 @@ export async function probeCommand(argv: string[]): Promise<void> {
       kv('invalid', counts.invalid),
       kv('broken', counts.broken),
     ]);
+    if (unexpectedControls.length > 0) {
+      printSection(
+        'Unexpected control failures',
+        unexpectedControls.map(event =>
+          kv(
+            `${event.feature}/${event.probe}`,
+            `${event.outcome} (exit ${event.exitCode ?? 'signal/engine'}) in run ${event.runIndex}`,
+          ),
+        ),
+      );
+    }
     if (options.keepSandboxes) {
       printSection('Sandboxes (kept)', [
         kv('snapshot', result.snapshotPath),
@@ -252,11 +266,11 @@ async function normalizeProbeSource(dir: string): Promise<string> {
 }
 
 /**
- * Parse the `--features` JSON file: an array of `{template, name}` identities,
+ * Parse the `--features` JSON file: an array of `{template, name, class?}` identities,
  * with bare-string names allowed when the probe source is a template dir whose
  * manifest supplies the owning `owner/name` ref.
  */
-async function readFeatureSet(file: string, sourceDir: string): Promise<ProbeFeatureIdentity[]> {
+export async function readFeatureSet(file: string, sourceDir: string): Promise<ProbeFeatureIdentity[]> {
   const parsed = JSON.parse(await readFile(isAbsolute(file) ? file : resolve(file), 'utf8')) as unknown;
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error(`--features file must contain a non-empty JSON array: ${file}`);
@@ -288,13 +302,26 @@ async function readFeatureSet(file: string, sourceDir: string): Promise<ProbeFea
       typeof (entry as { template?: unknown }).template === 'string' &&
       typeof (entry as { name?: unknown }).name === 'string'
     ) {
-      const identity = entry as { template: string; name: string };
-      features.push({ template: identity.template, name: identity.name });
+      const identity = entry as { template: string; name: string; class?: unknown };
+      if (identity.class !== undefined && !isProbeEvidenceClass(identity.class)) {
+        throw new Error(
+          `--features class must be one of "gate", "smoke", or "presence", got ${JSON.stringify(identity.class)}: ${file}`,
+        );
+      }
+      features.push({
+        template: identity.template,
+        name: identity.name,
+        ...(identity.class === undefined ? {} : { class: identity.class }),
+      });
       continue;
     }
-    throw new Error(`--features entries must be feature names or {"template","name"} objects: ${file}`);
+    throw new Error(`--features entries must be feature names or {"template","name","class"?} objects: ${file}`);
   }
   return features;
+}
+
+function isProbeEvidenceClass(value: unknown): value is ProbeEvidenceClass {
+  return value === 'gate' || value === 'smoke' || value === 'presence';
 }
 
 function buildSelection(

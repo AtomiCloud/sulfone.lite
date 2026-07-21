@@ -113,15 +113,23 @@ export async function runDetachedCommand(args: {
 }
 
 /**
- * Incrementally collect a child-process output pipe into text, with a `cancel`
- * that releases the pipe WITHOUT waiting for EOF — the escape hatch for pipes a
- * kill-surviving descendant still holds open (see the timeout path above). After
- * `cancel`, `text` resolves with everything decoded up to that point.
+ * Incrementally collect a child-process output pipe into text, optionally retaining
+ * only the last `maxBytes`, with a `cancel` that releases the pipe WITHOUT waiting
+ * for EOF — the escape hatch for pipes a kill-surviving descendant still holds open
+ * (see the timeout path above). After `cancel`, `text` resolves with everything
+ * retained up to that point.
  */
-export function collectPipe(stream: ReadableStream<Uint8Array>): { text: Promise<string>; cancel: () => void } {
+export function collectPipe(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes?: number,
+): { text: Promise<string>; cancel: () => void } {
+  if (maxBytes !== undefined && (!Number.isInteger(maxBytes) || maxBytes < 0)) {
+    throw new RangeError(`maxBytes must be a non-negative integer, got ${maxBytes}`);
+  }
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let collected = '';
+  let tail = new Uint8Array();
   const text = (async () => {
     try {
       for (;;) {
@@ -129,12 +137,24 @@ export function collectPipe(stream: ReadableStream<Uint8Array>): { text: Promise
         if (done) {
           break;
         }
-        collected += decoder.decode(value, { stream: true });
+        if (maxBytes === undefined) {
+          collected += decoder.decode(value, { stream: true });
+        } else if (maxBytes === 0) {
+          tail = new Uint8Array();
+        } else if (value.length >= maxBytes) {
+          tail = value.slice(-maxBytes);
+        } else {
+          const retained = Math.min(tail.length, maxBytes - value.length);
+          const next = new Uint8Array(retained + value.length);
+          next.set(tail.subarray(tail.length - retained));
+          next.set(value, retained);
+          tail = next;
+        }
       }
     } catch {
       // Cancelled mid-read: keep what was decoded before the cancel.
     }
-    return collected + decoder.decode();
+    return maxBytes === undefined ? collected + decoder.decode() : decoder.decode(tail);
   })();
   return {
     text,

@@ -51,8 +51,9 @@ export type PlannedProbe = {
 /**
  * One matrix run. The baseline run executes every feature's baseline probes
  * against the untouched snapshot; each mutation run carries exactly ONE fault
- * plus every OTHER feature's baseline probes as in-run controls (FR9: faults
- * never stack, nothing leaks between runs — each run gets a fresh sandbox).
+ * plus every OTHER mutation-bearing feature's baseline probes as in-run controls
+ * (FR9: faults never stack, nothing leaks between runs — each run gets a fresh
+ * sandbox). Baseline-only smoke/presence obligations run once in the baseline run.
  */
 export type ProbeRunPlan =
   | { kind: 'baseline'; baselines: PlannedProbe[] }
@@ -75,7 +76,10 @@ export function buildProbeMatrix(features: ResolvedFeatureProbes[]): ProbeRunPla
         continue;
       }
       const controls = features
-        .filter(other => !sameFeature(other.feature, feature.feature))
+        .filter(
+          other =>
+            !sameFeature(other.feature, feature.feature) && other.probes.some(entry => entry.probe.kind === 'mutation'),
+        )
         .flatMap(other => baselinesOf(other));
       runs.push({
         kind: 'mutation',

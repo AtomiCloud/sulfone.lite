@@ -1,6 +1,11 @@
 import type { ProbeFeatureIdentity, ProbeRunReport } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
-import { executeProbeMatrix, type ProbeExecutionOptions, type ProbeRunRecord } from './executor';
+import {
+  executeProbeMatrix,
+  type ProbeExecutionEvent,
+  type ProbeExecutionOptions,
+  type ProbeRunRecord,
+} from './executor';
 import { buildProbeRunReport } from './manifest';
 import type { ResolvedFeatureProbes } from './matrix';
 import { resolveProbesForTemplate, resolveProbesFromSource, type ProbeOverrideInput } from './resolve';
@@ -38,6 +43,8 @@ export type ProbeSelectionInput = {
 export type ProbeMatrixRunResult = {
   report: ProbeRunReport;
   runs: ProbeRunRecord[];
+  /** Attributed result and bounded diagnostics for every isolated child. */
+  events: ProbeExecutionEvent[];
   /** Retained snapshot path (only when `options.keepSandboxes`). */
   snapshotPath?: string;
 };
@@ -89,6 +96,7 @@ export async function runProbeMatrix(args: {
   return {
     report: buildProbeRunReport(selected, execution.verdicts),
     runs: execution.runs,
+    events: execution.events,
     snapshotPath: execution.snapshotPath,
   };
 }

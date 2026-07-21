@@ -52,6 +52,10 @@ export type ProbeExecResult = {
   stderr: string;
 };
 
+/** Evidence obligation carried by explicit feature-set inputs. */
+export const ProbeEvidenceClassSchema = z.enum(['gate', 'smoke', 'presence']);
+export type ProbeEvidenceClass = z.infer<typeof ProbeEvidenceClassSchema>;
+
 /**
  * The engine-provided repo helper a probe receives as its first `run` argument.
  * Probes NEVER import an implementation of this interface — the engine hands one in,
@@ -90,6 +94,8 @@ export type ProbeRepo = {
 export type ProbeFeatureIdentity = {
   template: string;
   name: string;
+  /** Optional for v4 compatibility; explicit feature files preserve it when supplied. */
+  class?: ProbeEvidenceClass;
 };
 
 /** Invocation context the engine passes to every probe run. */
@@ -231,6 +237,7 @@ export const ProbeFeatureIdentitySchema = z
   .object({
     template: z.string().min(1),
     name: z.string().min(1),
+    class: ProbeEvidenceClassSchema.optional(),
   })
   .strict();
 

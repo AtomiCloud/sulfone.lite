@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Probe } from '@cyanprint/contracts';
+import type { Probe, ProbeEvidenceClass } from '@cyanprint/contracts';
 import { CyanError } from '@cyanprint/contracts';
 import { buildProbeMatrix, mergeProbeRunConfig, probeKey, type ResolvedFeatureProbes } from './matrix';
 import { executeProbeMatrix } from './executor';
@@ -18,9 +18,14 @@ afterAll(async () => {
   await rm(workRoot, { recursive: true, force: true });
 });
 
-function resolvedFeature(template: string, name: string, probes: Probe[]): ResolvedFeatureProbes {
+function resolvedFeature(
+  template: string,
+  name: string,
+  probes: Probe[],
+  evidenceClass?: ProbeEvidenceClass,
+): ResolvedFeatureProbes {
   return {
-    feature: { template, name },
+    feature: { template, name, ...(evidenceClass === undefined ? {} : { class: evidenceClass }) },
     definition: { contractVersion: 1, probes },
     probes: probes.map(probe => ({ probe, origin: { kind: 'local' } })),
   };
@@ -43,7 +48,7 @@ describe('probe matrix shape (AC4)', () => {
         mutation('alpha-m2', () => {}),
       ]),
       resolvedFeature('local/tpl', 'beta', [baseline('beta-base'), mutation('beta-m1', () => {})]),
-      resolvedFeature('local/tpl', 'gamma', [baseline('gamma-base-1'), baseline('gamma-base-2')]),
+      resolvedFeature('local/tpl', 'gamma', [baseline('gamma-base-1'), baseline('gamma-base-2')], 'smoke'),
     ];
     const runs = buildProbeMatrix(features);
 
@@ -63,7 +68,7 @@ describe('probe matrix shape (AC4)', () => {
       if (run.kind !== 'mutation') {
         throw new Error('subsequent runs must be mutation runs');
       }
-      // Exactly one fault; controls are every OTHER feature's baselines.
+      // Exactly one fault; controls are every OTHER mutation-bearing feature's baselines.
       const ownFeature = run.mutation.feature.name;
       expect(run.controls.every(control => control.feature.name !== ownFeature)).toBe(true);
     }
@@ -71,7 +76,8 @@ describe('probe matrix shape (AC4)', () => {
     if (alphaRun?.kind !== 'mutation') {
       throw new Error('alpha-m1 run missing');
     }
-    expect(alphaRun.controls.map(control => control.probe.name)).toEqual(['beta-base', 'gamma-base-1', 'gamma-base-2']);
+    expect(alphaRun.controls.map(control => control.probe.name)).toEqual(['beta-base']);
+    expect(alphaRun.controls.some(control => control.feature.class === 'smoke')).toBe(false);
   });
 });
 

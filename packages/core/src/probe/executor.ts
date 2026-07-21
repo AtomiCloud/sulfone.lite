@@ -1,5 +1,5 @@
 import { availableParallelism } from 'node:os';
-import type { ProbeVerdict } from '@cyanprint/contracts';
+import type { ProbeEvidenceClass, ProbeVerdict } from '@cyanprint/contracts';
 import { mapWithConcurrency } from '../util';
 import { ProbeSetupError, prepareProbeSandboxSource } from './sandbox';
 import { runProbeInSubprocess, type ProbeOutcome } from './probe-process';
@@ -51,11 +51,29 @@ export type ProbeRunRecord = {
   endedAt: number;
 };
 
+/** Durable observation of one isolated probe child, including repeated controls. */
+export type ProbeExecutionEvent = ProbeExecutionSpan & {
+  /** Preserved from explicit feature-set inputs when supplied. */
+  class?: ProbeEvidenceClass;
+  outcome: ProbeOutcome;
+  /** Verdict for this child only; it never replaces a sibling child's verdict. */
+  verdict: ProbeVerdict;
+  exitCode: number | null;
+  stdoutTail: string;
+  stderrTail: string;
+  /** Why a non-passing control was expected or is an independently broken case. */
+  attribution?: {
+    kind: 'expected-impact' | 'unexpected-control';
+    mutation: { feature: string; probe: string };
+  };
+};
+
 export type ProbeMatrixExecution = {
   /** Verdict per probe, keyed by `probeKey(feature, probe.name)`. */
   verdicts: Map<string, ProbeVerdict>;
   runs: ProbeRunRecord[];
   spans: ProbeExecutionSpan[];
+  events: ProbeExecutionEvent[];
   /** The retained snapshot path (only when `keepSandboxes`). */
   snapshotPath?: string;
 };
@@ -90,13 +108,14 @@ export async function executeProbeMatrix(args: {
   } catch (error) {
     if (error instanceof ProbeSetupError) {
       // setup.pre failed: every run is affected, so every probe is `broken`.
-      return { verdicts: allBrokenVerdicts(runs), runs: [], spans: [] };
+      return { verdicts: allBrokenVerdicts(runs), runs: [], spans: [], events: [] };
     }
     throw error;
   }
 
   const verdicts = new Map<string, ProbeVerdict>();
   const spans: ProbeExecutionSpan[] = [];
+  const events: ProbeExecutionEvent[] = [];
   const runRecords: ProbeRunRecord[] = [];
   // `mapWithConcurrency` is `Promise.all`-backed: a rejecting worker settles the whole
   // call immediately while sibling workers keep running in the background. Rethrowing
@@ -110,7 +129,7 @@ export async function executeProbeMatrix(args: {
     await mapWithConcurrency(runs, parallelism, async (run, runIndex) => {
       const startedAt = Date.now();
       try {
-        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, spans, options });
+        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, spans, events, options });
         runRecords.push({ ...record, runIndex, kind: run.kind, startedAt, endedAt: Date.now() });
       } catch (error) {
         firstError ??= error;
@@ -125,10 +144,12 @@ export async function executeProbeMatrix(args: {
     throw firstError;
   }
   runRecords.sort((left, right) => left.runIndex - right.runIndex);
+  events.sort((left, right) => left.runIndex - right.runIndex || left.startedAt - right.startedAt);
   return {
     verdicts,
     runs: runRecords,
     spans,
+    events,
     snapshotPath: options.keepSandboxes ? source.snapshotPath : undefined,
   };
 }
@@ -140,9 +161,10 @@ async function executeRun(args: {
   defaultTimeoutMs: number;
   verdicts: Map<string, ProbeVerdict>;
   spans: ProbeExecutionSpan[];
+  events: ProbeExecutionEvent[];
   options: ProbeExecutionOptions;
 }): Promise<{ mutation?: { feature: string; probe: string }; sandboxPath?: string }> {
-  const { run, runIndex, defaultTimeoutMs, verdicts, spans } = args;
+  const { run, runIndex, defaultTimeoutMs, verdicts, spans, events } = args;
   const mutationLabel =
     run.kind === 'mutation'
       ? { feature: `${run.mutation.feature.template}#${run.mutation.feature.name}`, probe: run.mutation.probe.name }
@@ -164,9 +186,9 @@ async function executeRun(args: {
 
   try {
     if (run.kind === 'baseline') {
-      await executeBaselineRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans });
+      await executeBaselineRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans, events });
     } else {
-      await executeMutationRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans });
+      await executeMutationRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans, events });
     }
   } finally {
     if (!args.options.keepSandboxes) {
@@ -182,33 +204,18 @@ type RunContext = {
   defaultTimeoutMs: number;
   verdicts: Map<string, ProbeVerdict>;
   spans: ProbeExecutionSpan[];
+  events: ProbeExecutionEvent[];
 };
 
 /**
  * The baseline run: every feature's baseline probes against the untouched
- * snapshot. A broken baseline (author failure, sandbox-op failure, or timeout)
- * marks the WHOLE run untrusted: every probe in it is reported `broken` (FR7 —
- * ambiguity always lands on `broken`). `invalid` baselines assert nothing but do
- * not untrust the run.
+ * snapshot. Every child's verdict is independent: a failed baseline is `broken`
+ * with its own event attribution while passing siblings remain `proven`.
  */
 async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' }>, ctx: RunContext): Promise<void> {
-  const outcomes = new Map<string, ProbeOutcome>();
-  let untrusted = false;
   for (const planned of run.baselines) {
-    const outcome = await executeProbe(planned, 'baseline', ctx);
-    outcomes.set(probeKey(planned.feature, planned.probe.name), outcome);
-    if (
-      outcome === 'author-failed' ||
-      outcome === 'op-failed' ||
-      outcome === 'timeout' ||
-      outcome === 'engine-failed'
-    ) {
-      untrusted = true;
-    }
-  }
-  for (const [key, outcome] of outcomes) {
-    const verdict = baselineVerdict(outcome);
-    ctx.verdicts.set(key, untrusted && verdict === 'proven' ? 'broken' : verdict);
+    const event = await executeProbe(planned, 'baseline', ctx);
+    ctx.verdicts.set(probeKey(planned.feature, planned.probe.name), event.verdict);
   }
 }
 
@@ -217,47 +224,47 @@ async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' 
  * as in-run controls against the sabotaged tree. Attribution of a red control:
  * ONLY a legitimate author-level red (`author-failed` — the control's own gate
  * assertion fired) is an attributed overlap when its feature is listed in the
- * mutation's `expectedImpact`; the run then stays trusted. Every other non-pass
+ * mutation's `expectedImpact`; its event is marked `expected-impact`. Every other non-pass
  * outcome — `timeout`, `op-failed`, `engine-failed`, `inapplicable` — is an
  * infrastructure/validity failure OUTSIDE the experiment and can never be
- * attributed away: it marks the run untrusted and the mutation's verdict `broken`,
- * never counted as `caught`, even when the control's feature is in `expectedImpact`
- * (a control that failed to load, hit an unsafe sandbox op, or was inapplicable
- * proves nothing about legitimate overlap — the conservative trust model lands it
- * on `broken`). Controls are skipped when the mutation was `invalid` (the
- * experiment never ran) or already `broken`.
+ * attributed away. A non-passing control is retained as its OWN broken child
+ * event, with its feature/probe and whether it matched `expectedImpact`; it never
+ * rewrites the mutation child's `caught`/`missed` verdict. Controls are skipped
+ * when the mutation was `invalid` (the experiment never ran) or already `broken`.
  *
  * Feature identity is (source template, name): a mutation's bare `expectedImpact`
  * names are its OWN source template's feature names, so the match is scoped to
  * controls from that same template. A same-named feature from a DIFFERENT template
- * is a different feature and is never attributed away — its redness conservatively
- * marks the run `broken` (same-named features must never collapse across templates).
+ * is a different feature and is never attributed away — its event remains an
+ * `unexpected-control` broken case (same-named features must never collapse across templates).
  */
 async function executeMutationRun(run: Extract<ProbeRunPlan, { kind: 'mutation' }>, ctx: RunContext): Promise<void> {
   const key = probeKey(run.mutation.feature, run.mutation.probe.name);
-  const outcome = await executeProbe(run.mutation, 'mutation', ctx);
-  let verdict = mutationVerdict(outcome);
+  const mutationEvent = await executeProbe(run.mutation, 'mutation', ctx);
+  const verdict = mutationEvent.verdict;
 
   if (verdict === 'caught' || verdict === 'missed') {
     const mutationTemplate = run.mutation.feature.template;
     const expectedImpact = new Set(run.mutation.probe.expectedImpact ?? []);
     for (const control of run.controls) {
-      const controlOutcome = await executeProbe(control, 'control', ctx);
-      if (controlOutcome === 'passed') {
+      const controlEvent = await executeProbe(control, 'control', ctx);
+      if (controlEvent.outcome === 'passed') {
         continue;
       }
       // Only an author-level red gate is legitimate expected overlap. `timeout`,
-      // `op-failed`, `engine-failed`, and `inapplicable` are outside-the-experiment
-      // failures that must still untrust the run — they are never attributed away.
+      // `op-failed`, `engine-failed`, and `inapplicable` remain independently
+      // broken controls even when their feature appears in expectedImpact.
       const attributed =
-        controlOutcome === 'author-failed' &&
+        controlEvent.outcome === 'author-failed' &&
         control.feature.template === mutationTemplate &&
         expectedImpact.has(control.feature.name);
-      if (attributed) {
-        continue; // attributed overlap: this control's own gate legitimately reddened.
-      }
-      verdict = 'broken';
-      break;
+      controlEvent.attribution = {
+        kind: attributed ? 'expected-impact' : 'unexpected-control',
+        mutation: {
+          feature: `${run.mutation.feature.template}#${run.mutation.feature.name}`,
+          probe: run.mutation.probe.name,
+        },
+      };
     }
   }
   ctx.verdicts.set(key, verdict);
@@ -277,10 +284,10 @@ async function executeProbe(
   planned: PlannedProbe,
   role: 'baseline' | 'mutation' | 'control',
   ctx: RunContext,
-): Promise<ProbeOutcome> {
+): Promise<ProbeExecutionEvent> {
   const timeoutMs = planned.probe.timeoutMs ?? ctx.defaultTimeoutMs;
   const startedAt = Date.now();
-  const outcome: ProbeOutcome = planned.source
+  const result = planned.source
     ? await runProbeInSubprocess({
         source: planned.source,
         feature: planned.feature,
@@ -288,16 +295,41 @@ async function executeProbe(
         sandboxPath: ctx.sandbox,
         timeoutMs,
       })
-    : 'engine-failed';
-  ctx.spans.push({
+    : {
+        outcome: 'engine-failed' as const,
+        exitCode: null,
+        stdoutTail: '',
+        stderrTail: 'resolved probe source is missing',
+      };
+  const span: ProbeExecutionSpan = {
     runIndex: ctx.runIndex,
     role,
     feature: `${planned.feature.template}#${planned.feature.name}`,
     probe: planned.probe.name,
     startedAt,
     endedAt: Date.now(),
-  });
-  return outcome;
+  };
+  ctx.spans.push(span);
+  const event: ProbeExecutionEvent = {
+    ...span,
+    ...(planned.feature.class === undefined ? {} : { class: planned.feature.class }),
+    outcome: result.outcome,
+    verdict:
+      role === 'mutation'
+        ? mutationVerdict(result.outcome)
+        : role === 'baseline'
+          ? baselineVerdict(result.outcome)
+          : controlVerdict(result.outcome),
+    exitCode: result.exitCode,
+    stdoutTail: result.stdoutTail,
+    stderrTail: result.stderrTail,
+  };
+  ctx.events.push(event);
+  return event;
+}
+
+function controlVerdict(outcome: ProbeOutcome): ProbeVerdict {
+  return outcome === 'passed' ? 'proven' : 'broken';
 }
 
 function baselineVerdict(outcome: ProbeOutcome): ProbeVerdict {

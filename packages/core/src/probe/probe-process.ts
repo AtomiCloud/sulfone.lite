@@ -9,6 +9,17 @@ import type { ProbeSource } from './matrix';
 // executor keeps importing `ProbeOutcome` from its existing entry point.
 export type { ProbeOutcome } from './probe-runner-protocol';
 
+/** Maximum persisted output per stream for one isolated child. */
+export const PROBE_OUTPUT_TAIL_BYTES = 4 * 1024;
+
+/** Complete parent-side observation of one isolated child. */
+export type ProbeProcessResult = {
+  outcome: ProbeOutcome;
+  exitCode: number | null;
+  stdoutTail: string;
+  stderrTail: string;
+};
+
 const RUNNER_PATH = fileURLToPath(new URL('./probe-runner.ts', import.meta.url));
 
 /**
@@ -63,7 +74,7 @@ export async function runProbeInSubprocess(args: {
   probeName: string;
   sandboxPath: string;
   timeoutMs: number;
-}): Promise<ProbeOutcome> {
+}): Promise<ProbeProcessResult> {
   const payload = JSON.stringify({
     source: args.source,
     feature: args.feature,
@@ -73,12 +84,13 @@ export async function runProbeInSubprocess(args: {
   });
   const proc = Bun.spawn(runnerSpawnArgs(payload), {
     stdin: 'ignore',
-    stdout: 'ignore',
+    stdout: 'pipe',
     stderr: 'pipe',
     detached: true,
   });
 
-  const stderrPipe = collectPipe(proc.stderr);
+  const stdoutPipe = collectPipe(proc.stdout, PROBE_OUTPUT_TAIL_BYTES);
+  const stderrPipe = collectPipe(proc.stderr, PROBE_OUTPUT_TAIL_BYTES);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -87,10 +99,14 @@ export async function runProbeInSubprocess(args: {
     // descendant that escaped the group may still hold the runner's inherited
     // stderr pipe open — stop reading it once the kill settled, so the timeout
     // outcome lands at the deadline instead of whenever the escapee exits (FR10).
-    void killProcessTree(proc.pid).then(() => stderrPipe.cancel());
+    void killProcessTree(proc.pid).then(() => {
+      stdoutPipe.cancel();
+      stderrPipe.cancel();
+    });
   }, args.timeoutMs);
 
   let exitCode: number | null;
+  let stdout = '';
   let stderr = '';
   try {
     // Observe the runner's OWN exit independently of its stderr pipe, then cancel
@@ -104,7 +120,7 @@ export async function runProbeInSubprocess(args: {
     // never outlive the runner.
     exitCode = await proc.exited;
     clearTimeout(timer);
-    stderr = await drainPipe(stderrPipe);
+    [stdout, stderr] = await Promise.all([drainPipe(stdoutPipe), drainPipe(stderrPipe)]);
   } finally {
     clearTimeout(timer);
     // Belt-and-suspenders: signal the group again in case the probe backgrounded
@@ -120,7 +136,7 @@ export async function runProbeInSubprocess(args: {
   }
 
   if (timedOut) {
-    return 'timeout';
+    return processResult('timeout', exitCode, stdout, stderr);
   }
   const outcome = exitCode === null ? undefined : OUTCOME_BY_EXIT[exitCode];
   if (!outcome) {
@@ -130,7 +146,34 @@ export async function runProbeInSubprocess(args: {
       `probe-runner for ${args.feature.template}#${args.feature.name}/${args.probeName} exited ${exitCode}: ` +
         stderr.trim(),
     );
-    return 'engine-failed';
+    return processResult('engine-failed', exitCode, stdout, stderr);
   }
-  return outcome;
+  return processResult(outcome, exitCode, stdout, stderr);
+}
+
+function processResult(
+  outcome: ProbeOutcome,
+  exitCode: number | null,
+  stdout: string,
+  stderr: string,
+): ProbeProcessResult {
+  return {
+    outcome,
+    exitCode,
+    stdoutTail: outputTail(stdout),
+    stderrTail: outputTail(stderr),
+  };
+}
+
+/** Keep the last 4 KiB by UTF-8 bytes; a split leading code point decodes safely. */
+function outputTail(value: string): string {
+  const encoded = Buffer.from(value, 'utf8');
+  let tail =
+    encoded.length <= PROBE_OUTPUT_TAIL_BYTES
+      ? value
+      : encoded.subarray(encoded.length - PROBE_OUTPUT_TAIL_BYTES).toString('utf8');
+  while (Buffer.byteLength(tail, 'utf8') > PROBE_OUTPUT_TAIL_BYTES) {
+    tail = tail.slice(1);
+  }
+  return tail;
 }

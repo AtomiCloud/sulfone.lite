@@ -78,7 +78,7 @@ let
     '';
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
-    outputHash = "sha256-s2gY2RdXCvJTaE2EHauq1ZwwgASY0lhFA6siXLAJzZI=";
+    outputHash = "sha256-My1vfRPymP2yuEsepQjKR9P0EVuGQDXauzDNzAe8TRA=";
   };
   # Compile the CLI into a single self-contained binary (bun embeds its runtime),
   # matching the artifact GoReleaser ships for Homebrew/Scoop/nfpm.
