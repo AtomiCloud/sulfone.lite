@@ -183,7 +183,7 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
   );
 
   test(
-    'scenario 4 — a red control is independently broken without replacing a caught mutation',
+    'scenario 4 — should keep a red control independently broken without replacing a caught mutation',
     async () => {
       // Same sabotage as the fixture's deleting-tests mutation, but with the
       // attribution carrier stripped: the red coverage control is independently
@@ -226,7 +226,7 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
   );
 
   test(
-    'scenario 5 — a failing baseline is attributed without replacing a passing sibling',
+    'scenario 5 — should attribute a failing baseline without replacing a passing sibling',
     async () => {
       const phantom = await customFeature(
         GATED,

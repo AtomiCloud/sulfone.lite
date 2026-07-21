@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ProbeEvidenceClass, ProbeFeatureIdentity, ProbeRunReport } from '@cyanprint/contracts';
-import { CyanError, PROBE_CONTRACT_VERSION, problem } from '@cyanprint/contracts';
+import { CyanError, PROBE_CONTRACT_VERSION, ProbeEvidenceClassSchema, problem } from '@cyanprint/contracts';
 import {
   checkProbeManifestDrift,
   declaredFeatureSetForRepo,
@@ -321,7 +321,7 @@ export async function readFeatureSet(file: string, sourceDir: string): Promise<P
 }
 
 function isProbeEvidenceClass(value: unknown): value is ProbeEvidenceClass {
-  return value === 'gate' || value === 'smoke' || value === 'presence';
+  return ProbeEvidenceClassSchema.safeParse(value).success;
 }
 
 function buildSelection(

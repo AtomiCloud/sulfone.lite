@@ -220,7 +220,7 @@ describe('timeout isolation is an absolute boundary', () => {
 });
 
 describe('child diagnostics', () => {
-  test('exit code and the final 4 KiB of stdout/stderr are retained per child', async () => {
+  test('should retain the exit code and final 4 KiB of stdout/stderr per child', async () => {
     const feature = await inlineFeature(
       'diagnostics',
       `[{

@@ -263,7 +263,7 @@ describe('test-flow probe tier (FR8)', () => {
   );
 
   test(
-    'an unexpected broken control fails the case without replacing the caught mutation verdict',
+    'should fail on an unexpected broken control without replacing the caught mutation verdict',
     async () => {
       const dir = await writeSynthetic('synth-unexpected-control', {
         features: ['mutator', 'control'],

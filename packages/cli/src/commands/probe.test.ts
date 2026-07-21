@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe('--features evidence classes', () => {
-  test('preserves gate, smoke, and presence classes from object entries', async () => {
+  test('should preserve gate, smoke, and presence classes from object entries', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-features-'));
     tempDirs.push(dir);
     const file = join(dir, 'features.json');
@@ -32,7 +32,7 @@ describe('--features evidence classes', () => {
     ]);
   });
 
-  test('rejects an unknown class instead of silently dropping it', async () => {
+  test('should reject an unknown class instead of silently dropping it', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-features-'));
     tempDirs.push(dir);
     const file = join(dir, 'features.json');
@@ -41,7 +41,7 @@ describe('--features evidence classes', () => {
     await expect(readFeatureSet(file, dir)).rejects.toThrow('class must be one of');
   });
 
-  test('writes classed per-child exit and output tails into the report artifact', async () => {
+  test('should write classed per-child exit and output tails into the report artifact', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-report-'));
     tempDirs.push(dir);
     const repo = join(dir, 'repo');

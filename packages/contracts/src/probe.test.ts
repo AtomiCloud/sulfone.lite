@@ -54,7 +54,7 @@ describe('probe contract', () => {
     expect(actual).toEqual(['tests', 'lint']);
   });
 
-  test('feature identity preserves known evidence classes and rejects unknown ones', () => {
+  test('feature identity should preserve known evidence classes and reject unknown ones', () => {
     expect(
       ProbeFeatureIdentitySchema.parse({
         template: 'cyanprint/probe-fixture-gated',
