@@ -13,7 +13,7 @@ jobs:
         with:
           auth-bot-app-id: ${{ vars.AUTH_BOT_APP_ID }}
           auth-bot-secret-key: ${{ secrets.AUTH_BOT_SECRET_KEY }}
-      - uses: AtomiCloud/actions.cache-npm@v1
+      - uses: AtomiCloud/actions.cache-npm@v2
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
