@@ -9,6 +9,12 @@ import type { ProbeSource } from './matrix';
 // executor keeps importing `ProbeOutcome` from its existing entry point.
 export type { ProbeOutcome } from './probe-runner-protocol';
 
+export type ProbeProcessResult = {
+  outcome: ProbeOutcome;
+  /** Child diagnostic retained for verdict provenance when the outcome is non-pass. */
+  reason?: string;
+};
+
 const RUNNER_PATH = fileURLToPath(new URL('./probe-runner.ts', import.meta.url));
 
 /**
@@ -63,7 +69,7 @@ export async function runProbeInSubprocess(args: {
   probeName: string;
   sandboxPath: string;
   timeoutMs: number;
-}): Promise<ProbeOutcome> {
+}): Promise<ProbeProcessResult> {
   const payload = JSON.stringify({
     source: args.source,
     feature: args.feature,
@@ -120,7 +126,7 @@ export async function runProbeInSubprocess(args: {
   }
 
   if (timedOut) {
-    return 'timeout';
+    return { outcome: 'timeout', reason: `probe timed out after ${args.timeoutMs}ms` };
   }
   const outcome = exitCode === null ? undefined : OUTCOME_BY_EXIT[exitCode];
   if (!outcome) {
@@ -130,7 +136,28 @@ export async function runProbeInSubprocess(args: {
       `probe-runner for ${args.feature.template}#${args.feature.name}/${args.probeName} exited ${exitCode}: ` +
         stderr.trim(),
     );
-    return 'engine-failed';
+    return {
+      outcome: 'engine-failed',
+      reason: `probe runner exited ${exitCode}: ${stderr.trim() || 'no diagnostic output'}`,
+    };
   }
-  return outcome;
+  if (outcome === 'passed') {
+    return { outcome };
+  }
+  return { outcome, reason: stderr.trim() || defaultOutcomeReason(outcome) };
+}
+
+function defaultOutcomeReason(outcome: Exclude<ProbeOutcome, 'passed'>): string {
+  switch (outcome) {
+    case 'author-failed':
+      return 'probe assertion failed without diagnostic output';
+    case 'op-failed':
+      return 'probe sandbox operation failed without diagnostic output';
+    case 'inapplicable':
+      return 'probe reported that the experiment is inapplicable without a reason';
+    case 'timeout':
+      return 'probe timed out';
+    case 'engine-failed':
+      return 'probe runner infrastructure failed without diagnostic output';
+  }
 }

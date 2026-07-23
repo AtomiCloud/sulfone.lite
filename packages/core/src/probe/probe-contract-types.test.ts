@@ -46,6 +46,17 @@ const parity: {
   contractVersion: true,
 };
 
+const vendoredDefinitionWithExclude: Vendored.ProbeDefinition = {
+  contractVersion: 1,
+  sandbox: {
+    snapshot: 'auto',
+    exclude: ['node_modules/**', '.cache/**'],
+  },
+  probes: [],
+};
+
+const canonicalDefinitionWithExclude: ProbeDefinition = vendoredDefinitionWithExclude;
+
 test('vendored probe contract types are mutually assignable with @cyanprint/contracts', () => {
   // Arrange: the `parity` table above is the subject — a compile-time witness that
   // every vendored type is mutually assignable with its canonical counterpart.
@@ -59,4 +70,8 @@ test('vendored probe contract types are mutually assignable with @cyanprint/cont
   expect(allAssignable).toBe(true);
   // The vendored version pins the literal the engine serves today.
   expect(PROBE_CONTRACT_VERSION).toBe(1);
+});
+
+test('vendored probe definitions accept snapshot exclude globs', () => {
+  expect(canonicalDefinitionWithExclude.sandbox?.exclude).toEqual(['node_modules/**', '.cache/**']);
 });

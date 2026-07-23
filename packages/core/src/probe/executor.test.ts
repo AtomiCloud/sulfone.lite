@@ -467,6 +467,14 @@ describe('setup failures mark affected runs broken', () => {
     // Assert
     expect(verdictOf(execution, 'doomed', 'doomed-base')).toBe('broken');
     expect(verdictOf(execution, 'doomed', 'doomed-mut')).toBe('broken');
+    expect(execution.reasons.get(probeKey({ template: 'local/tpl', name: 'doomed' }, 'doomed-base'))).toEqual({
+      category: 'setup_pre_failed',
+      message: expect.stringContaining('exit 9'),
+    });
+    expect(execution.reasons.get(probeKey({ template: 'local/tpl', name: 'doomed' }, 'doomed-mut'))).toEqual({
+      category: 'setup_pre_failed',
+      message: expect.stringContaining('exit 9'),
+    });
   }, 30_000);
 
   test('a failing setup.post marks the affected runs broken', async () => {
@@ -482,5 +490,9 @@ describe('setup failures mark affected runs broken', () => {
 
     // Assert
     expect(verdictOf(execution, 'doomed-post', 'post-base')).toBe('broken');
+    expect(execution.reasons.get(probeKey({ template: 'local/tpl', name: 'doomed-post' }, 'post-base'))).toEqual({
+      category: 'setup_post_failed',
+      message: expect.stringContaining('exit 3'),
+    });
   }, 30_000);
 });

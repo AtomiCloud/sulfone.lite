@@ -189,23 +189,38 @@ describe('probe contract', () => {
       features: Array<{ probes: Array<{ description: string }> }>;
     };
     multiLineDescription.features[0]!.probes[0]!.description = 'line one\nline two';
+    const brokenWithoutReason = structuredClone(report) as {
+      features: Array<{ probes: Array<{ verdict: string }> }>;
+    };
+    brokenWithoutReason.features[0]!.probes[0]!.verdict = 'broken';
+    const brokenWithReason = structuredClone(brokenWithoutReason) as {
+      features: Array<{ probes: Array<{ reason?: { category: string; message: string } }> }>;
+    };
+    brokenWithReason.features[0]!.probes[0]!.reason = {
+      category: 'setup_pre_failed',
+      message: 'bun install exited 1',
+    };
 
     // Act
     const validResult = ProbeRunReportSchema.safeParse(report).success;
     const badVerdictResult = ProbeRunReportSchema.safeParse(badVerdict).success;
     const multiLineResult = ProbeRunReportSchema.safeParse(multiLineDescription).success;
+    const silentBrokenResult = ProbeRunReportSchema.safeParse(brokenWithoutReason).success;
+    const attributableBrokenResult = ProbeRunReportSchema.safeParse(brokenWithReason).success;
 
     // Assert
     expect(validResult).toBe(true);
     expect(badVerdictResult).toBe(false);
     expect(multiLineResult).toBe(false);
+    expect(silentBrokenResult).toBe(false);
+    expect(attributableBrokenResult).toBe(true);
   });
 
   test('probe definition validates declarative parts and requires run to be a function', () => {
     // Arrange
     const definition: ProbeDefinition = {
       contractVersion: PROBE_CONTRACT_VERSION,
-      sandbox: { snapshot: 'auto', preserve: ['node_modules'] },
+      sandbox: { snapshot: 'auto', preserve: ['node_modules'], exclude: ['.direnv/**'] },
       setup: { pre: ['bun install'] },
       probes: [
         {

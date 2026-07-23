@@ -133,6 +133,8 @@ export type ProbeSandboxConfig = {
   snapshot: 'git' | 'fs' | 'auto';
   /** Paths preserved across snapshot restores (e.g. dependency caches). */
   preserve?: string[];
+  /** Glob patterns omitted from the source snapshot (setup.pre can recreate them). */
+  exclude?: string[];
 };
 
 /** Optional two-phase setup commands run once before the definition's probes. */
@@ -173,6 +175,7 @@ export const ProbeSandboxConfigSchema: z.ZodType<ProbeSandboxConfig> = z
   .object({
     snapshot: z.enum(['git', 'fs', 'auto']),
     preserve: z.array(z.string().min(1)).optional(),
+    exclude: z.array(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -313,8 +316,27 @@ export type ProbeManifest = z.infer<typeof ProbeManifestSchema>;
 // Run report: the manifest shape with a verdict attached to every probe.
 // ---------------------------------------------------------------------------
 
+export const ProbeVerdictReasonSchema = z
+  .object({
+    /** Stable machine-readable failure class (for example `setup_pre_failed`). */
+    category: z.string().min(1),
+    /** The attributable underlying error or explanation. */
+    message: z.string().min(1),
+  })
+  .strict();
+export type ProbeVerdictReason = z.infer<typeof ProbeVerdictReasonSchema>;
+
 const ProbeRunReportProbeSchema = ProbeManifestProbeSchema.safeExtend({
   verdict: ProbeVerdictSchema,
+  reason: ProbeVerdictReasonSchema.optional(),
+}).superRefine((probe, ctx) => {
+  if ((probe.verdict === 'broken' || probe.verdict === 'invalid') && !probe.reason) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['reason'],
+      message: `${probe.verdict} verdicts must include their underlying reason`,
+    });
+  }
 });
 
 const ProbeRunReportFeatureSchema = ProbeManifestFeatureSchema.safeExtend({

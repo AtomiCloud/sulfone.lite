@@ -7,6 +7,7 @@ import { CyanError } from '@cyanprint/contracts';
 import { buildProbeMatrix, mergeProbeRunConfig, probeKey, type ResolvedFeatureProbes } from './matrix';
 import { executeProbeMatrix } from './executor';
 import { resolveProbesFromSource } from './resolve';
+import { applyProbeSelection } from './run-probes';
 
 let workRoot: string;
 
@@ -86,17 +87,25 @@ describe('run config merge', () => {
     expect(() => mergeProbeRunConfig(features)).toThrow(CyanError);
   });
 
-  test('preserve lists union and setup phases concatenate with duplicates run once', () => {
+  test('preserve/exclude lists union and setup phases concatenate with duplicates run once', () => {
     const features = [
       resolvedFeature('local/tpl', 'alpha', [baseline('a')]),
       resolvedFeature('local/tpl', 'beta', [baseline('b')]),
     ];
-    features[0]!.definition.sandbox = { snapshot: 'auto', preserve: ['deps'] };
+    features[0]!.definition.sandbox = { snapshot: 'auto', preserve: ['deps'], exclude: ['node_modules/**'] };
     features[0]!.definition.setup = { pre: ['echo shared'], post: ['echo post-a'] };
-    features[1]!.definition.sandbox = { snapshot: 'git', preserve: ['deps', 'cache'] };
+    features[1]!.definition.sandbox = {
+      snapshot: 'git',
+      preserve: ['deps', 'cache'],
+      exclude: ['node_modules/**', '.direnv/**'],
+    };
     features[1]!.definition.setup = { pre: ['echo shared', 'echo pre-b'] };
     expect(mergeProbeRunConfig(features)).toEqual({
-      sandbox: { snapshot: 'git', preserve: ['deps', 'cache'] },
+      sandbox: {
+        snapshot: 'git',
+        preserve: ['deps', 'cache'],
+        exclude: ['node_modules/**', '.direnv/**'],
+      },
       setup: { pre: ['echo shared', 'echo pre-b'], post: ['echo post-a'] },
     });
   });
@@ -182,4 +191,66 @@ describe('run isolation (AC2)', () => {
     expect(await readFile(join(repo, 'app.txt'), 'utf8')).toBe('healthy\n');
     expect(await Array.fromAsync(new Bun.Glob('sabotage-*.txt').scan({ cwd: repo }))).toEqual([]);
   });
+});
+
+describe('uniform-fold regression — exhaustive selections compose from bounded selections', () => {
+  test('matrix, all-feature, all-probe, and per-feature union keep identical verdict identities', async () => {
+    const repo = join(workRoot, 'fold-regression-repo');
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(repo, 'healthy.txt'), 'healthy\n', 'utf8');
+
+    const sourceDir = join(workRoot, 'fold-regression-source');
+    await mkdir(join(sourceDir, 'probes'), { recursive: true });
+    const pairedDefinition = (label: string) =>
+      `export default { contractVersion: 1, probes: [` +
+      `{ name: 'baseline-green', description: '${label} healthy baseline.', kind: 'baseline', run: () => {} },` +
+      `{ name: 'duplicate-sabotage', description: '${label} duplicate-name mutation.', kind: 'mutation', run: () => {} }` +
+      `] };\n`;
+    await writeFile(join(sourceDir, 'probes/gate.ts'), pairedDefinition('gate'), 'utf8');
+    await writeFile(join(sourceDir, 'probes/smoke.ts'), pairedDefinition('smoke'), 'utf8');
+    await writeFile(
+      join(sourceDir, 'probes/presence.ts'),
+      `export default { contractVersion: 1, probes: [` +
+        `{ name: 'presence-check', description: 'Presence-only healthy row.', kind: 'baseline', run: () => {} }` +
+        `] };\n`,
+      'utf8',
+    );
+    const identities = [
+      { template: 'diene/one', name: 'gate' },
+      { template: 'diene/two', name: 'smoke' },
+      { template: 'diene/three', name: 'presence' },
+    ];
+    const resolved = await resolveProbesFromSource({ sourceDir, features: identities });
+
+    const full = await executeProbeMatrix({ repoPath: repo, features: resolved });
+    const allFeatures = await executeProbeMatrix({
+      repoPath: repo,
+      features: applyProbeSelection(resolved, {
+        features: identities.map(feature => `${feature.template}#${feature.name}`),
+      }),
+    });
+    const allProbes = await executeProbeMatrix({
+      repoPath: repo,
+      features: applyProbeSelection(resolved, { probes: ['duplicate-sabotage', 'presence-check'] }),
+    });
+    const boundedUnion = new Map<string, string>();
+    for (const feature of identities) {
+      const bounded = await executeProbeMatrix({
+        repoPath: repo,
+        features: applyProbeSelection(resolved, { features: [`${feature.template}#${feature.name}`] }),
+      });
+      for (const [key, verdict] of bounded.verdicts) {
+        boundedUnion.set(key, verdict);
+      }
+    }
+    const stable = (verdicts: Map<string, string>) =>
+      [...verdicts].sort(([left], [right]) => left.localeCompare(right));
+
+    expect(stable(full.verdicts)).toEqual(stable(allFeatures.verdicts));
+    expect(stable(full.verdicts)).toEqual(stable(allProbes.verdicts));
+    expect(stable(full.verdicts)).toEqual(stable(boundedUnion));
+    expect([...full.verdicts.values()].filter(verdict => verdict === 'proven')).toHaveLength(3);
+    expect([...full.verdicts.values()].filter(verdict => verdict === 'caught')).toHaveLength(2);
+    expect([...full.verdicts.values()].filter(verdict => verdict === 'broken')).toEqual([]);
+  }, 30_000);
 });

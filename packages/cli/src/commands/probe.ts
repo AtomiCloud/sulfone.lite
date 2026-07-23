@@ -325,6 +325,9 @@ function verdictRows(report: ProbeRunReport): string[] {
     rows.push(`${feature.template}#${feature.name}`);
     for (const probe of feature.probes) {
       rows.push(`  ${kv(probe.verdict, `${probe.name} — ${probe.description}`)}`);
+      if (probe.reason) {
+        rows.push(`    reason [${probe.reason.category}]: ${probe.reason.message}`);
+      }
     }
   }
   return rows;

@@ -109,6 +109,8 @@ export type ProbeSandboxConfig = {
   snapshot: 'git' | 'fs' | 'auto';
   /** Paths preserved across snapshot restores (e.g. dependency caches). */
   preserve?: string[];
+  /** Glob patterns omitted from the source snapshot (setup.pre can recreate them). */
+  exclude?: string[];
 };
 
 /** Optional two-phase setup commands run once before the definition's probes. */
