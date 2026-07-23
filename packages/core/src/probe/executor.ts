@@ -1,8 +1,8 @@
 import { availableParallelism } from 'node:os';
-import type { ProbeVerdict } from '@cyanprint/contracts';
+import type { ProbeVerdict, ProbeVerdictReason } from '@cyanprint/contracts';
 import { mapWithConcurrency } from '../util';
 import { ProbeSetupError, prepareProbeSandboxSource } from './sandbox';
-import { runProbeInSubprocess, type ProbeOutcome } from './probe-process';
+import { runProbeInSubprocess, type ProbeOutcome, type ProbeProcessResult } from './probe-process';
 import {
   buildProbeMatrix,
   mergeProbeRunConfig,
@@ -54,6 +54,8 @@ export type ProbeRunRecord = {
 export type ProbeMatrixExecution = {
   /** Verdict per probe, keyed by `probeKey(feature, probe.name)`. */
   verdicts: Map<string, ProbeVerdict>;
+  /** Required provenance for every `broken`/`invalid` verdict. */
+  reasons: Map<string, ProbeVerdictReason>;
   runs: ProbeRunRecord[];
   spans: ProbeExecutionSpan[];
   /** The retained snapshot path (only when `keepSandboxes`). */
@@ -90,12 +92,20 @@ export async function executeProbeMatrix(args: {
   } catch (error) {
     if (error instanceof ProbeSetupError) {
       // setup.pre failed: every run is affected, so every probe is `broken`.
-      return { verdicts: allBrokenVerdicts(runs), runs: [], spans: [] };
+      const verdicts = allBrokenVerdicts(runs);
+      const reason = setupReason(error);
+      return {
+        verdicts,
+        reasons: new Map([...verdicts.keys()].map(key => [key, reason])),
+        runs: [],
+        spans: [],
+      };
     }
     throw error;
   }
 
   const verdicts = new Map<string, ProbeVerdict>();
+  const reasons = new Map<string, ProbeVerdictReason>();
   const spans: ProbeExecutionSpan[] = [];
   const runRecords: ProbeRunRecord[] = [];
   // `mapWithConcurrency` is `Promise.all`-backed: a rejecting worker settles the whole
@@ -110,7 +120,7 @@ export async function executeProbeMatrix(args: {
     await mapWithConcurrency(runs, parallelism, async (run, runIndex) => {
       const startedAt = Date.now();
       try {
-        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, spans, options });
+        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, reasons, spans, options });
         runRecords.push({ ...record, runIndex, kind: run.kind, startedAt, endedAt: Date.now() });
       } catch (error) {
         firstError ??= error;
@@ -127,6 +137,7 @@ export async function executeProbeMatrix(args: {
   runRecords.sort((left, right) => left.runIndex - right.runIndex);
   return {
     verdicts,
+    reasons,
     runs: runRecords,
     spans,
     snapshotPath: options.keepSandboxes ? source.snapshotPath : undefined,
@@ -139,6 +150,7 @@ async function executeRun(args: {
   runIndex: number;
   defaultTimeoutMs: number;
   verdicts: Map<string, ProbeVerdict>;
+  reasons: Map<string, ProbeVerdictReason>;
   spans: ProbeExecutionSpan[];
   options: ProbeExecutionOptions;
 }): Promise<{ mutation?: { feature: string; probe: string }; sandboxPath?: string }> {
@@ -155,7 +167,9 @@ async function executeRun(args: {
     if (error instanceof ProbeSetupError) {
       // setup.post failed: this run is affected — every probe it carries is `broken`.
       for (const planned of plannedProbesOf(run)) {
-        verdicts.set(probeKey(planned.feature, planned.probe.name), 'broken');
+        const key = probeKey(planned.feature, planned.probe.name);
+        verdicts.set(key, 'broken');
+        args.reasons.set(key, setupReason(error));
       }
       return { mutation: mutationLabel };
     }
@@ -164,9 +178,23 @@ async function executeRun(args: {
 
   try {
     if (run.kind === 'baseline') {
-      await executeBaselineRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans });
+      await executeBaselineRun(run, {
+        runIndex,
+        sandbox: sandbox.path,
+        defaultTimeoutMs,
+        verdicts,
+        reasons: args.reasons,
+        spans,
+      });
     } else {
-      await executeMutationRun(run, { runIndex, sandbox: sandbox.path, defaultTimeoutMs, verdicts, spans });
+      await executeMutationRun(run, {
+        runIndex,
+        sandbox: sandbox.path,
+        defaultTimeoutMs,
+        verdicts,
+        reasons: args.reasons,
+        spans,
+      });
     }
   } finally {
     if (!args.options.keepSandboxes) {
@@ -181,6 +209,7 @@ type RunContext = {
   sandbox: string;
   defaultTimeoutMs: number;
   verdicts: Map<string, ProbeVerdict>;
+  reasons: Map<string, ProbeVerdictReason>;
   spans: ProbeExecutionSpan[];
 };
 
@@ -192,23 +221,34 @@ type RunContext = {
  * not untrust the run.
  */
 async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' }>, ctx: RunContext): Promise<void> {
-  const outcomes = new Map<string, ProbeOutcome>();
-  let untrusted = false;
+  const outcomes = new Map<string, { planned: PlannedProbe; result: ProbeProcessResult }>();
+  const failures: Array<{ planned: PlannedProbe; result: ProbeProcessResult }> = [];
   for (const planned of run.baselines) {
-    const outcome = await executeProbe(planned, 'baseline', ctx);
-    outcomes.set(probeKey(planned.feature, planned.probe.name), outcome);
+    const result = await executeProbe(planned, 'baseline', ctx);
+    outcomes.set(probeKey(planned.feature, planned.probe.name), { planned, result });
     if (
-      outcome === 'author-failed' ||
-      outcome === 'op-failed' ||
-      outcome === 'timeout' ||
-      outcome === 'engine-failed'
+      result.outcome === 'author-failed' ||
+      result.outcome === 'op-failed' ||
+      result.outcome === 'timeout' ||
+      result.outcome === 'engine-failed'
     ) {
-      untrusted = true;
+      failures.push({ planned, result });
     }
   }
-  for (const [key, outcome] of outcomes) {
-    const verdict = baselineVerdict(outcome);
-    ctx.verdicts.set(key, untrusted && verdict === 'proven' ? 'broken' : verdict);
+  for (const [key, { result }] of outcomes) {
+    const verdict = baselineVerdict(result.outcome);
+    const finalVerdict = failures.length > 0 && verdict === 'proven' ? 'broken' : verdict;
+    ctx.verdicts.set(key, finalVerdict);
+    if (finalVerdict === 'invalid') {
+      ctx.reasons.set(key, outcomeReason(result));
+    } else if (verdict === 'broken') {
+      ctx.reasons.set(key, outcomeReason(result, 'baseline_failed'));
+    } else if (finalVerdict === 'broken') {
+      ctx.reasons.set(key, {
+        category: 'baseline_run_untrusted',
+        message: `baseline run was untrusted because ${failures.map(formatFailure).join('; ')}`,
+      });
+    }
   }
 }
 
@@ -235,32 +275,43 @@ async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' 
  */
 async function executeMutationRun(run: Extract<ProbeRunPlan, { kind: 'mutation' }>, ctx: RunContext): Promise<void> {
   const key = probeKey(run.mutation.feature, run.mutation.probe.name);
-  const outcome = await executeProbe(run.mutation, 'mutation', ctx);
-  let verdict = mutationVerdict(outcome);
+  const result = await executeProbe(run.mutation, 'mutation', ctx);
+  let verdict = mutationVerdict(result.outcome);
+  let reason: ProbeVerdictReason | undefined =
+    verdict === 'invalid' || verdict === 'broken' ? outcomeReason(result) : undefined;
 
   if (verdict === 'caught' || verdict === 'missed') {
     const mutationTemplate = run.mutation.feature.template;
     const expectedImpact = new Set(run.mutation.probe.expectedImpact ?? []);
     for (const control of run.controls) {
-      const controlOutcome = await executeProbe(control, 'control', ctx);
-      if (controlOutcome === 'passed') {
+      const controlResult = await executeProbe(control, 'control', ctx);
+      if (controlResult.outcome === 'passed') {
         continue;
       }
       // Only an author-level red gate is legitimate expected overlap. `timeout`,
       // `op-failed`, `engine-failed`, and `inapplicable` are outside-the-experiment
       // failures that must still untrust the run — they are never attributed away.
       const attributed =
-        controlOutcome === 'author-failed' &&
+        controlResult.outcome === 'author-failed' &&
         control.feature.template === mutationTemplate &&
         expectedImpact.has(control.feature.name);
       if (attributed) {
         continue; // attributed overlap: this control's own gate legitimately reddened.
       }
       verdict = 'broken';
+      reason = {
+        category: 'control_failed',
+        message: `control ${control.feature.template}#${control.feature.name}/${control.probe.name} failed: ${
+          controlResult.reason ?? controlResult.outcome
+        }`,
+      };
       break;
     }
   }
   ctx.verdicts.set(key, verdict);
+  if (reason) {
+    ctx.reasons.set(key, reason);
+  }
 }
 
 /**
@@ -277,10 +328,10 @@ async function executeProbe(
   planned: PlannedProbe,
   role: 'baseline' | 'mutation' | 'control',
   ctx: RunContext,
-): Promise<ProbeOutcome> {
+): Promise<ProbeProcessResult> {
   const timeoutMs = planned.probe.timeoutMs ?? ctx.defaultTimeoutMs;
   const startedAt = Date.now();
-  const outcome: ProbeOutcome = planned.source
+  const result: ProbeProcessResult = planned.source
     ? await runProbeInSubprocess({
         source: planned.source,
         feature: planned.feature,
@@ -288,7 +339,7 @@ async function executeProbe(
         sandboxPath: ctx.sandbox,
         timeoutMs,
       })
-    : 'engine-failed';
+    : { outcome: 'engine-failed', reason: 'resolved probe has no isolated runner source' };
   ctx.spans.push({
     runIndex: ctx.runIndex,
     role,
@@ -297,7 +348,7 @@ async function executeProbe(
     startedAt,
     endedAt: Date.now(),
   });
-  return outcome;
+  return result;
 }
 
 function baselineVerdict(outcome: ProbeOutcome): ProbeVerdict {
@@ -338,6 +389,40 @@ function allBrokenVerdicts(runs: ProbeRunPlan[]): Map<string, ProbeVerdict> {
     }
   }
   return verdicts;
+}
+
+function setupReason(error: ProbeSetupError): ProbeVerdictReason {
+  return { category: `setup_${error.phase}_failed`, message: error.message };
+}
+
+function outcomeReason(result: ProbeProcessResult, category?: string): ProbeVerdictReason {
+  return {
+    category: category ?? outcomeCategory(result.outcome),
+    message: result.reason ?? `probe ended with ${result.outcome} without diagnostic output`,
+  };
+}
+
+function outcomeCategory(outcome: ProbeOutcome): string {
+  switch (outcome) {
+    case 'inapplicable':
+      return 'probe_inapplicable';
+    case 'op-failed':
+      return 'sandbox_operation_failed';
+    case 'timeout':
+      return 'probe_timeout';
+    case 'engine-failed':
+      return 'engine_failed';
+    case 'author-failed':
+      return 'probe_assertion_failed';
+    case 'passed':
+      return 'probe_passed';
+  }
+}
+
+function formatFailure(failure: { planned: PlannedProbe; result: ProbeProcessResult }): string {
+  return `${failure.planned.feature.template}#${failure.planned.feature.name}/${failure.planned.probe.name}: ${
+    failure.result.reason ?? failure.result.outcome
+  }`;
 }
 
 function plannedProbesOf(run: ProbeRunPlan): PlannedProbe[] {

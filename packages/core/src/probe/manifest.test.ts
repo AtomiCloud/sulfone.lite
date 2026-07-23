@@ -4,10 +4,11 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { CyanError, ProbeManifestSchema } from '@cyanprint/contracts';
+import { CyanError, ProbeManifestSchema, ProbeRunReportSchema } from '@cyanprint/contracts';
 import { exists, readText, writeText } from '../util';
 import {
   PROBE_MANIFEST_FILE,
+  buildProbeRunReport,
   checkProbeManifestDrift,
   deriveTemplateFeatureSet,
   generateProbeManifest,
@@ -105,6 +106,33 @@ async function writeSynthetic(
 const consumerDir = () => join(templatesRoot, 'synth-mani-consumer');
 
 describe('probe manifest generation (AC9)', () => {
+  test('run reports make silent broken/invalid verdicts impossible', () => {
+    const probe = {
+      name: 'baseline-gate',
+      description: 'The healthy gate passes.',
+      kind: 'baseline' as const,
+      run: () => undefined,
+    };
+    const feature = { template: 'cyanprint/example', name: 'gate' };
+    const resolved = [
+      {
+        feature,
+        definition: { contractVersion: 1, probes: [probe] },
+        probes: [{ probe, origin: { kind: 'local' as const } }],
+      },
+    ];
+    const key = `${feature.template}\u0000${feature.name}\u0000${probe.name}`;
+    // Existing two-argument callers remain compatible; missing provenance still
+    // receives the explicit fallback reason.
+    const report = buildProbeRunReport(resolved, new Map([[key, 'broken']]));
+
+    expect(report.features[0]?.probes[0]?.reason).toEqual({
+      category: 'missing_verdict_provenance',
+      message: 'probe execution produced no attributable verdict/reason',
+    });
+    expect(ProbeRunReportSchema.safeParse(report).success).toBe(true);
+  });
+
   test('the feature set derives from the test profiles’ generations, per-template identity', async () => {
     const features = await deriveTemplateFeatureSet(consumerDir());
     expect(features).toEqual([

@@ -240,10 +240,17 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       expect(execution.verdicts.get(probeKey({ template: GATED, name: 'phantom' }, 'baseline-gate-red'))).toBe(
         'broken',
       );
+      expect(execution.reasons.get(probeKey({ template: GATED, name: 'phantom' }, 'baseline-gate-red'))).toMatchObject({
+        category: 'baseline_failed',
+        message: expect.stringContaining('gate failed'),
+      });
       // The healthy lint baseline shares the untrusted run: `broken`, not `proven`.
       expect(execution.verdicts.get(probeKey({ template: GATED, name: 'lint' }, 'baseline-lint-gate-green'))).toBe(
         'broken',
       );
+      expect(
+        execution.reasons.get(probeKey({ template: GATED, name: 'lint' }, 'baseline-lint-gate-green')),
+      ).toMatchObject({ category: 'baseline_run_untrusted', message: expect.stringContaining('baseline-gate-red') });
     },
     T,
   );
@@ -335,6 +342,9 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       expect(
         execution.verdicts.get(probeKey({ template: GATED, name: 'tests' }, 'deleting-tests-with-coverage-impact')),
       ).toBe('broken');
+      expect(
+        execution.reasons.get(probeKey({ template: GATED, name: 'tests' }, 'deleting-tests-with-coverage-impact')),
+      ).toMatchObject({ category: 'control_failed', message: expect.stringContaining('this-file-does-not-exist') });
     },
     T,
   );
@@ -357,6 +367,12 @@ describe('verdicts + attribution against plan-1 fixtures (AC5)', () => {
       const execution = await executeProbeMatrix({ repoPath: repoOf('probe-fixture-gated'), features: [inapplicable] });
       expect(execution.verdicts.get(probeKey({ template: GATED, name: 'tests' }, 'patch-missing-target'))).toBe(
         'invalid',
+      );
+      expect(execution.reasons.get(probeKey({ template: GATED, name: 'tests' }, 'patch-missing-target'))).toMatchObject(
+        {
+          category: 'sandbox_operation_failed',
+          message: expect.stringContaining('THIS TEXT DOES NOT EXIST ANYWHERE'),
+        },
       );
     },
     T,

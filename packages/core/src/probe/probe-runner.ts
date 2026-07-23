@@ -97,9 +97,11 @@ export async function runProbeRunner(raw: string | undefined): Promise<number> {
     return RUNNER_EXIT.passed;
   } catch (error) {
     if (isProbeInapplicable(error)) {
+      console.error(error instanceof Error ? error.message : String(error));
       return RUNNER_EXIT.inapplicable;
     }
     if (error instanceof ProbeRepoOpError) {
+      console.error(error.stack ?? error.message);
       return RUNNER_EXIT.opFailed;
     }
     if (error instanceof Error && error.stack) {

@@ -10,8 +10,8 @@ A template declares features from `cyan.ts` (`features: ['tests', 'ci']`) and au
 
 - `kind: 'baseline'` proves the healthy repo's gate is green → `proven`.
 - `kind: 'mutation'` applies ONE sabotage and expects red → `caught`; green is the false green → `missed`.
-- `invalid` — the experiment never ran (e.g. `probeInapplicable`, sabotage could not apply); asserts nothing.
-- `broken` — failure outside the experiment (timeout, red baseline, sandbox-op failure); never silently dropped.
+- `invalid` — the experiment never ran (e.g. `probeInapplicable`, sabotage could not apply); asserts nothing and always carries a report reason.
+- `broken` — failure outside the experiment (timeout, red baseline, sandbox-op failure); never silently dropped and always carries its underlying category/message.
 
 ## Standalone command
 
@@ -78,6 +78,30 @@ Per feature, probes resolve in a **fixed, documented** order:
 ## Trust model
 
 The probe sandbox is **state isolation, not privilege isolation**. Each run gets a fresh snapshot-forked copy of the repo so probes cannot corrupt your materialized project or each other's runs — but probe code executes with your privileges, within the exact trust boundary you already accepted by consuming the template (its `cyan.ts`, processors, and post-generation commands run on your machine too). Probing a template you would not generate from is running code you do not trust.
+
+## Sandbox snapshots and large generated artifacts
+
+Each matrix materializes the source once, then derives every probe sandbox from that sealed master snapshot with reflink/CoW clones when the filesystem supports them (and ordinary-copy fallback elsewhere). Git worktrees are archived from their exact committed tree; CyanPrint never recursively copies a live `.git` object store.
+
+A definition can omit expensive paths from source materialization with `sandbox.exclude` globs. The option is additive and defaults to an empty list. Use `setup.pre` to recreate anything probes need inside the sealed snapshot:
+
+```ts
+export default {
+  contractVersion: 1,
+  sandbox: {
+    snapshot: 'auto',
+    exclude: ['node_modules/**', '.direnv/**'],
+  },
+  setup: {
+    pre: ['bun install --frozen-lockfile'],
+  },
+  probes: [
+    /* ... */
+  ],
+};
+```
+
+Ignored files are never force-added to the engine-owned Git snapshot. This keeps dependency caches available on disk when setup creates them without making Git-aware gates traverse those caches as project source.
 
 ## Deliberate decisions
 

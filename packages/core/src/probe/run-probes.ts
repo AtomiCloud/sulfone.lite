@@ -87,7 +87,7 @@ export async function runProbeMatrix(args: {
   const selected = args.selection ? applyProbeSelection(resolved, args.selection) : resolved;
   const execution = await executeProbeMatrix({ repoPath: args.repoPath, features: selected, options: args.options });
   return {
-    report: buildProbeRunReport(selected, execution.verdicts),
+    report: buildProbeRunReport(selected, execution.verdicts, execution.reasons),
     runs: execution.runs,
     snapshotPath: execution.snapshotPath,
   };

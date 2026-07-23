@@ -1,5 +1,12 @@
 import { join } from 'node:path';
-import type { Answers, ProbeFeatureIdentity, ProbeManifest, ProbeRunReport, ProbeVerdict } from '@cyanprint/contracts';
+import type {
+  Answers,
+  ProbeFeatureIdentity,
+  ProbeManifest,
+  ProbeRunReport,
+  ProbeVerdict,
+  ProbeVerdictReason,
+} from '@cyanprint/contracts';
 import { CyanError, PROBE_CONTRACT_VERSION, ProbeManifestSchema, problem } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { createProject } from '../create/create-project';
@@ -129,19 +136,33 @@ export function buildProbeManifest(resolved: ResolvedFeatureProbes[]): ProbeMani
 export function buildProbeRunReport(
   resolved: ResolvedFeatureProbes[],
   verdicts: Map<string, ProbeVerdict>,
+  reasons: Map<string, ProbeVerdictReason> = new Map(),
 ): ProbeRunReport {
   return {
     contractVersion: PROBE_CONTRACT_VERSION,
     features: resolved.map(feature => ({
       template: feature.feature.template,
       name: feature.feature.name,
-      probes: feature.probes.map(entry => ({
-        name: entry.probe.name,
-        description: entry.probe.description,
-        kind: entry.probe.kind,
-        origin: entry.origin,
-        verdict: verdicts.get(probeKey(feature.feature, entry.probe.name)) ?? 'broken',
-      })),
+      probes: feature.probes.map(entry => {
+        const key = probeKey(feature.feature, entry.probe.name);
+        const verdict = verdicts.get(key) ?? 'broken';
+        const reason =
+          reasons.get(key) ??
+          (verdict === 'broken' || verdict === 'invalid'
+            ? {
+                category: 'missing_verdict_provenance',
+                message: 'probe execution produced no attributable verdict/reason',
+              }
+            : undefined);
+        return {
+          name: entry.probe.name,
+          description: entry.probe.description,
+          kind: entry.probe.kind,
+          origin: entry.origin,
+          verdict,
+          ...(reason ? { reason } : {}),
+        };
+      }),
     })),
   };
 }

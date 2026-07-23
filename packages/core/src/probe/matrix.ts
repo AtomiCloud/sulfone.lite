@@ -100,8 +100,8 @@ export function probeKey(feature: ProbeFeatureIdentity, probeName: string): stri
  * The matrix shares one sandbox lifecycle across every feature's probes, so the
  * per-definition sandbox/setup configs must be merged: explicit snapshot
  * strategies must agree (a git-vs-fs conflict is a hard error, not a silent
- * pick), `preserve` is unioned, and setup phases concatenate in feature order
- * with exact-duplicate commands run once.
+ * pick), `preserve` and `exclude` are unioned, and setup phases concatenate in
+ * feature order with exact-duplicate commands run once.
  */
 export function mergeProbeRunConfig(features: ResolvedFeatureProbes[]): {
   sandbox: ProbeSandboxConfig;
@@ -110,6 +110,7 @@ export function mergeProbeRunConfig(features: ResolvedFeatureProbes[]): {
   let snapshot: ProbeSandboxConfig['snapshot'] = 'auto';
   let snapshotOwner: ProbeFeatureIdentity | undefined;
   const preserve: string[] = [];
+  const exclude: string[] = [];
   const pre: string[] = [];
   const post: string[] = [];
   for (const feature of features) {
@@ -133,6 +134,11 @@ export function mergeProbeRunConfig(features: ResolvedFeatureProbes[]): {
         preserve.push(path);
       }
     }
+    for (const pattern of feature.definition.sandbox?.exclude ?? []) {
+      if (!exclude.includes(pattern)) {
+        exclude.push(pattern);
+      }
+    }
     for (const command of feature.definition.setup?.pre ?? []) {
       if (!pre.includes(command)) {
         pre.push(command);
@@ -144,5 +150,5 @@ export function mergeProbeRunConfig(features: ResolvedFeatureProbes[]): {
       }
     }
   }
-  return { sandbox: { snapshot, preserve }, setup: { pre, post } };
+  return { sandbox: { snapshot, preserve, exclude }, setup: { pre, post } };
 }
