@@ -1,3 +1,15 @@
+## [4.9.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.8.0...v4.9.0) (2026-07-23)
+
+
+### ✨ Features ✨
+
+* **probe:** harden sandbox snapshots and diagnostics ([#17](https://github.com/AtomiCloud/sulfone.lite/issues/17)) ([80a37f3](https://github.com/AtomiCloud/sulfone.lite/commit/80a37f38bd28f72847e9e0ce1d1450de91b89f3f)), closes [#14](https://github.com/AtomiCloud/sulfone.lite/issues/14)
+
+
+### 🐛 Bug Fixes 🐛
+
+* **registry:** refresh cyan template seed ([#18](https://github.com/AtomiCloud/sulfone.lite/issues/18)) ([9f72a45](https://github.com/AtomiCloud/sulfone.lite/commit/9f72a457479e4fa6035f1fb96f57f0aba43b51b5)), closes [#17](https://github.com/AtomiCloud/sulfone.lite/issues/17)
+
 ## [4.8.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.7.0...v4.8.0) (2026-07-12)
 
 
