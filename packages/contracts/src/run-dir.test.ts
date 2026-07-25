@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   engineRunPath,
   makeEngineRunDir,
@@ -164,6 +164,37 @@ describe('reapAbandonedEngineRunDirs', () => {
 
     // Only its TTL expires it, so a kept sandbox cannot leak forever either, and the
     // mark goes with it rather than accumulating as litter.
+    expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0, retainedTtlMs: -1 })).toEqual([retained]);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  test('collects a retained mark whose directory something else already removed', async () => {
+    const root = join(workRoot, 'orphan-marks');
+    await mkdir(root, { recursive: true });
+    // A `cyanprint try` output that a test suite (or a person) cleaned up itself: the
+    // reaper never saw the directory go, so nothing would ever collect its mark.
+    const gone = await plantRunDir(root, 'cyanprint-try', process.pid, 'zzz999');
+    await markEngineRunDirRetained(gone);
+    await rm(gone, { recursive: true, force: true });
+    // A mark whose directory is still present must survive, live owner and all.
+    const alive = await plantRunDir(root, 'cyanprint-try', process.pid);
+    await markEngineRunDirRetained(alive);
+    // Not ours: named like a mark, but nothing this module would ever have allocated.
+    await writeFile(join(root, 'notes.retained'), 'someone else\n', 'utf8');
+
+    expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0 })).toEqual([`${gone}.retained`]);
+    expect((await readdir(root)).sort()).toEqual(
+      ['notes.retained', basename(alive), `${basename(alive)}.retained`].sort(),
+    );
+  });
+
+  test('a directory and its mark are collected together, and counted once', async () => {
+    const root = join(workRoot, 'pair');
+    await mkdir(root, { recursive: true });
+    const retained = await plantRunDir(root, 'cyanprint-try', await deadPid());
+    await markEngineRunDirRetained(retained);
+
+    // Expiring the directory must take its mark with it — and report the pair once.
     expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0, retainedTtlMs: -1 })).toEqual([retained]);
     expect(await readdir(root)).toEqual([]);
   });
