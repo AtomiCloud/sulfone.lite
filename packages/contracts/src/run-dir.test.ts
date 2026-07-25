@@ -88,6 +88,20 @@ describe('makeEngineRunDir', () => {
     expect((await stat(dir)).isDirectory()).toBe(true);
   });
 
+  test('an unusable explicit root fails loudly instead of silently relocating the run', async () => {
+    // A file where the root should be: `mkdir` cannot succeed here.
+    const blocked = join(workRoot, 'blocked-root');
+    await writeFile(blocked, 'not a directory\n', 'utf8');
+
+    // Explicit as an argument (sandboxRoot / --out)...
+    await expect(makeEngineRunDir('cyanprint-probe', { root: join(blocked, 'nested') })).rejects.toThrow();
+
+    // ...and explicit as the environment override. Both are the caller's request; the
+    // engine must not quietly write their run state somewhere they never asked for.
+    process.env.CYANPRINT_RUN_DIR = join(blocked, 'nested');
+    await expect(makeEngineRunDir('cyanprint-probe')).rejects.toThrow();
+  });
+
   test('engineRunPath returns a stable, non-pid-scoped child the reaper ignores', async () => {
     const root = join(workRoot, 'stable');
     const path = await engineRunPath('cyanprint-artifact-imports', root);

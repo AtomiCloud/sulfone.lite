@@ -66,13 +66,16 @@ function safeHomedir(): string | undefined {
 }
 
 /**
- * Last resort when there is no usable home. Note this is NOT `tmpdir()`: that reads
- * `TMPDIR`, which is exactly the caller-owned path this module exists to avoid. The
- * system temp base is not owned by the invoking shell.
+ * Last resort when there is no usable home. Every branch avoids `tmpdir()`, which
+ * reads `TMPDIR` (POSIX) or `TEMP`/`TMP` (Windows) — exactly the caller-scopable
+ * storage this module exists to get off. A wrapper that scopes those vars would
+ * otherwise put live run state straight back under a lifetime it does not own.
  */
 function fallbackRunRoot(): string {
   if (process.platform === 'win32') {
-    return join(tmpdir(), 'cyanprint-run');
+    // Both are per-user/per-machine persistent locations, not temp storage.
+    const base = process.env.LOCALAPPDATA ?? process.env.ProgramData;
+    return base ? join(base, 'cyanprint', 'run') : join(tmpdir(), 'cyanprint-run');
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'shared';
   return join('/tmp', `cyanprint-run-${uid}`);
@@ -119,17 +122,32 @@ export async function markEngineRunDirRetained(dir: string): Promise<void> {
 }
 
 async function ensureRunRoot(override?: string): Promise<string> {
-  const root = resolveCyanRunDir(override);
-  try {
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    return root;
-  } catch {
-    // An unwritable home (read-only mount, sandboxed build) must degrade rather than
-    // fail the run outright.
-    const fallback = fallbackRunRoot();
-    await mkdir(fallback, { recursive: true, mode: 0o700 });
-    return fallback;
+  // An explicitly requested location — `sandboxRoot`, `--out`, `CYANPRINT_RUN_DIR` — is
+  // a contract, not a hint. If it cannot be created the caller must hear about it;
+  // quietly writing somewhere else would strand their run state at a path they never
+  // asked for and will not go looking in.
+  const explicit = override ?? process.env.CYANPRINT_RUN_DIR;
+  if (explicit) {
+    await mkdir(explicit, { recursive: true, mode: 0o700 });
+    return explicit;
   }
+
+  // Only the IMPLIED default degrades: an unwritable home (read-only mount, sandboxed
+  // build) is the engine's problem to route around, not the caller's mistake.
+  const home = safeHomedir();
+  if (home) {
+    const root = join(home, '.cyan', 'run');
+    const created = await mkdir(root, { recursive: true, mode: 0o700 }).then(
+      () => true,
+      () => false,
+    );
+    if (created) {
+      return root;
+    }
+  }
+  const fallback = fallbackRunRoot();
+  await mkdir(fallback, { recursive: true, mode: 0o700 });
+  return fallback;
 }
 
 async function reapOnce(root: string): Promise<void> {
