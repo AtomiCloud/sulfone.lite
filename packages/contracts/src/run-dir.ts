@@ -170,8 +170,9 @@ async function reapOnce(root: string): Promise<void> {
 }
 
 /**
- * Remove run state nothing owns any more: directories whose owning pid is gone, and
- * retained output past its TTL. Exported for tests.
+ * Remove run state nothing owns any more: directories whose owning pid is gone,
+ * retained output past its TTL, and retained marks whose directory is already gone.
+ * Exported for tests.
  *
  * Safety is one-directional — anything that cannot be PROVEN abandoned is left alone.
  * Unrecognised names are skipped, a live (or unknowable) owner is skipped, and every
@@ -190,6 +191,32 @@ export async function reapAbandonedEngineRunDirs(
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     if (!entry.isDirectory()) {
+      // A retained mark outlives the directory it describes whenever something OTHER
+      // than this reaper removes that directory — a test suite cleaning up its own
+      // `cyanprint try` output, or a user deleting a kept sandbox by hand. Nothing
+      // would ever collect the leftover mark, so the run root would accumulate empty
+      // files forever: the same unbounded growth the reaper exists to stop, just
+      // slower. Drop a mark once its subject is gone.
+      const subjectName = entry.name.endsWith(RETAINED_MARKER_SUFFIX)
+        ? entry.name.slice(0, -RETAINED_MARKER_SUFFIX.length)
+        : undefined;
+      // Only ever collect marks naming a directory this module would have allocated,
+      // so an unrelated `notes.retained` someone parked here is still not ours.
+      if (subjectName && RUN_DIR_PATTERN.test(subjectName) && !(await pathExists(join(root, subjectName)))) {
+        const marker = join(root, entry.name);
+        // The directory branch below removes its own mark, and that mark may still be
+        // listed in `entries` from before the sweep started — check it is really there
+        // so an already-collected mark is not reported twice.
+        if (
+          (await pathExists(marker)) &&
+          (await rm(marker, { force: true }).then(
+            () => true,
+            () => false,
+          ))
+        ) {
+          reaped.push(marker);
+        }
+      }
       continue;
     }
     const owner = RUN_DIR_PATTERN.exec(entry.name)?.[1];
