@@ -26,8 +26,14 @@ import { join } from 'node:path';
 /** Directory-name shape the reaper recognises as an engine-allocated run dir. */
 const RUN_DIR_PATTERN = /-p(\d+)-[^/]{6}$/;
 
-/** Marks a run dir whose contents are meant to outlive the process that made them. */
-const RETAINED_MARKER = '.cyanprint-retained';
+/**
+ * Suffix of the SIBLING file marking a run dir whose contents are meant to outlive the
+ * process that made them. Deliberately a sibling rather than a file inside the
+ * directory: an allocated dir can be handed to the user as-is (`cyanprint try` writes
+ * the generated project straight into one), and the engine must not leave bookkeeping
+ * inside output somebody else owns.
+ */
+const RETAINED_MARKER_SUFFIX = '.retained';
 
 /**
  * A dead owner's directory is only reaped once it has been untouched for this long.
@@ -109,7 +115,7 @@ export async function engineRunPath(name: string, root?: string): Promise<string
 
 /** Mark an already-allocated run dir as retained output. Best-effort. */
 export async function markEngineRunDirRetained(dir: string): Promise<void> {
-  await writeFile(join(dir, RETAINED_MARKER), '', 'utf8').catch(() => undefined);
+  await writeFile(`${dir}${RETAINED_MARKER_SUFFIX}`, '', 'utf8').catch(() => undefined);
 }
 
 async function ensureRunRoot(override?: string): Promise<string> {
@@ -167,8 +173,9 @@ export async function reapAbandonedEngineRunDirs(
     if (!info) {
       continue;
     }
+    const marker = `${dir}${RETAINED_MARKER_SUFFIX}`;
     const age = now - info.mtimeMs;
-    const retained = await pathExists(join(dir, RETAINED_MARKER));
+    const retained = await pathExists(marker);
     const expired = retained ? age > retainedTtlMs : !isProcessAlive(Number(owner)) && age > graceMs;
     if (!expired) {
       continue;
@@ -179,6 +186,7 @@ export async function reapAbandonedEngineRunDirs(
         () => false,
       )
     ) {
+      await rm(marker, { force: true }).catch(() => undefined);
       reaped.push(dir);
     }
   }

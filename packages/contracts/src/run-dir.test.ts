@@ -140,12 +140,18 @@ describe('reapAbandonedEngineRunDirs', () => {
     const retained = await plantRunDir(root, 'cyanprint-try', await deadPid());
     await markEngineRunDirRetained(retained);
 
+    // The mark is a SIBLING: `cyanprint try` hands this directory to the user as their
+    // generated project, so the engine must not leave bookkeeping inside it.
+    expect(await readdir(retained)).toEqual(['state.txt']);
+
     // The owner is long gone, but kept output is evidence — not abandoned state.
     expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0 })).toEqual([]);
     expect((await stat(retained)).isDirectory()).toBe(true);
 
-    // Only its TTL expires it, so a kept sandbox cannot leak forever either.
+    // Only its TTL expires it, so a kept sandbox cannot leak forever either, and the
+    // mark goes with it rather than accumulating as litter.
     expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0, retainedTtlMs: -1 })).toEqual([retained]);
+    expect(await readdir(root)).toEqual([]);
   });
 
   test('a missing run root is not an error — a sweep never fails a run', async () => {
