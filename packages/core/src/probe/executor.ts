@@ -1,5 +1,6 @@
 import { availableParallelism } from 'node:os';
 import type { ProbeVerdict, ProbeVerdictReason } from '@cyanprint/contracts';
+import { markEngineRunDirRetained } from '@cyanprint/contracts/run-dir';
 import { mapWithConcurrency } from '../util';
 import { ProbeSetupError, prepareProbeSandboxSource } from './sandbox';
 import { runProbeInSubprocess, type ProbeOutcome, type ProbeProcessResult } from './probe-process';
@@ -127,7 +128,12 @@ export async function executeProbeMatrix(args: {
       }
     });
   } finally {
-    if (!options.keepSandboxes) {
+    if (options.keepSandboxes) {
+      // Retained sandboxes are evidence for a human to read after this process is gone,
+      // so mark them: the run-dir reaper treats an unmarked root whose owner has exited
+      // as abandoned state and would otherwise delete exactly what NFC3 kept.
+      await markEngineRunDirRetained(source.root);
+    } else {
       await source.dispose();
     }
   }

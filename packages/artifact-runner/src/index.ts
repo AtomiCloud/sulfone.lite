@@ -12,10 +12,10 @@ import {
   stat,
   symlink,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertRuntimeExportArity, type KindedArtifactRef, type VfsFile } from '@cyanprint/contracts';
+import { engineRunPath, makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { overlayFiles, readVfsFiles, writeVfsFiles } from './fs-utils';
 import { createPluginHelper, createProcessorFsHelper } from './helpers';
 import type { Plugin, Processor, ResolvedFile, Resolver, ResolverOutput } from './sdk-types';
@@ -69,7 +69,7 @@ export async function loadArtifactExport<T>(path: string, exportName: string, ca
 
 async function materializeImportPath(path: string, cacheKey: string): Promise<string> {
   const sourceDir = dirname(path);
-  const importsRoot = join(tmpdir(), 'cyanprint-artifact-imports');
+  const importsRoot = await engineRunPath('cyanprint-artifact-imports');
   const targetDir = join(importsRoot, cacheKey);
   await cleanStaleImportDirs(importsRoot, cacheKey);
   await mkdir(targetDir, { recursive: true });
@@ -323,7 +323,7 @@ async function invokeFolderArtifact(args: {
 }
 
 async function mkTempRoot(prefix: string): Promise<{ container: string; root: string }> {
-  const container = await mkdtemp(join(tmpdir(), `${prefix}container-`));
+  const container = await makeEngineRunDir(`${prefix}container`);
   const root = join(container, 'work');
   await mkdir(root);
   return { container, root };

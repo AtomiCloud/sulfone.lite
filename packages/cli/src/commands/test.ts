@@ -1,6 +1,6 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { loadManifest, runArtifactTests, runTemplateTest } from '@cyanprint/core';
 import { parseFlags, flagBool, flagString, parseParallel } from '../args';
 import { failure, kv, printJson, printSection, success } from '../ui';
@@ -17,7 +17,7 @@ export async function testCommand(argv: string[]): Promise<void> {
   const explicitOut = flagString(flags, 'out');
   const tempOut =
     !explicitOut && (manifest.kind === 'template' || manifest.kind === 'template-group')
-      ? await mkdtemp(join(tmpdir(), 'cyanprint-test-'))
+      ? await makeEngineRunDir('cyanprint-test')
       : undefined;
   let report;
   try {

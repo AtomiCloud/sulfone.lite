@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { resolveCyanRunDir } from '@cyanprint/contracts/run-dir';
 import YAML from 'yaml';
 import {
   activeTemplates,
@@ -374,9 +375,9 @@ describe('safe output paths', () => {
 });
 
 describe('temp session', () => {
-  test('creates cyanprint-session directory under platform temp root', async () => {
+  test('creates cyanprint-session directory under the engine-owned run root', async () => {
     const session = await createTempSession();
-    expect(session.path.startsWith(join(tmpdir(), 'cyanprint-session-'))).toBe(true);
+    expect(session.path.startsWith(join(resolveCyanRunDir(), 'cyanprint-session-'))).toBe(true);
     await session.cleanup();
   });
 
@@ -398,7 +399,7 @@ describe('temp session', () => {
       if (typeof sessionPath !== 'string') {
         throw new Error('script did not return a session path');
       }
-      expect(sessionPath.startsWith(join(tmpdir(), 'cyanprint-session-'))).toBe(true);
+      expect(sessionPath.startsWith(join(resolveCyanRunDir(), 'cyanprint-session-'))).toBe(true);
       expect(await Bun.file(sessionPath).exists()).toBe(false);
     } finally {
       await rm(scriptDir, { recursive: true, force: true });
@@ -420,7 +421,7 @@ describe('temp session', () => {
       );
       await expect(executeCyanScript(scriptPath, {}, {}, false)).rejects.toThrow('boom');
       const sessionPath = await Bun.file(markerPath).text();
-      expect(sessionPath.startsWith(join(tmpdir(), 'cyanprint-session-'))).toBe(true);
+      expect(sessionPath.startsWith(join(resolveCyanRunDir(), 'cyanprint-session-'))).toBe(true);
       expect(await Bun.file(sessionPath).exists()).toBe(false);
     } finally {
       await rm(scriptDir, { recursive: true, force: true });

@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ProbeDefinition } from '@cyanprint/contracts';
 import { CyanError, PROBE_CONTRACT_VERSION, ProbeDefinitionSchema, problem } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
 import { isRecord } from '../util';
 
@@ -84,7 +84,7 @@ export async function importProbeModule(file: string, bundled: boolean): Promise
   if (!bundled) {
     return (await import(`${pathToFileURL(file).href}?cyanprint=${Date.now()}`)) as { default?: unknown };
   }
-  const outDir = await mkdtemp(join(tmpdir(), 'cyanprint-probe-bundle-'));
+  const outDir = await makeEngineRunDir('cyanprint-probe-bundle');
   const output = join(outDir, 'probe.mjs');
   try {
     // No `kind` → no runtime-export-arity validation: a probe module default-exports

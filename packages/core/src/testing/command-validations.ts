@@ -1,7 +1,7 @@
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { exists } from '../util';
 
 export type CommandValidation =
@@ -96,8 +96,7 @@ async function createLocalCyanprintBin(): Promise<string | undefined> {
   if (!(await exists(cliPath))) {
     return undefined;
   }
-  const binDir = join(tmpdir(), `cyanprint-validation-bin-${process.pid}-${Date.now()}`);
-  await mkdir(binDir, { recursive: true });
+  const binDir = await makeEngineRunDir('cyanprint-validation-bin');
   const shim = join(binDir, 'cyanprint');
   await writeFile(shim, `#!/bin/sh\nexec bun run ${shellQuote(cliPath)} "$@"\n`, 'utf8');
   await chmod(shim, 0o755);

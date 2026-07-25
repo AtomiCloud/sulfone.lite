@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { VfsFile } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { comparePaths, decodeText, pruneEmptyDirs, safeJoin, writeVfsFile } from '../util';
 
 export type GitThreeWayMergeResult = {
@@ -24,7 +24,7 @@ export async function gitThreeWayMerge(args: {
   ours: VfsFile[];
   theirs: VfsFile[];
 }): Promise<GitThreeWayMergeResult> {
-  const repo = await mkdtemp(join(tmpdir(), 'cyanprint-merge-'));
+  const repo = await makeEngineRunDir('cyanprint-merge');
   try {
     await git(repo, ['init', '-q', '-b', 'base']);
     await git(repo, ['config', 'user.email', 'cyanprint@localhost']);
