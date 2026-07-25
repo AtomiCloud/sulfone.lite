@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -75,7 +75,17 @@ function fallbackRunRoot(): string {
   if (process.platform === 'win32') {
     // Both are per-user/per-machine persistent locations, not temp storage.
     const base = process.env.LOCALAPPDATA ?? process.env.ProgramData;
-    return base ? join(base, 'cyanprint', 'run') : join(tmpdir(), 'cyanprint-run');
+    if (!base) {
+      // Reaching here means no usable home AND neither persistent base — an environment
+      // too stripped to guess in. Falling through to `tmpdir()` would silently reinstate
+      // the very failure this module exists to prevent, so ask for the one thing that
+      // resolves it unambiguously.
+      throw new Error(
+        'cyanprint found no durable location for run state: HOME, LOCALAPPDATA and ProgramData are all unusable. ' +
+          'Set CYANPRINT_RUN_DIR to a directory whose lifetime you control.',
+      );
+    }
+    return join(base, 'cyanprint', 'run');
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'shared';
   return join('/tmp', `cyanprint-run-${uid}`);
