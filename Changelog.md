@@ -1,3 +1,10 @@
+## [4.9.2](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.1...v4.9.2) (2026-07-25)
+
+
+### 🐛 Bug Fixes 🐛
+
+* **probe:** collect retained marks whose directory is already gone ([#26](https://github.com/AtomiCloud/sulfone.lite/issues/26)) ([9aea789](https://github.com/AtomiCloud/sulfone.lite/commit/9aea789a5f64987a6ffe3d9ab5fec9ea64967fb9))
+
 ## [4.9.1](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.0...v4.9.1) (2026-07-25)
 
 
