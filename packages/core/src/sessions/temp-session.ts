@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 
 export type TempSession = {
   path: string;
@@ -8,7 +8,7 @@ export type TempSession = {
 };
 
 export async function createTempSession(): Promise<TempSession> {
-  const path = await mkdtemp(join(tmpdir(), 'cyanprint-session-'));
+  const path = await makeEngineRunDir('cyanprint-session');
   return {
     path,
     cleanup: () => rm(path, { recursive: true, force: true }),

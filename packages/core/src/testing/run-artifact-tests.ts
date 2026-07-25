@@ -1,5 +1,4 @@
 import { basename, dirname, join, relative } from 'node:path';
-import { tmpdir } from 'node:os';
 import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import YAML from 'yaml';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
@@ -11,6 +10,7 @@ import {
   type ResolvedFile,
 } from '@cyanprint/artifact-runner';
 import type { ArtifactKind, CyanManifest, FileOrigin, VfsFile } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { loadManifest } from '../manifest/load-manifest';
 import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, sha256, writeText } from '../util';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
@@ -72,7 +72,7 @@ export async function runArtifactTests(args: {
   }
 
   const testCases = await loadArtifactTestCases(args.artifactDir, manifest.kind, args.testsDir);
-  const runtimeDir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-test-'));
+  const runtimeDir = await makeEngineRunDir('cyanprint-artifact-test');
   try {
     const runtimeFile = await buildRuntime(args.artifactDir, manifest, runtimeDir);
     const bundle = await artifactBundle(manifest, runtimeFile);
@@ -507,7 +507,7 @@ async function runCommandsAgainstFiles(files: VfsFile[], commands: CommandValida
   if (commands.length === 0) {
     return undefined;
   }
-  const root = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-command-'));
+  const root = await makeEngineRunDir('cyanprint-artifact-command');
   try {
     await writeFileTree(root, files);
     return await runCommandValidations(root, commands);

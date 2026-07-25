@@ -20,6 +20,7 @@
       "@cyanprint/artifact-bundler": ["packages/artifact-bundler/src/index.ts"],
       "@cyanprint/artifact-runner": ["packages/artifact-runner/src/index.ts"],
       "@cyanprint/contracts": ["packages/contracts/src/index.ts"],
+      "@cyanprint/contracts/run-dir": ["packages/contracts/src/run-dir.ts"],
       "@cyanprint/core": ["packages/core/src/index.ts"],
       "@cyanprint/registry-client": ["packages/registry-client/src/index.ts"],
       "@cyanprint/sdk": ["packages/artifact-runner/src/sdk-types.ts"],

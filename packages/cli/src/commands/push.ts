@@ -1,5 +1,4 @@
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadManifest, runArtifactTests, runTemplateTest, safeJoin } from '@cyanprint/core';
 import { RegistryClient } from '@cyanprint/registry-client';
@@ -9,6 +8,7 @@ import {
   type CyanManifest,
   type ResolvedDependencyPin,
 } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { buildBundle } from '@cyanprint/artifact-bundler';
 import { parseFlags, flagBool, flagString } from '../args';
 import { createArtifactTextObject, createTemplateArchivePayload } from '../local-object-package';
@@ -194,7 +194,7 @@ async function runPushTests(target: string, manifest: CyanManifest): Promise<{ f
     return { failed: 0 };
   }
   if (manifest.kind === 'template' || manifest.kind === 'template-group') {
-    const outDir = await mkdtemp(join(tmpdir(), 'cyanprint-push-test-'));
+    const outDir = await makeEngineRunDir('cyanprint-push-test');
     try {
       return await runTemplateTest({
         template: target,

@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import YAML from 'yaml';
 import { assertRuntimeExportArity, parseCyanManifest } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 
 export type BundleResult = {
   runtimeFile: string;
@@ -34,8 +34,7 @@ export async function buildBundle(args: {
   await stat(manifestPath);
   await stat(readme);
   await stat(entry);
-  const temporaryOutDir =
-    args.dryRun || args.temporary ? await mkdtemp(join(tmpdir(), 'cyanprint-bundle-')) : undefined;
+  const temporaryOutDir = args.dryRun || args.temporary ? await makeEngineRunDir('cyanprint-bundle') : undefined;
   try {
     const runtimeFile = temporaryOutDir ? join(temporaryOutDir, basename(out)) : out;
     await compileRuntimeBundle({ entrypoint: entry, output: runtimeFile, kind: manifest.kind });
@@ -117,7 +116,7 @@ export async function compileRuntimeBundle(args: {
 }): Promise<void> {
   await mkdir(dirname(args.output), { recursive: true });
   await rm(args.output, { force: true });
-  const tempOut = await mkdtemp(join(tmpdir(), 'cyanprint-bundle-'));
+  const tempOut = await makeEngineRunDir('cyanprint-bundle');
   try {
     const result = await Bun.build({
       entrypoints: [args.entrypoint],

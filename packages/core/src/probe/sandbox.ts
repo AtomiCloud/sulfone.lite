@@ -13,9 +13,9 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ProbeSandboxConfig, ProbeSetupConfig } from '@cyanprint/contracts';
+import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { assertRootSafeDelete, exists, safeJoin } from '../util';
 import { runDetachedCommand } from './spawn';
 
@@ -68,7 +68,12 @@ export async function prepareProbeSandboxSource(args: {
   repoPath: string;
   sandbox?: ProbeSandboxConfig;
   setup?: ProbeSetupConfig;
-  /** Parent directory for the sandbox tree; a temp dir is created when omitted. */
+  /**
+   * Parent directory for the sandbox tree. When omitted the engine allocates one
+   * under its OWN run root — never the caller's `TMPDIR`, whose lifetime belongs to
+   * the invoking shell and which has been observed deleting live run state mid-run
+   * (see `@cyanprint/contracts/run-dir`).
+   */
   sandboxRoot?: string;
   /** Timeout applied to each setup command (hangs become loud failures, FR10). */
   commandTimeoutMs?: number;
@@ -76,9 +81,7 @@ export async function prepareProbeSandboxSource(args: {
   if (args.sandboxRoot) {
     await mkdir(args.sandboxRoot, { recursive: true });
   }
-  const root = args.sandboxRoot
-    ? await mkdtemp(join(args.sandboxRoot, 'cyanprint-probe-'))
-    : await mkdtemp(join(tmpdir(), 'cyanprint-probe-'));
+  const root = await makeEngineRunDir('cyanprint-probe', { root: args.sandboxRoot });
   try {
     return await prepareInRoot(root, args);
   } catch (error) {
@@ -97,7 +100,7 @@ async function prepareInRoot(
   },
 ): Promise<ProbeSandboxSource> {
   const requested = args.sandbox?.snapshot ?? 'auto';
-  const strategy: 'git' | 'fs' = requested === 'auto' ? ((await gitUsable()) ? 'git' : 'fs') : requested;
+  const strategy: 'git' | 'fs' = requested === 'auto' ? ((await gitUsable(root)) ? 'git' : 'fs') : requested;
   const preserve = args.sandbox?.preserve ?? [];
   const exclude = args.sandbox?.exclude ?? [];
 
@@ -187,11 +190,13 @@ async function runSetupPhase(
   }
 }
 
-/** `auto` picks git when a usable git binary is on PATH, else falls back to fs. */
-async function gitUsable(): Promise<boolean> {
-  const result = await runDetachedCommand({ command: 'git --version', cwd: tmpdir(), timeoutMs: 10_000 }).catch(
-    () => undefined,
-  );
+/**
+ * `auto` picks git when a usable git binary is on PATH, else falls back to fs. The
+ * probe runs in the engine-owned sandbox root rather than the caller's temp dir: a
+ * `cwd` that an unrelated shell can delete makes the spawn itself fail.
+ */
+async function gitUsable(cwd: string): Promise<boolean> {
+  const result = await runDetachedCommand({ command: 'git --version', cwd, timeoutMs: 10_000 }).catch(() => undefined);
   return result !== undefined && !result.timedOut && result.exitCode === 0;
 }
 
@@ -649,7 +654,10 @@ async function restoreGitSandbox(
     await assertRootSafeDelete(snapshotPath, relativePath);
   }
 
-  const parking = await mkdtemp(join(tmpdir(), 'cyanprint-probe-preserve-'));
+  // Parked beside the sandbox, inside the engine-owned root: the caller's temp dir is
+  // neither ours to keep alive nor guaranteed to be on the same filesystem, and the
+  // parking step MOVES paths out of the sandbox (a cross-device `rename` is `EXDEV`).
+  const parking = await mkdtemp(join(dirname(runPath), 'preserve-'));
   try {
     const parked: Array<{ relative: string; parkedAt: string }> = [];
     for (const [index, relativePath] of preserve.entries()) {
@@ -810,7 +818,10 @@ async function restoreFsSandbox(runPath: string, snapshotPath: string, preserve:
     // in the snapshot would make the write-back `rm`/`rename` escape the same way.
     await assertRootSafeDelete(snapshotPath, relativePath);
   }
-  const parking = await mkdtemp(join(tmpdir(), 'cyanprint-probe-preserve-'));
+  // Parked beside the sandbox, inside the engine-owned root: the caller's temp dir is
+  // neither ours to keep alive nor guaranteed to be on the same filesystem, and the
+  // parking step MOVES paths out of the sandbox (a cross-device `rename` is `EXDEV`).
+  const parking = await mkdtemp(join(dirname(runPath), 'preserve-'));
   try {
     const parked: Array<{ relative: string; parkedAt: string }> = [];
     for (const [index, relativePath] of preserve.entries()) {
