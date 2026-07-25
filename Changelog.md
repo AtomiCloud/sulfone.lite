@@ -1,3 +1,10 @@
+## [4.9.1](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.0...v4.9.1) (2026-07-25)
+
+
+### 🐛 Bug Fixes 🐛
+
+* **probe:** own the run-state root instead of the caller TMPDIR ([#25](https://github.com/AtomiCloud/sulfone.lite/issues/25)) ([fa776a4](https://github.com/AtomiCloud/sulfone.lite/commit/fa776a4a0c529c02c46c0590873275f64ed3b502)), closes [#24](https://github.com/AtomiCloud/sulfone.lite/issues/24)
+
 ## [4.9.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.8.0...v4.9.0) (2026-07-23)
 
 
