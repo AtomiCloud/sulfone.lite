@@ -20,7 +20,7 @@ jobs:
       - nscloud-cache-size-50gb
       - nscloud-cache-tag-atomi-nix-store-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: AtomiCloud/actions.setup-nix@v3
