@@ -25,6 +25,7 @@ import {
   readMergeOurs,
   readProjectFiles,
   migrateGeneratedState,
+  readProcessorCache,
   resolveCyanCacheDir,
   resolveLayers,
   runArtifactTests,
@@ -34,6 +35,7 @@ import {
   traceProject,
   updateProject,
   writeGeneratedState,
+  writeProcessorCache,
 } from './index';
 
 const root = process.cwd();
@@ -4065,6 +4067,31 @@ describe('artifact tests (runArtifactTests)', () => {
 });
 
 describe('processor output cache', () => {
+  test('concurrent writes of the same key in one process do not collide on the staging file', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'cyanprint-pcache-concurrent-'));
+    try {
+      const files = [{ path: 'a.txt', content: 'a' }];
+      await Promise.all(Array.from({ length: 16 }, () => writeProcessorCache({ key: 'k1', files, cacheDir })));
+      expect(await readProcessorCache({ key: 'k1', cacheDir })).toEqual(files);
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a cache write failure is best-effort and never throws', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'cyanprint-pcache-unwritable-'));
+    try {
+      // A regular file where the cache root should be makes every mkdir/write fail.
+      await writeFile(join(cacheDir, 'processor-output'), 'not a directory');
+      await expect(
+        writeProcessorCache({ key: 'k1', files: [{ path: 'a.txt', content: 'a' }], cacheDir }),
+      ).resolves.toBeUndefined();
+      expect(await readProcessorCache({ key: 'k1', cacheDir })).toBeUndefined();
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
   test(
     'identical hermetic inputs hit the cache; bypassCache skips reads but still writes',
     async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { VfsFile } from '@cyanprint/contracts';
@@ -46,11 +47,18 @@ export async function readProcessorCache(args: { key: string; cacheDir?: string 
 export async function writeProcessorCache(args: { key: string; files: VfsFile[]; cacheDir?: string }): Promise<void> {
   const root = processorCacheDir(args.cacheDir);
   const path = entryPath(root, args.key);
-  await mkdir(dirname(path), { recursive: true });
-  // Atomic replace: a concurrent reader must never observe a partial JSON file.
-  const staging = `${path}.${process.pid}.tmp`;
-  await Bun.write(staging, JSON.stringify({ files: args.files }));
-  await rename(staging, path);
+  // Best-effort: a read-only or full cache must degrade to a miss, never fail the create.
+  // The staging name is unique per write (concurrent test cases share one pid).
+  const staging = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    // Atomic replace: a concurrent reader must never observe a partial JSON file.
+    await Bun.write(staging, JSON.stringify({ files: args.files }));
+    await rename(staging, path);
+  } catch {
+    await rm(staging, { force: true }).catch(() => undefined);
+    return;
+  }
   await evictStaleProcessorCacheEntries(root, args.key);
 }
 
