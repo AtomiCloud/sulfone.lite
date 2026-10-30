@@ -706,7 +706,7 @@ describe('pin integrity cache bundled artifact', () => {
   });
 });
 
-describe('executable file mode', () => {
+describe.skipIf(process.platform === 'win32')('executable file mode', () => {
   const processorBundle = async (
     dir: string,
     source: string,

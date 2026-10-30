@@ -4808,7 +4808,7 @@ describe('trust store', () => {
   });
 });
 
-describe('executable file mode', () => {
+describe.skipIf(process.platform === 'win32')('executable file mode', () => {
   const isExecutable = async (path: string): Promise<boolean> => ((await stat(path)).mode & 0o100) !== 0;
   const isWorldWritable = async (path: string): Promise<boolean> => ((await stat(path)).mode & 0o002) !== 0;
 

@@ -1303,34 +1303,37 @@ describe('local object package safety', () => {
     }
   });
 
-  test('template archives carry the executable bit through pack and unpack, deterministically', async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-mode-archive-'));
-    const templateDir = join(tempRoot, 'template');
-    const outDir = join(tempRoot, 'out');
-    try {
-      await mkdir(join(templateDir, 'template/scripts'), { recursive: true });
-      await writeFile(join(templateDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
-      await writeFile(join(templateDir, 'template/scripts/run.sh'), '#!/usr/bin/env bash\necho\n', 'utf8');
-      await writeFile(join(templateDir, 'template/README.md'), '# Plain\n', 'utf8');
-      await chmod(join(templateDir, 'template/scripts/run.sh'), 0o755);
+  test.skipIf(process.platform === 'win32')(
+    'template archives carry the executable bit through pack and unpack, deterministically',
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-mode-archive-'));
+      const templateDir = join(tempRoot, 'template');
+      const outDir = join(tempRoot, 'out');
+      try {
+        await mkdir(join(templateDir, 'template/scripts'), { recursive: true });
+        await writeFile(join(templateDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
+        await writeFile(join(templateDir, 'template/scripts/run.sh'), '#!/usr/bin/env bash\necho\n', 'utf8');
+        await writeFile(join(templateDir, 'template/README.md'), '# Plain\n', 'utf8');
+        await chmod(join(templateDir, 'template/scripts/run.sh'), 0o755);
 
-      const archive = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
-      const entries = readTemplateTarFiles(archive.payload);
-      expect(entries.find(file => file.path === 'template/scripts/run.sh')?.mode).toBe(0o755);
-      expect(entries.find(file => file.path === 'template/README.md')?.mode).toBeUndefined();
+        const archive = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
+        const entries = readTemplateTarFiles(archive.payload);
+        expect(entries.find(file => file.path === 'template/scripts/run.sh')?.mode).toBe(0o755);
+        expect(entries.find(file => file.path === 'template/README.md')?.mode).toBeUndefined();
 
-      const again = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
-      expect(again.sha256).toBe(archive.sha256);
+        const again = await createTemplateArchivePayload(templateDir, { bundledEntry: 'cyan.ts' });
+        expect(again.sha256).toBe(archive.sha256);
 
-      await unpackTemplateArchivePayload(archive.payload, outDir);
-      const unpacked = async (path: string): Promise<number> => (await stat(join(outDir, path))).mode & 0o777;
-      expect((await unpacked('template/scripts/run.sh')) & 0o100).toBe(0o100);
-      expect((await unpacked('template/scripts/run.sh')) & 0o002).toBe(0);
-      expect((await unpacked('template/README.md')) & 0o111).toBe(0);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
+        await unpackTemplateArchivePayload(archive.payload, outDir);
+        const unpacked = async (path: string): Promise<number> => (await stat(join(outDir, path))).mode & 0o777;
+        expect((await unpacked('template/scripts/run.sh')) & 0o100).toBe(0o100);
+        expect((await unpacked('template/scripts/run.sh')) & 0o002).toBe(0);
+        expect((await unpacked('template/README.md')) & 0o111).toBe(0);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('template archives carry the probe surface additively', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-probe-archive-'));

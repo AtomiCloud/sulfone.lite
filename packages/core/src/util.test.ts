@@ -94,7 +94,7 @@ describe('decodeText', () => {
   });
 });
 
-describe('writeVfsFile mode', () => {
+describe.skipIf(process.platform === 'win32')('writeVfsFile mode', () => {
   const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
 
   test('applies the executable bit without making the file world-writable', async () => {
