@@ -13,6 +13,11 @@ concurrency:
 jobs:
   release:
     name: Semantic Release
-    if: github.event.workflow_run.conclusion == 'success'
+    # Never release off a release commit: if semantic-release pushes its
+    # 'release: x.y.z' commit but fails before tagging, CI on that commit would
+    # otherwise trigger another release attempt and loop.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      !startsWith(github.event.workflow_run.head_commit.message, 'release:')
     uses: ./.github/workflows/⚡reusable-release.yaml
     secrets: inherit
