@@ -1,3 +1,11 @@
+## [4.10.1](https://github.com/AtomiCloud/sulfone.lite/compare/v4.10.0...v4.10.1) (2026-10-30)
+
+
+### 🐛 Bug Fixes 🐛
+
+* **core:** batch of core/testing/update robustness fixes ([#38](https://github.com/AtomiCloud/sulfone.lite/issues/38)) ([c443caa](https://github.com/AtomiCloud/sulfone.lite/commit/c443caa51e83ddfa0818ecf0e910956fa94580c8))
+* **web:** keep pending search across typing and theme ([#40](https://github.com/AtomiCloud/sulfone.lite/issues/40)) ([4fdd606](https://github.com/AtomiCloud/sulfone.lite/commit/4fdd606832a02dff00e4eecfcfb01cd3ec9a915d))
+
 ## [4.10.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.2...v4.10.0) (2026-10-30)
 
 
