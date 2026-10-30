@@ -34,10 +34,16 @@ plugins:
       npmPublish: false
   # bun.lock embeds the workspace version, so re-sync it after the bump — otherwise
   # frozen-lockfile installs fail at the release tag.
+  # --lockfile-only is required: semantic-release and its plugins run out of the
+  # pnpm-installed node_modules/.pnpm, and a full `bun install` relinks node_modules
+  # (moving .pnpm into node_modules/.old_modules-*) under the running process. The
+  # second generateNotes after the git plugin's commit then dies with ENOENT on
+  # conventional-changelog-conventionalcommits/templates/template.hbs, after the
+  # release commit is pushed but before the tag is created.
   - module: '@semantic-release/exec'
     version: 6.0.3
     config:
-      prepareCmd: bun install
+      prepareCmd: bun install --lockfile-only
   - module: '@semantic-release/git'
     version: 10.0.1
     config:
