@@ -174,7 +174,7 @@ export function makePromptContext(
         }),
     },
     deterministic: {
-      get: key => deterministicState[key] as never,
+      get: key => (Object.hasOwn(deterministicState, key) ? deterministicState[key] : undefined) as never,
       set: (key, value) => {
         deterministicState[key] = value;
       },

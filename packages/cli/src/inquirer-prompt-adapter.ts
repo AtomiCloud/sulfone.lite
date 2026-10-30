@@ -32,7 +32,7 @@ export function inquirerPromptAdapter(
 ): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
-      if (request.name in answers) {
+      if (Object.hasOwn(answers, request.name)) {
         return answers[request.name] as T;
       }
       const value = await askPrompt(applySuggestion(request, suggestions), prompts);

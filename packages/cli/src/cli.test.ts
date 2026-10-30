@@ -690,6 +690,21 @@ describe('inquirer prompt adapter', () => {
     });
   });
 
+  test('answers named like Object.prototype keys are still prompted', async () => {
+    const asked: string[] = [];
+    const prompts = {
+      input: async () => {
+        asked.push('input');
+        return 'typed';
+      },
+    } as unknown as InquirerPrompts;
+    const answers: Record<string, unknown> = {};
+    const adapter = inquirerPromptAdapter(answers, prompts);
+    expect(await adapter.ask({ kind: 'text', name: 'constructor', message: 'Name?' })).toBe('typed');
+    expect(asked).toEqual(['input']);
+    expect(Object.hasOwn(answers, 'constructor')).toBe(true);
+  });
+
   test('passes placeholders and descriptions through, and maps per-option descriptions', async () => {
     const calls: Array<{
       kind: string;
