@@ -1846,7 +1846,10 @@ describe('registry template input', () => {
       owner: 'acme',
       name: 'grp',
       version: '1',
-      object: { sha256: 'abc', size: 1, key: 'k' },
+      artifactObjects: {
+        manifest: { bucket: 'b', key: 'm', sha256: 'abc', size: 1 },
+        bundle: { bucket: 'b', key: 'x', sha256: 'def', size: 2 },
+      },
       resolvedPins: [],
     };
     const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
@@ -1857,7 +1860,7 @@ describe('registry template input', () => {
           registry: server.url.toString().replace(/\/$/, ''),
           trustDir: join(tempRoot, 'trust'),
         }),
-      ).rejects.toThrow('--kind template-group');
+      ).rejects.toThrow(/--kind template-group --version 1 --integrity 'artifact-objects-v1\|[^']*'/);
     } finally {
       server.stop(true);
       await rm(tempRoot, { recursive: true, force: true });

@@ -103,7 +103,7 @@ export async function resolveTemplateInput(args: {
       throw new Error(
         `${decision.reason} Run cyanprint trust approve before local execution.` +
           ` To trust this exact version: cyanprint trust approve version ${artifact.owner}/${artifact.name}` +
-          ` --kind ${artifact.kind} --version ${artifact.version} --integrity ${artifactIntegrity(artifact)}` +
+          ` --kind ${artifact.kind} --version ${artifact.version} --integrity '${artifactIntegrity(artifact)}'` +
           ` --pins-fingerprint '${pinsFingerprint(artifact.resolvedPins)}'`,
       );
     }

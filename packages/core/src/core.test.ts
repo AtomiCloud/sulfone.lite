@@ -4245,6 +4245,19 @@ describe('trust store', () => {
     }
   });
 
+  test('non-object trust.json raises a clear CyanError', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-trust-null-'));
+    try {
+      await writeFile(join(dir, 'trust.json'), 'null', 'utf8');
+      await expect(loadTrustStore(join(dir, 'trust.json'))).rejects.toMatchObject({
+        name: 'CyanError',
+        problem: { code: 'invalid_trust_store' },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('version approvals with different pins fingerprints are both kept', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-trust-pins-'));
     const path = join(dir, 'trust.json');

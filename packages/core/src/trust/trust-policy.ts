@@ -66,9 +66,9 @@ export async function loadTrustStore(path = resolveTrustStorePath()): Promise<Tr
   if (!raw) {
     return emptyTrustStore();
   }
-  let parsed: Partial<TrustStore>;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as Partial<TrustStore>;
+    parsed = JSON.parse(raw);
   } catch (error) {
     throw new CyanError(
       problem(
@@ -79,6 +79,11 @@ export async function loadTrustStore(path = resolveTrustStorePath()): Promise<Tr
           path,
         },
       ),
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new CyanError(
+      problem('validation', 'invalid_trust_store', `Trust store ${path} must contain a JSON object.`, { path }),
     );
   }
   return {
