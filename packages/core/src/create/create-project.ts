@@ -1141,7 +1141,7 @@ async function matchesOnDisk(outDir: string, file: VfsFile): Promise<boolean> {
       return false;
     }
     // A mode-only change must still be written: compare the executable bit too (POSIX only).
-    if (process.platform !== 'win32' && ((info.mode & 0o100) !== 0) !== ((file.mode ?? 0) & 0o100) !== 0)) {
+    if (process.platform !== 'win32' && ((info.mode & 0o100) !== 0) !== (((file.mode ?? 0) & 0o100) !== 0)) {
       return false;
     }
     const wanted =
