@@ -2307,6 +2307,70 @@ describe('update', () => {
   );
 
   test(
+    'update succeeds and leaves a hard-linked node_modules file untouched when the template did not change',
+    async () => {
+      const fixture = await makeFixture('update-hardlink-noop');
+      const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'hl-noop', files: { 'README.md': 'hi\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        // `bun install` hard-links package files out of its cache: nlink > 1 inside the project.
+        await writeFile(join(outside, 'cached.js'), 'cached\n', 'utf8');
+        await mkdir(join(fixture.out, 'node_modules/pkg'), { recursive: true });
+        await link(join(outside, 'cached.js'), join(fixture.out, 'node_modules/pkg/index.js'));
+
+        const update = await updateProject({ projectDir: fixture.out, headless: true });
+
+        expect(update.status).toBe('done');
+        expect(await readOut(fixture.out, 'node_modules/pkg/index.js')).toBe('cached\n');
+        expect((await lstat(join(outside, 'cached.js'))).nlink).toBe(2);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update applies the template change and leaves a hard-linked node_modules file untouched',
+    async () => {
+      const fixture = await makeFixture('update-hardlink-change');
+      const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'hl-change',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+        });
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await writeFile(join(outside, 'cached.js'), 'cached\n', 'utf8');
+        await mkdir(join(fixture.out, 'node_modules/pkg'), { recursive: true });
+        await link(join(outside, 'cached.js'), join(fixture.out, 'node_modules/pkg/index.js'));
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([{ ref: 'cyanprint/hl-change', from: '1', to: '2' }]);
+        expect(await readOut(fixture.out, 'README.md')).toBe('body v2\n');
+        expect(await readOut(fixture.out, 'node_modules/pkg/index.js')).toBe('cached\n');
+        expect((await lstat(join(outside, 'cached.js'))).nlink).toBe(2);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
     '--template floats only the target and persists new state only for changed versions',
     async () => {
       const fixture = await makeFixture('update-targeted');

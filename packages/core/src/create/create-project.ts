@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import {
   invokePlugin,
@@ -44,6 +44,7 @@ import { unionFeatureIdentities } from '../probe/features';
 import { gitThreeWayMerge, type GitThreeWayMergeResult } from '../update/git-merge';
 import {
   assertRootSafeDelete,
+  assertRootSafeRead,
   comparePaths,
   decodeText,
   fileSha,
@@ -227,7 +228,7 @@ async function createIntoExistingProject(options: CreateProjectOptions): Promise
   ]);
   const theirs = await resolveSiblingTier(theirsGenerations, options);
 
-  const ours = await readProjectFiles(options.outDir);
+  const ours = await readMergeOurs(options.outDir, { base: base.files, theirs: theirs.files });
   const merge = await gitThreeWayMerge({ base: base.files, ours, theirs: theirs.files });
   await applyMergedTree(options.outDir, merge);
 
@@ -1039,7 +1040,32 @@ export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeRes
     await pruneEmptyDirs(outDir, path);
   }
   for (const file of merge.files) {
+    // Rewrite only what the merge actually changed. `ours` carries unchanged files through
+    // the merge verbatim; rewriting them would touch every file in the project (and trip the
+    // hard-link guard on installer-managed files such as node_modules).
+    if (await matchesOnDisk(outDir, file)) {
+      continue;
+    }
     await writeVfsFile(outDir, file);
+  }
+}
+
+/** True when `file` already sits on disk as a regular file with exactly these bytes. */
+async function matchesOnDisk(outDir: string, file: VfsFile): Promise<boolean> {
+  try {
+    // Links fall through to `writeVfsFile`, whose guard produces the real refusal.
+    await assertRootSafeRead(outDir, file.path);
+    const target = safeJoin(outDir, file.path);
+    if (!(await lstat(target)).isFile()) {
+      return false;
+    }
+    const wanted =
+      file.bytesBase64 !== undefined
+        ? Buffer.from(file.bytesBase64, 'base64')
+        : Buffer.from(file.content ?? '', 'utf8');
+    return (await readFile(target)).equals(wanted);
+  } catch {
+    return false;
   }
 }
 
@@ -1169,8 +1195,41 @@ export function reportWarnings(warnings: CompatibilityWarning[], json?: boolean)
   }
 }
 
-/** Read the project's files (everything except CyanPrint metadata, `.git/`, and the probe surface). */
-export async function readProjectFiles(projectDir: string): Promise<VfsFile[]> {
+/**
+ * The `ours` side of a three-way merge. Only paths the merge can act on (base ∪ theirs) are
+ * read, so dependency and build output (node_modules, dist, ...) is never copied into the temp
+ * git repo. Files outside base ∪ theirs are never changed by the merge, and state-tracked
+ * paths outside that set are command output with the same property, so they need no read.
+ * Trade-off: git rename detection can only pair a deleted base file with a *new* user file, so
+ * when a base path is missing on disk the remaining project files (minus node_modules)
+ * are read as well, to keep a user's rename of a template file merging as a rename.
+ */
+export async function readMergeOurs(
+  projectDir: string,
+  tiers: { base: VfsFile[]; theirs: VfsFile[] },
+): Promise<VfsFile[]> {
+  const known = new Set([...tiers.base, ...tiers.theirs].map(file => file.path));
+  let renameCandidates = false;
+  for (const file of tiers.base) {
+    if (!(await lstat(safeJoin(projectDir, file.path)).catch(() => undefined))) {
+      renameCandidates = true;
+      break;
+    }
+  }
+  return await readProjectFiles(
+    projectDir,
+    path => known.has(path) || (renameCandidates && !path.split('/').includes('node_modules')),
+  );
+}
+
+/**
+ * Read the project's files (everything except CyanPrint metadata, `.git/`, and the probe
+ * surface). `include` narrows the read to matching project-relative paths.
+ */
+export async function readProjectFiles(
+  projectDir: string,
+  include?: (relativePath: string) => boolean,
+): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
   const info = await stat(projectDir).catch(() => undefined);
   if (!info?.isDirectory()) {
@@ -1189,6 +1248,9 @@ export async function readProjectFiles(projectDir: string): Promise<VfsFile[]> {
     // being read back into files/state/provenance. `reconcileProbeSurface` removes those
     // command-created files from disk itself.
     if (isTemplateProbePath(relativePath)) {
+      return;
+    }
+    if (include && !include(relativePath)) {
       return;
     }
     const bytes = await readFile(path);

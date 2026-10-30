@@ -6,6 +6,7 @@ import {
   defaultTemplateSourceResolver,
   diffCommandSources,
   readFinalProjectFiles,
+  readMergeOurs,
   readProjectFiles,
   regenerateInstalledTemplate,
   reportWarnings,
@@ -131,7 +132,7 @@ export async function updateProject(args: {
 
   const base = await resolveSiblingTier(sortByInstalledAt(baseGenerations), generationOptions);
   const theirs = await resolveSiblingTier(sortByInstalledAt(theirsGenerations), generationOptions);
-  const ours = await readProjectFiles(args.projectDir);
+  const ours = await readMergeOurs(args.projectDir, { base: base.files, theirs: theirs.files });
 
   const merge = await gitThreeWayMerge({ base: base.files, ours, theirs: theirs.files });
   await applyMergedTree(args.projectDir, merge);
@@ -178,7 +179,11 @@ export async function updateProject(args: {
     // as generated content rather than untracked user files.
     const commandWarnings: CompatibilityWarning[] = [];
     const changedTargets = theirsGenerations.filter(regenerationChanged);
-    const preCommandFiles = await readProjectFiles(args.projectDir);
+    // Command snapshots must see the whole project (a command can create files anywhere), but
+    // that is a full read per batch — skip them entirely when no command will run.
+    const hasCommands = changedTargets.some(item => item.generation.commands.length > 0);
+    const theirsPaths = new Set(theirs.files.map(file => file.path));
+    const preCommandFiles = hasCommands ? await readProjectFiles(args.projectDir) : [];
     // Run each changed template's command batch separately and snapshot the tree between
     // batches, so every file a command created or rewrote is attributed to the template
     // whose command produced it (a later batch rewriting the same path wins). A failed
@@ -192,18 +197,20 @@ export async function updateProject(args: {
         { outDir: args.projectDir, onProgress: args.onProgress },
         commandWarnings,
       );
-      const postBatch = await readProjectFiles(args.projectDir);
-      diffCommandSources(commandSnapshot, postBatch, item.generation.ref, commandSources);
-      commandSnapshot = postBatch;
+      if (item.generation.commands.length > 0) {
+        const postBatch = await readProjectFiles(args.projectDir);
+        diffCommandSources(commandSnapshot, postBatch, item.generation.ref, commandSources);
+        commandSnapshot = postBatch;
+      }
       if (commandFailure) {
         break;
       }
     }
-    const finalFiles = await readFinalProjectFiles(
-      args.projectDir,
-      new Set(theirs.files.map(file => file.path)),
-      preCommandFiles,
-    );
+    // Without commands nothing but the merged tree changed, so the generated paths are the
+    // whole final set.
+    const finalFiles = hasCommands
+      ? await readFinalProjectFiles(args.projectDir, theirsPaths, preCommandFiles)
+      : await readProjectFiles(args.projectDir, path => theirsPaths.has(path));
 
     const time = new Date().toISOString();
     let templates = state.templates;
