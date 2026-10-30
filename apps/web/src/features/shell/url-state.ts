@@ -58,6 +58,11 @@ export function useUrlState(options?: { onNavigate?: (url: string, navigation?: 
         }
       }
       const query = params.toString();
+      // A no-op update (e.g. the default light theme with no theme param) must not navigate:
+      // it would start a router.replace while `settled` already reads true.
+      if (query === current.params.toString()) {
+        return;
+      }
       const url = `${current.pathname}${query ? `?${query}` : ''}`;
       window.history.replaceState(null, '', url);
       setState({ pathname: current.pathname, params });

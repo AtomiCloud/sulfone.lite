@@ -254,6 +254,8 @@ async function runBrowserShellE2e(): Promise<void> {
     if (storedLightTheme !== 'light') {
       throw new Error('theme switch did not persist light preference.');
     }
+    // The URL changes via history.replaceState before the router.replace lands; wait for it.
+    await waitForShellReady(page);
     await page.goto(`${baseUrl}?theme=dark`, { waitUntil: 'networkidle' });
     await waitForShellReady(page);
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
