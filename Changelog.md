@@ -1,3 +1,10 @@
+## [4.9.3](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.2...v4.9.3) (2026-10-30)
+
+
+### 🐛 Bug Fixes 🐛
+
+* **cli:** trust --version, slim push start body, real trust pins, prompt hardening ([#31](https://github.com/AtomiCloud/sulfone.lite/issues/31)) ([ae02e12](https://github.com/AtomiCloud/sulfone.lite/commit/ae02e12fc4df4574f0f333083f34e6e363b6487a))
+
 ## [4.9.2](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.1...v4.9.2) (2026-07-25)
 
 
