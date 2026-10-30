@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exists } from '../util';
 import { probeKey, type ResolvedFeatureProbes } from './matrix';
-import { executeProbeMatrix } from './executor';
+import { DEFAULT_SETUP_TIMEOUT_MS, executeProbeMatrix, resolveSetupTimeoutMs } from './executor';
 import { resolveProbesFromSource } from './resolve';
 
 // Probes execute in ISOLATED child processes (probe-process.ts / probe-runner.ts),
@@ -610,4 +610,12 @@ describe('setup commands use their own timeout, not the per-probe timeout', () =
     // Assert
     expect(verdictOf(execution, 'slow-setup', 'slow-setup-base')).toBe('proven');
   }, 30_000);
+});
+
+describe('resolveSetupTimeoutMs', () => {
+  test('defaults to the setup default, follows a larger --timeout, and honours an explicit setupTimeoutMs', () => {
+    expect(resolveSetupTimeoutMs({}, 300_000)).toBe(DEFAULT_SETUP_TIMEOUT_MS);
+    expect(resolveSetupTimeoutMs({ timeoutMs: 1_800_000 }, 1_800_000)).toBe(1_800_000);
+    expect(resolveSetupTimeoutMs({ setupTimeoutMs: 5_000 }, 1_800_000)).toBe(5_000);
+  });
 });

@@ -23,6 +23,15 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 120_000;
  */
 export const DEFAULT_SETUP_TIMEOUT_MS = 600_000;
 
+/**
+ * Timeout for each setup command: an explicit `setupTimeoutMs`, otherwise the
+ * setup default — raised to the engine `--timeout` when that is longer, so a
+ * user who widened the budget for a slow setup is not capped at the default.
+ */
+export function resolveSetupTimeoutMs(options: ProbeExecutionOptions, defaultTimeoutMs: number): number {
+  return options.setupTimeoutMs ?? Math.max(DEFAULT_SETUP_TIMEOUT_MS, defaultTimeoutMs);
+}
+
 export type ProbeExecutionOptions = {
   /**
    * Concurrent runs. Default = min(number of runs, os.availableParallelism()) —
@@ -33,7 +42,7 @@ export type ProbeExecutionOptions = {
   parallelism?: number;
   /** Engine-level default per-probe timeout override (per-probe values still win). */
   timeoutMs?: number;
-  /** Timeout for each `setup.pre`/`setup.post` command (default {@link DEFAULT_SETUP_TIMEOUT_MS}). */
+  /** Timeout for each `setup.pre`/`setup.post` command (default: the larger of {@link DEFAULT_SETUP_TIMEOUT_MS} and `timeoutMs`). */
   setupTimeoutMs?: number;
   /** Retain run sandboxes and the snapshot instead of removing them (NFC3). */
   keepSandboxes?: boolean;
@@ -97,7 +106,7 @@ export async function executeProbeMatrix(args: {
       sandbox: config.sandbox,
       setup: config.setup,
       sandboxRoot: options.sandboxRoot,
-      commandTimeoutMs: options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+      commandTimeoutMs: resolveSetupTimeoutMs(options, defaultTimeoutMs),
     });
   } catch (error) {
     if (error instanceof ProbeSetupError) {
