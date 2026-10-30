@@ -50,6 +50,13 @@ export type ProbeExecResult = {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /**
+   * True when the command was killed for exceeding its `timeoutMs`. Its
+   * `exitCode` is then a kill artifact, not the gate's answer. The engine does not
+   * trust a probe that ran a timed-out command: the probe's verdict lands on
+   * `broken` (a hung gate is not a gate that went red).
+   */
+  timedOut: boolean;
 };
 
 /**

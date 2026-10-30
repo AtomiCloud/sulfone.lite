@@ -11,7 +11,7 @@ A template declares features from `cyan.ts` (`features: ['tests', 'ci']`) and au
 - `kind: 'baseline'` proves the healthy repo's gate is green → `proven`.
 - `kind: 'mutation'` applies ONE sabotage and expects red → `caught`; green is the false green → `missed`.
 - `invalid` — the experiment never ran (e.g. `probeInapplicable`, sabotage could not apply); asserts nothing and always carries a report reason.
-- `broken` — failure outside the experiment (timeout, red baseline, sandbox-op failure); never silently dropped and always carries its underlying category/message.
+- `broken` — failure outside the experiment (timeout, red baseline, sandbox-op failure); never silently dropped and always carries its underlying category/message. A red baseline also downgrades the SAME feature's mutations that would otherwise be `caught` (category `baseline_failed`): a gate that was red before the sabotage proves nothing. A `repo.exec` command killed by its `timeoutMs` (`result.timedOut`) taints the probe the same way (category `probe_timeout`): a hung gate is not a red gate, so the probe is `broken` whatever it asserted.
 
 ## Standalone command
 
@@ -37,7 +37,7 @@ cyanprint probe --template ./my-template --update-manifest
   - **Repos generated before per-install attribution:** older `.cyan_state.yaml` files carry only the flat feature union, so declaration mode falls back to intersecting it with the install's re-derived features and can attribute a dropped feature only when it cannot be a sibling install's (the probed template's own ref, or a single-install repo). In that legacy fallback a dependency's drifted-away feature in a multi-install repo is scoped out silently. One `cyanprint update` of the repo backfills the per-install attribution and closes that gap.
 - **Explicit-source mode** (`--probes` + `--features`): both inputs are yours; features match the source's `probes/<name>.ts` directly. The run asserts nothing about any template's declared promises, so the manifest gate is skipped. `--features` is a JSON array of `{"template":"owner/name","name":"feature"}` identities (bare names allowed when the probe source is a template dir).
 - `--feature` / `--probe` select subsets (a selected mutation implicitly includes its feature's baselines). Selection output is labelled `selection` — it is a debug view, never matrix results; verdict parity between the two entry points is defined over full matrices only.
-- `--parallel <n>` bounds concurrent matrix runs; `--timeout <seconds>` sets the default per-probe timeout; `--keep-sandbox` retains the snapshot and per-run sandboxes (paths printed); `--report <file>` / `--json` emit the machine-readable run report.
+- `--parallel <n>` bounds concurrent matrix runs; `--timeout <seconds>` sets the default per-probe timeout (`setup.pre`/`setup.post` commands have their own, longer, 10-minute timeout); `--keep-sandbox` retains the snapshot and per-run sandboxes (paths printed); `--report <file>` / `--json` emit the machine-readable run report.
 - Exit code 1 on any `missed` or `broken` verdict, or any hard error.
 
 ## Test-flow probe tier

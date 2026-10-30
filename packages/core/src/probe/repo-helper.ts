@@ -43,7 +43,10 @@ export class ProbeRepoOpError extends Error {
  * engine-injected environment marker, which FR11 forbids — such escapees are a
  * documented, out-of-scope limitation.
  */
-export function createProbeRepo(sandboxPath: string, options?: { detached?: boolean }): ProbeRepo {
+export function createProbeRepo(
+  sandboxPath: string,
+  options?: { detached?: boolean; onExecTimeout?: () => void },
+): ProbeRepo {
   const exec = async (command: string, opts?: { timeoutMs?: number }): Promise<ProbeExecResult> => {
     const result = await runDetachedCommand({
       command,
@@ -51,7 +54,10 @@ export function createProbeRepo(sandboxPath: string, options?: { detached?: bool
       timeoutMs: opts?.timeoutMs,
       detached: options?.detached,
     });
-    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    if (result.timedOut) {
+      options?.onExecTimeout?.();
+    }
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut };
   };
 
   return {
