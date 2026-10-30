@@ -1325,9 +1325,12 @@ describe('local object package safety', () => {
         expect(again.sha256).toBe(archive.sha256);
 
         await unpackTemplateArchivePayload(archive.payload, outDir);
+        // A fresh file shows what the process umask grants by default; +x must not add write bits to it.
+        await writeFile(join(tempRoot, 'control'), 'control\n', 'utf8');
+        const controlWrite = (await stat(join(tempRoot, 'control'))).mode & 0o002;
         const unpacked = async (path: string): Promise<number> => (await stat(join(outDir, path))).mode & 0o777;
         expect((await unpacked('template/scripts/run.sh')) & 0o100).toBe(0o100);
-        expect((await unpacked('template/scripts/run.sh')) & 0o002).toBe(0);
+        expect((await unpacked('template/scripts/run.sh')) & 0o002).toBe(controlWrite);
         expect((await unpacked('template/README.md')) & 0o111).toBe(0);
       } finally {
         await rm(tempRoot, { recursive: true, force: true });
