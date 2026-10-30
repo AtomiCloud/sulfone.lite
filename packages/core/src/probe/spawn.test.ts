@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runDetachedCommand } from './spawn';
+import { runDetachedCommand, trackProcessGroup } from './spawn';
 
 // Regression: a descendant that escapes the timeout kill boundary inherits the
 // command's stdout/stderr pipe fds and can hold them open long after the kill —
@@ -205,4 +205,24 @@ describe('a detached command that exits normally takes its leftover group with i
     expect(result.exitCode).toBe(0);
     expect(await Bun.file(join(cwd, 'late.txt')).exists()).toBe(false);
   }, 10_000);
+});
+
+describe('trackProcessGroup', () => {
+  test('a pid tracked twice stays tracked until BOTH entries are released; release is idempotent', () => {
+    // Arrange
+    const before = process.listenerCount('SIGINT');
+    const releaseA = trackProcessGroup(2_000_000_001);
+    const releaseB = trackProcessGroup(2_000_000_001);
+
+    // Act
+    releaseA();
+    releaseA();
+    const afterOne = process.listenerCount('SIGINT');
+    releaseB();
+    const afterBoth = process.listenerCount('SIGINT');
+
+    // Assert
+    expect(afterOne).toBe(before + 1);
+    expect(afterBoth).toBe(before);
+  });
 });

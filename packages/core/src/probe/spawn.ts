@@ -23,12 +23,12 @@
  * handlers below are installed only while at least one group is live, so the
  * default signal behaviour is untouched outside a probe run.
  */
-const liveGroups = new Set<number>();
+const liveGroups = new Map<number, number>();
 let handlersInstalled = false;
 let shuttingDown = false;
 
 function killLiveGroupsNow(): void {
-  for (const pgid of liveGroups) {
+  for (const pgid of liveGroups.keys()) {
     signalProcessGroup(pgid, 'SIGKILL');
   }
 }
@@ -41,7 +41,9 @@ function onTerminationSignal(signal: NodeJS.Signals): void {
     process.exit(exitCode);
   }
   shuttingDown = true;
-  void Promise.allSettled([...liveGroups].map(pgid => killProcessTree(pgid))).finally(() => process.exit(exitCode));
+  void Promise.allSettled([...liveGroups.keys()].map(pgid => killProcessTree(pgid))).finally(() =>
+    process.exit(exitCode),
+  );
 }
 
 const onSigint = () => onTerminationSignal('SIGINT');
@@ -73,10 +75,22 @@ function removeHandlers(): void {
  * with.
  */
 export function trackProcessGroup(pgid: number): () => void {
-  liveGroups.add(pgid);
+  // Reference-counted per entry: a pid the OS reuses while an earlier holder has
+  // not released yet must not drop the newer group from tracking.
+  liveGroups.set(pgid, (liveGroups.get(pgid) ?? 0) + 1);
   installHandlers();
+  let released = false;
   return () => {
-    liveGroups.delete(pgid);
+    if (released) {
+      return;
+    }
+    released = true;
+    const remaining = (liveGroups.get(pgid) ?? 1) - 1;
+    if (remaining > 0) {
+      liveGroups.set(pgid, remaining);
+    } else {
+      liveGroups.delete(pgid);
+    }
     removeHandlers();
   };
 }
@@ -290,6 +304,10 @@ export async function killProcessTree(pid: number, graceMs = 500): Promise<void>
 
 /** Signal a process group; false when the group is already gone. */
 function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  // Never signal pgid 0/1 or a non-pid: kill(-1) targets every process we may signal.
+  if (!Number.isInteger(pid) || pid <= 1) {
+    return false;
+  }
   try {
     process.kill(-pid, signal);
     return true;
