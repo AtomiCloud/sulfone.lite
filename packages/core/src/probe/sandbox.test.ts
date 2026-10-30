@@ -843,6 +843,31 @@ describe('probe sandbox — snapshot determinism and unborn git repos', () => {
     }
   });
 
+  test('an unborn HEAD is still "no commits" under a non-English git locale (decided by exit status, not message text)', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+    const saved = { LANGUAGE: process.env.LANGUAGE, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+    process.env.LANGUAGE = 'de';
+    process.env.LC_ALL = 'de_DE.UTF-8';
+    process.env.LANG = 'de_DE.UTF-8';
+    try {
+      const error = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } }).catch(
+        caught => caught,
+      );
+
+      expect(error).toBeInstanceOf(CyanError);
+      expect((error as CyanError).problem.code).toBe('probe_repo_has_no_commits');
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
   test('a repo with `git init` but no commit yet fails with a clear, actionable CyanError (auto strategy)', async () => {
     const repo = await makeRepo();
     expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
