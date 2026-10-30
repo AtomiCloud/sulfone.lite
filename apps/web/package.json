@@ -24,5 +24,8 @@
     "react-dom": "19.2.3",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1"
+  },
+  "devDependencies": {
+    "happy-dom": "21.0.4"
   }
 }

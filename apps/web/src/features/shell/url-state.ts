@@ -2,24 +2,23 @@
 
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-
-type UrlState = {
-  pathname: string;
-  params: URLSearchParams;
-};
-
-type NavigationOptions = { defer?: boolean };
+import type { NavigationOptions, PendingNavigation } from './pending-navigation';
+import { buildUrlUpdate, formatUrl, parseUrl, type UrlState } from './url-update';
 
 const URL_STATE_EVENT = 'cyanprint-url-state';
 
-export function useUrlState(options?: { onNavigate?: (url: string, navigation?: NavigationOptions) => void }): {
+export function useUrlState(options?: { navigation?: PendingNavigation }): {
   pathname: string;
   params: URLSearchParams;
   update: (next: Record<string, string | undefined>, navigation?: NavigationOptions) => void;
-  /** True when the Next router has caught up with the URL this hook last wrote (no soft navigation in flight). */
+  /**
+   * Approximate: true when the Next router's route state matches the URL this hook last wrote. It can read true
+   * while a navigation is still queued (e.g. a debounced one, which has not written the URL yet), so it is a
+   * readiness hint for automation, not a guarantee that nothing is pending. Use `navigation.target()` for that.
+   */
   settled: boolean;
 } {
-  const onNavigate = options?.onNavigate;
+  const pending = options?.navigation;
   const nextPathname = usePathname();
   const nextSearchParams = useSearchParams();
   const routeState = useMemo(
@@ -33,43 +32,43 @@ export function useUrlState(options?: { onNavigate?: (url: string, navigation?: 
 
   useEffect(() => {
     setState(routeState);
-  }, [routeState]);
+    pending?.settle(formatUrl(routeState));
+  }, [routeState, pending]);
 
   useEffect(() => {
     const sync = () => setState(readUrlState());
-    window.addEventListener('popstate', sync);
+    const onPopState = () => {
+      pending?.cancel();
+      sync();
+    };
+    window.addEventListener('popstate', onPopState);
     window.addEventListener(URL_STATE_EVENT, sync);
     sync();
     return () => {
-      window.removeEventListener('popstate', sync);
+      window.removeEventListener('popstate', onPopState);
       window.removeEventListener(URL_STATE_EVENT, sync);
     };
-  }, []);
+  }, [pending]);
 
   const update = useCallback(
     (next: Record<string, string | undefined>, navigation?: NavigationOptions) => {
-      const current = readUrlState();
-      const params = new URLSearchParams(current.params.toString());
-      for (const [key, value] of Object.entries(next)) {
-        if (!value || (key === 'theme' && value === 'light')) {
-          params.delete(key);
-        } else {
-          params.set(key, value);
-        }
-      }
-      const query = params.toString();
+      // Build on the target of a pending navigation, not the live URL: the live URL does not include it yet, and
+      // history.replaceState below dispatches a Next RESTORE that cancels in-flight navigations, so building from the
+      // stale URL would silently drop e.g. a debounced search.
+      const pendingTarget = pending?.target();
+      const base = pendingTarget === undefined ? readUrlState() : parseUrl(pendingTarget);
+      const built = buildUrlUpdate(base, next);
       // A no-op update (e.g. the default light theme with no theme param) must not navigate:
       // it would start a router.replace while `settled` already reads true.
-      if (query === current.params.toString()) {
+      if (!built) {
         return;
       }
-      const url = `${current.pathname}${query ? `?${query}` : ''}`;
-      window.history.replaceState(null, '', url);
-      setState({ pathname: current.pathname, params });
+      window.history.replaceState(null, '', built.url);
+      setState({ pathname: built.pathname, params: built.params });
       window.dispatchEvent(new Event(URL_STATE_EVENT));
-      onNavigate?.(url, navigation);
+      pending?.schedule(built.url, navigation);
     },
-    [onNavigate],
+    [pending],
   );
 
   const settled = state.pathname === routeState.pathname && state.params.toString() === routeState.params.toString();

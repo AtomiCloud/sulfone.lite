@@ -19,14 +19,17 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { FocusEvent, ReactNode } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Badge } from '../../components/ui/badge';
 import { cn } from '../../lib/cn';
 import { AccountUserProvider } from '../account/account-context';
 import type { AccountUser } from '../account/token-service';
 import { artifactKinds, filterArtifacts, normalizeArtifactKind } from '../registry/artifact-search';
 import { artifactDetailHref } from '../registry/artifact-url';
+import { createPendingNavigation } from './pending-navigation';
 import { useUrlState } from './url-state';
+import { useSearchDraft } from './use-search-draft';
+import { buildSearchNavigation } from './url-update';
 
 const navItems = [
   { href: '/search', label: 'Search', icon: Search },
@@ -43,28 +46,20 @@ export function AppShell({
   user?: AccountUser;
 }) {
   const router = useRouter();
-  const deferredNavigation = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const navigateWithoutScroll = useCallback(
-    (url: string, navigation?: { defer?: boolean }) => {
-      if (deferredNavigation.current) {
-        clearTimeout(deferredNavigation.current);
-      }
-      if (navigation?.defer) {
-        deferredNavigation.current = setTimeout(() => {
-          router.replace(url, { scroll: false });
-        }, 120);
-        return;
-      }
-      router.replace(url, { scroll: false });
-    },
-    [router],
+  const routerRef = useRef(router);
+  routerRef.current = router;
+  const [navigation] = useState(() =>
+    createPendingNavigation(url => routerRef.current.replace(url, { scroll: false })),
   );
-  const { pathname, params, update, settled } = useUrlState({
-    onNavigate: navigateWithoutScroll,
-  });
+  const { pathname, params, update, settled } = useUrlState({ navigation });
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchDraft, setSearchDraft] = useState(params.get('q') ?? '');
+  const { draft: searchDraft, type: typeSearchDraft } = useSearchDraft({
+    params,
+    navigation,
+    inputRef: searchInputRef,
+  });
   const [searchResults, setSearchResults] = useState(artifacts);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [themePreferenceReady, setThemePreferenceReady] = useState(false);
@@ -74,16 +69,12 @@ export function AppShell({
   const hasThemeParam = params.has('theme');
   const theme = hasThemeParam ? (params.get('theme') === 'dark' ? 'dark' : 'light') : storedTheme;
 
-  useEffect(() => {
-    return () => {
-      if (deferredNavigation.current) {
-        clearTimeout(deferredNavigation.current);
-      }
-    };
-  }, []);
+  useEffect(() => () => navigation.cancel(), [navigation]);
 
-  // "ready" means hydrated, theme preference applied and no soft navigation in flight, so automation can interact
-  // without a theme-sync router.replace racing (and superseding) the navigation it triggers.
+  // "ready" means hydrated, theme preference applied and the router has (approximately) caught up with the URL, so
+  // automation does not click while the theme sync is still to run. The harmful order is the theme sync running AFTER
+  // a click whose navigation is pending: its history.replaceState dispatches a Next RESTORE that cancels the click's
+  // navigation. `settled` is only approximate (it can read true while a debounced navigation is queued).
   const shellReady = themePreferenceReady && settled;
   useEffect(() => {
     document.documentElement.dataset.cyanprintShell = shellReady ? 'ready' : 'pending';
@@ -91,10 +82,6 @@ export function AppShell({
       delete document.documentElement.dataset.cyanprintShell;
     };
   }, [shellReady]);
-
-  useEffect(() => {
-    setSearchDraft(params.get('q') ?? '');
-  }, [params]);
 
   useEffect(() => {
     if (themePreferenceReady) {
@@ -164,26 +151,21 @@ export function AppShell({
 
   function updateState(
     next: { q?: string; kind?: string; theme?: string; cursor?: string },
-    navigation?: { defer?: boolean },
+    navigationOptions?: { defer?: boolean },
   ) {
-    update(next, navigation);
+    update(next, navigationOptions);
   }
 
-  function updateSearchState(next: { q?: string; kind?: string }, navigation?: { defer?: boolean }) {
-    const search = new URLSearchParams(params.toString());
-    if (!search.has('kind') && kind !== 'all') {
-      search.set('kind', kind);
+  function updateSearchState(next: { q?: string; kind?: string }, navigationOptions?: { defer?: boolean }) {
+    const url = buildSearchNavigation({
+      current: { pathname, params },
+      pendingTarget: navigation.target(),
+      kind,
+      next,
+    });
+    if (url !== undefined) {
+      navigation.schedule(url, navigationOptions);
     }
-    for (const [key, value] of Object.entries(next)) {
-      if (!value || (key === 'kind' && value === 'all')) {
-        search.delete(key);
-      } else {
-        search.set(key, value);
-      }
-    }
-    search.delete('cursor');
-    const queryString = search.toString();
-    navigateWithoutScroll(`/search${queryString ? `?${queryString}` : ''}`, navigation);
   }
 
   function setThemePreference(nextTheme: 'dark' | 'light') {
@@ -222,9 +204,10 @@ export function AppShell({
             <Search aria-hidden="true" size={18} />
             <input
               aria-label="Search registry"
+              ref={searchInputRef}
               onChange={event => {
                 const value = event.currentTarget.value;
-                setSearchDraft(value);
+                typeSearchDraft(value);
                 updateSearchState({ q: value }, { defer: true });
               }}
               placeholder="Search the registry"
