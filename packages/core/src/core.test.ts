@@ -4873,6 +4873,39 @@ describe.skipIf(process.platform === 'win32')('executable file mode', () => {
     LONG,
   );
 
+  test(
+    'update applies a template change that only flips +x on an otherwise unchanged file',
+    async () => {
+      const fixture = await makeFixture('mode-only-update');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'exec-flip',
+          v1Files: { 'scripts/run.sh': 'echo same\n', 'README.md': 'v1\n' },
+          v2Files: { 'scripts/run.sh': 'echo same\n', 'README.md': 'v2\n' },
+        });
+        await chmod(join(pair.v2, 'template/scripts/run.sh'), 0o755);
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        expect(await isExecutable(join(fixture.out, 'scripts/run.sh'))).toBe(false);
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(await readOut(fixture.out, 'scripts/run.sh')).toBe('echo same\n');
+        expect(await isExecutable(join(fixture.out, 'scripts/run.sh'))).toBe(true);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
   test('globTemplateFiles reports the executable bit as VfsFile.mode', async () => {
     const { globTemplateFiles } = await import('./scripts/load-cyan-script');
     const fixture = await makeFixture('mode-glob');
