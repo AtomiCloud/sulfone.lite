@@ -12,6 +12,7 @@ export type VfsFile = {
   path: string;
   content?: string;
   bytesBase64?: string;
+  /** Executable bit only: `0o755` marks an executable file; omit for an ordinary file. */
   mode?: number;
 };
 
