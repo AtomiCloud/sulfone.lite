@@ -5,6 +5,7 @@ import { decompress } from 'fzstd';
 import {
   ArtifactPublishSchema,
   artifactIntegrity,
+  MAX_BATCH_RESOLVE_REFS,
   ObjectRefSchema,
   isSafeArchivePath,
   normalizeArchivePath,
@@ -505,7 +506,7 @@ function isEffectiveAdmin(user: RegistryUser | undefined, env: WorkerBindings | 
 
 // 'local' is the implicit owner of unowned refs; 'cyan' is the registry's default publishing account.
 const reservedHandles = new Set(['local', 'cyan']);
-const maxBatchResolveRefs = 50;
+const maxBatchResolveRefs = MAX_BATCH_RESOLVE_REFS;
 
 function normalizeGitHubHandle(login: string): string {
   return normalizeHandle(login);
@@ -635,7 +636,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
         400,
         'validation',
         'invalid_handle',
-        'Handle must be 3-39 lowercase letters, numbers, or hyphens, and start with a letter or number.',
+        'Handle must be 3-39 lowercase letters, numbers, or hyphens, and start with a letter or number. The handles "local" and "cyan" are reserved.',
       );
     }
     const updated = await storage.updateUserHandle(user.id, handle);

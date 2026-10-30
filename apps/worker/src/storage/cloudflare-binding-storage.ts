@@ -43,6 +43,7 @@ type R2BucketBinding = {
 type KVNamespaceBinding = {
   get(key: string): Promise<string | null>;
   put(key: string, value: string): Promise<unknown>;
+  delete(key: string): Promise<unknown>;
 };
 
 export type WorkerBindings = {
@@ -99,7 +100,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     for (const artifact of seedArtifacts) {
       const existing = await findArtifactByIdentity(artifact.kind, artifact.owner, artifact.name, artifact.version);
       if (!existing) {
-        await persistArtifact(artifact);
+        await persistArtifact(artifact, { newBody: true });
       }
     }
   }
@@ -166,7 +167,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   // KV body first, then ONE atomic D1 batch that publishes the version, then the object index.
   // Readers discover versions through D1, so they never see a version whose KV body is missing,
   // and a failed batch leaves no half-committed rows. Counters are D1-owned and never overwritten here.
-  async function persistArtifact(artifact: ArtifactVersion): Promise<void> {
+  async function persistArtifact(artifact: ArtifactVersion, options: { newBody?: boolean } = {}): Promise<void> {
     const searchText = artifactSearchText(artifact);
     await kv.put(artifactKey(artifact.id), JSON.stringify(artifact));
     const statements = [
@@ -230,7 +231,16 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
           searchText,
         ),
     ];
-    await db.batch(statements);
+    try {
+      await db.batch(statements);
+    } catch (error) {
+      // Nothing was committed to D1. For a brand-new version the KV body is an orphan: remove it best-effort.
+      // Re-persisting an existing version (e.g. disable) must keep its previously committed body.
+      if (options.newBody) {
+        await Promise.resolve(kv.delete(artifactKey(artifact.id))).catch(() => undefined);
+      }
+      throw error;
+    }
     // The index is only a lookup accelerator; findActiveArtifactByObjectRef falls back to D1.
     await Promise.all(
       artifactObjectEntries(artifact).map(([, ref]) =>
@@ -560,7 +570,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         version,
         publishedAt: new Date().toISOString(),
       };
-      await persistArtifact(committed);
+      await persistArtifact(committed, { newBody: true });
       return committed;
     },
     async likeArtifact(id, userId) {
@@ -592,14 +602,14 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
       if (!artifact) {
         return undefined;
       }
-      await db
-        .prepare('INSERT INTO downloads (id, artifact_id, version_id, created_at) VALUES (?, ?, ?, ?)')
-        .bind(crypto.randomUUID(), artifact.id, artifact.id, new Date().toISOString())
-        .run();
-      const row = await db
-        .prepare('UPDATE versions SET downloads = downloads + 1 WHERE id = ? RETURNING downloads')
-        .bind(artifact.id)
-        .first<{ downloads: number }>();
+      // One atomic batch: the download row and the counter bump commit together, so they cannot drift.
+      const [, bumped] = await db.batch([
+        db
+          .prepare('INSERT INTO downloads (id, artifact_id, version_id, created_at) VALUES (?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), artifact.id, artifact.id, new Date().toISOString()),
+        db.prepare('UPDATE versions SET downloads = downloads + 1 WHERE id = ? RETURNING downloads').bind(artifact.id),
+      ]);
+      const row = (bumped as { results?: Array<{ downloads: number }> } | undefined)?.results?.[0];
       return { ...artifact, downloads: Number(row?.downloads ?? artifact.downloads + 1) };
     },
     async putObject(ref, payload) {

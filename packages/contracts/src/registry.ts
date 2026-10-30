@@ -64,6 +64,9 @@ export type ResolvedDependencyPin = z.infer<typeof ResolvedDependencyPinSchema>;
 export type ArtifactVersion = z.infer<typeof ArtifactVersionSchema>;
 export type ArtifactPublish = z.infer<typeof ArtifactPublishSchema>;
 
+// Server-side cap per /batch-resolve call (bounds D1 work per request); clients chunk larger sets.
+export const MAX_BATCH_RESOLVE_REFS = 50;
+
 export type BatchResolveRequest = {
   refs: Array<{ kind: string; owner?: string; name: string; version?: string }>;
 };
