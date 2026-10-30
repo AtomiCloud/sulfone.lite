@@ -3,8 +3,11 @@ import { join } from 'node:path';
 import app from '../../apps/worker/src/index';
 
 const cacheDir = join(process.cwd(), '.tmp/e2e/cache');
-await mkdir(cacheDir, { recursive: true });
+// Start from a clean, engine-owned cache root: `cache clean` refuses directories without the
+// engine's ownership marker, and a stale dir from an earlier run must not decide the outcome.
+await rm(cacheDir, { recursive: true, force: true });
 await mkdir(join(cacheDir, 'template'), { recursive: true });
+await writeFile(join(cacheDir, '.cyanprint-cache'), 'cyanprint cache\n', 'utf8');
 await writeFile(join(cacheDir, 'template', 'corrupt-entry'), 'bad', 'utf8');
 
 const result = Bun.spawnSync(['bun', 'run', 'cyan', '--', 'cache', 'inspect', '--cache-dir', cacheDir, '--json']);

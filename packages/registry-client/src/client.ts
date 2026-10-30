@@ -25,22 +25,35 @@ const DEFAULT_TRANSFER_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
 
+const TIMEOUT_ENV = 'CYANPRINT_REGISTRY_TIMEOUT_MS';
+const TRANSFER_TIMEOUT_ENV = 'CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS';
+
+function positiveMs(env: Record<string, string | undefined>, name: string): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer number of milliseconds, got "${raw}".`);
+  }
+  return value;
+}
+
 /**
- * Client options from the environment. CYANPRINT_REGISTRY_TIMEOUT_MS sets the per-attempt
- * timeout of JSON calls (default 30000); object uploads/downloads use the longer transfer timeout.
+ * Client options from the environment. CYANPRINT_REGISTRY_TIMEOUT_MS sets the per-attempt timeout
+ * of JSON calls (default 30000); CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS sets the one for object
+ * uploads/downloads (default 15 minutes).
  */
 export function registryClientOptionsFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): RegistryClientOptions {
-  const raw = env.CYANPRINT_REGISTRY_TIMEOUT_MS;
-  if (raw === undefined || raw.trim() === '') {
-    return {};
-  }
-  const timeoutMs = Number(raw);
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
-    throw new Error(`CYANPRINT_REGISTRY_TIMEOUT_MS must be a positive integer number of milliseconds, got "${raw}".`);
-  }
-  return { timeoutMs };
+  const timeoutMs = positiveMs(env, TIMEOUT_ENV);
+  const transferTimeoutMs = positiveMs(env, TRANSFER_TIMEOUT_ENV);
+  return {
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(transferTimeoutMs === undefined ? {} : { transferTimeoutMs }),
+  };
 }
 
 /** A fully-read response: the body is consumed inside the timeout/retry window. */
@@ -286,7 +299,7 @@ export class RegistryClient {
         }
       } catch (error) {
         if (last) {
-          throw describeRequestError(error, init.method ?? 'GET', url, timeoutMs);
+          throw describeRequestError(error, init.method ?? 'GET', url, timeoutMs, kind);
         }
       }
       await new Promise(resolve => setTimeout(resolve, this.options.retryDelayMs * 2 ** (attempt - 1)));
@@ -320,16 +333,22 @@ export class RegistryClient {
   }
 }
 
-function describeRequestError(error: unknown, method: string, url: string, timeoutMs: number): Error {
-  // The query string is dropped: presigned upload URLs carry credentials in it.
+function describeRequestError(
+  error: unknown,
+  method: string,
+  url: string,
+  timeoutMs: number,
+  kind: 'json' | 'transfer',
+): Error {
+  // The query string is dropped: presigned upload URLs carry credentials in it. The original
+  // error is not kept as a cause either, since Bun's network errors carry the full URL.
   const target = `${method} ${url.split('?')[0]}`;
   if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-    return new Error(
-      `Registry request timed out after ${timeoutMs}ms: ${target}. Raise CYANPRINT_REGISTRY_TIMEOUT_MS to wait longer.`,
-      { cause: error },
-    );
+    const variable = kind === 'transfer' ? TRANSFER_TIMEOUT_ENV : TIMEOUT_ENV;
+    return new Error(`Registry request timed out after ${timeoutMs}ms: ${target}. Raise ${variable} to wait longer.`);
   }
-  return error instanceof Error ? error : new Error(`Registry request failed: ${target}: ${String(error)}`);
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`Registry request failed: ${target}: ${reason}`);
 }
 
 function artifactSearchParams(args: {

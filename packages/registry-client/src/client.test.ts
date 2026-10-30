@@ -200,7 +200,64 @@ describe('registry client transfers', () => {
   });
 });
 
+describe('registry client error text', () => {
+  test('a transfer timeout names the transfer variable, a JSON timeout names the JSON one', async () => {
+    const server = serve(hang);
+    const client = new RegistryClient(server.url, undefined, undefined, {
+      timeoutMs: 40,
+      transferTimeoutMs: 60,
+      retries: 0,
+    });
+    const transfer = await client.downloadObjectBytes(ref).then(
+      () => undefined,
+      (caught: unknown) => caught as Error,
+    );
+    expect(transfer?.message).toContain('60ms');
+    expect(transfer?.message).toContain('CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS');
+    expect(transfer?.message).not.toContain('CYANPRINT_REGISTRY_TIMEOUT_MS');
+    expect(transfer?.message).toContain('POST');
+    const json = await client.health().then(
+      () => undefined,
+      (caught: unknown) => caught as Error,
+    );
+    expect(json?.message).toContain('40ms');
+    expect(json?.message).toContain('CYANPRINT_REGISTRY_TIMEOUT_MS');
+    expect(json?.message).not.toContain('TRANSFER');
+  });
+
+  test('network errors name the method and URL without the query string or a cause that holds it', async () => {
+    const listener = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+    const port = listener.port;
+    listener.stop(true);
+    const client = new RegistryClient(`http://127.0.0.1:${port}`, undefined, undefined, { retries: 0 });
+    const error = await client.putUploadObject('/upload/x?sig=topsecret', 'x').then(
+      () => undefined,
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain('PUT');
+    expect(error?.message).toContain(`http://127.0.0.1:${port}/upload/x`);
+    expect(error?.message).not.toContain('topsecret');
+    expect(error?.cause).toBeUndefined();
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain('topsecret');
+  });
+});
+
 describe('registryClientOptionsFromEnv', () => {
+  test('reads CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS with the same rules', () => {
+    expect(registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS: '900000' })).toEqual({
+      transferTimeoutMs: 900000,
+    });
+    expect(
+      registryClientOptionsFromEnv({
+        CYANPRINT_REGISTRY_TIMEOUT_MS: '5',
+        CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS: '6',
+      }),
+    ).toEqual({ timeoutMs: 5, transferTimeoutMs: 6 });
+    expect(() => registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS: '-1' })).toThrow(
+      'CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS',
+    );
+  });
+
   test('reads CYANPRINT_REGISTRY_TIMEOUT_MS and rejects garbage', () => {
     expect(registryClientOptionsFromEnv({})).toEqual({});
     expect(registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TIMEOUT_MS: '120000' })).toEqual({ timeoutMs: 120000 });
