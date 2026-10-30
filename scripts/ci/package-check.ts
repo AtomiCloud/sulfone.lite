@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sha256 } from '@cyanprint/core';
+import { assertPortableLinuxBinary } from './portable-elf';
 import { assertGoreleaserConfig, loadGoreleaserConfig } from './release-config';
 import { VENDORED_CONTRACTS, VENDORED_ROOTS } from './vendored-contracts';
 
@@ -74,6 +75,19 @@ const build = Bun.spawnSync(['bun', 'build', 'packages/cli/src/main.ts', '--comp
 if (!build.success) {
   throw new Error(build.stderr.toString());
 }
+// On Linux the compiler copies the host (Nix-patched) bun runtime, so apply the same
+// interpreter reset + portability gate the GoReleaser post-build hook runs on every
+// linux release binary, then keep exercising the portable binary below.
+const portableLinux = process.platform === 'linux';
+if (portableLinux) {
+  const portable = Bun.spawnSync(['./scripts/ci/portable-linux.sh', binaryPath]);
+  if (!portable.success) {
+    throw new Error(
+      `packaged linux binary is not portable: ${portable.stdout.toString()}${portable.stderr.toString()}`,
+    );
+  }
+  await assertPortableLinuxBinary(binaryPath);
+}
 const versionRun = Bun.spawnSync([binaryPath, '--version']);
 if (!versionRun.success || versionRun.stdout.toString().trim() !== `cyanprint ${version}`) {
   throw new Error('packaged cyanprint binary did not report the exact package version without user-installed bun');
@@ -129,6 +143,7 @@ console.log(
     packageManagers: ['homebrew', 'scoop', 'gemfury', 'deb', 'rpm', 'apk', 'arch'],
     nixInstallPath: true,
     embeddedBun: true,
+    portableLinuxBinary: portableLinux,
     name: packageJson.name,
     binaryExecuted: true,
     probeExecuted: true,

@@ -30,6 +30,16 @@ export function assertGoreleaserConfig(config: GoreleaserConfig): void {
   assert(build.binary === 'cyanprint', 'GoReleaser cyanprint build must package the cyanprint binary.');
   assert(build.main === 'packages/cli/src/main.ts', 'GoReleaser cyanprint build must use the CLI entrypoint.');
   assertContainsAll(asStringArray(build.targets, 'cyanprint.targets'), buildTargets, 'bun build targets');
+  const postHooks = asObjectArray((build.hooks as { post?: unknown } | undefined)?.post, 'cyanprint.hooks.post');
+  assert(
+    postHooks.some(
+      hook =>
+        typeof hook.cmd === 'string' &&
+        hook.cmd.includes('scripts/ci/portable-linux.sh') &&
+        hook.cmd.includes('"linux"'),
+    ),
+    'GoReleaser cyanprint build must run scripts/ci/portable-linux.sh as a post hook for linux targets.',
+  );
 
   const archive = asObjectArray(config.archives, 'archives')[0];
   assert(archive, 'GoReleaser archives must be configured.');

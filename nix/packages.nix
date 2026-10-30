@@ -27,6 +27,7 @@ let
           goreleaser
           go-task
           infisical
+          patchelf
           pnpm
           pre-commit
           shellcheck

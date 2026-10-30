@@ -19,6 +19,7 @@ with packages;
 
   main = [
     goreleaser
+    patchelf
   ];
 
   releaser = [
