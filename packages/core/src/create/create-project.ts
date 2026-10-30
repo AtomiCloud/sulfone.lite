@@ -1069,6 +1069,17 @@ export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeRes
     await pruneEmptyDirs(outDir, path);
   }
   for (const file of writes) {
+    // Git does not track empty directories, so a user's empty folder (or a tree of empty
+    // folders) at a path the merge adds as a FILE never shows up as a conflict. Whatever real
+    // content is left was refused by `assertMergeApplicable`; clear the husk so the write
+    // does not fail with EISDIR.
+    const target = safeJoin(outDir, file.path);
+    if (
+      (await lstat(target).catch(() => undefined))?.isDirectory() &&
+      (await survivingEntries(target, file.path, new Set())) === undefined
+    ) {
+      await rm(target, { recursive: true, force: true });
+    }
     // The merge is authoritative for the executable bit: a file it leaves non-executable must lose a
     // stale `+x` still on disk, so an absent mode is written as an explicit non-executable one.
     await writeVfsFile(outDir, file.mode === undefined ? { ...file, mode: 0o644 } : file);

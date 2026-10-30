@@ -2006,6 +2006,42 @@ describe('applyMergedTree', () => {
     }
   });
 
+  test('an empty user folder (or only empty subfolders) at a path the update adds as a file is replaced', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      // git does not track empty directories, so the merge never sees these folders.
+      await mkdir(join(dir, 'empty'), { recursive: true });
+      await mkdir(join(dir, 'nested/inner/deeper'), { recursive: true });
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [
+          { path: 'empty', content: 'file\n' },
+          { path: 'nested', content: 'also a file\n' },
+        ],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'empty')).text()).toBe('file\n');
+      expect(await Bun.file(join(dir, 'nested')).text()).toBe('also a file\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a folder that still holds user files at a path the update adds as a file is refused untouched', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      await mkdir(join(dir, 'keepme/sub'), { recursive: true });
+      await writeFile(join(dir, 'keepme/sub/user.txt'), 'mine\n', 'utf8');
+      const merge = await gitThreeWayMerge({ base: [], ours: [], theirs: [{ path: 'keepme', content: 'file\n' }] });
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/keepme/);
+      expect(await Bun.file(join(dir, 'keepme/sub/user.txt')).text()).toBe('mine\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('keeps sibling content when pruning emptied directories', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
     try {
