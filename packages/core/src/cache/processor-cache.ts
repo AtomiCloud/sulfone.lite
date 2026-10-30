@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { VfsFile } from '@cyanprint/contracts';
 import { sha256, stableConfig } from '../util';
-import { resolveCyanCacheDir } from './cache-paths';
+import { claimCacheRoot, resolveCyanCacheDir } from './cache-paths';
 
 /**
  * Content-addressed cache of hermetic processor outputs. A processor's output is a pure
@@ -51,6 +51,7 @@ export async function writeProcessorCache(args: { key: string; files: VfsFile[];
   // The staging name is unique per write (concurrent test cases share one pid).
   const staging = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
+    await claimCacheRoot(resolveCyanCacheDir(args.cacheDir));
     await mkdir(dirname(path), { recursive: true });
     // Atomic replace: a concurrent reader must never observe a partial JSON file.
     await Bun.write(staging, JSON.stringify({ files: args.files }));

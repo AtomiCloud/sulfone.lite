@@ -1,8 +1,9 @@
-import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { RegistryClient } from '@cyanprint/registry-client';
+import { RegistryClient, registryClientOptionsFromEnv } from '@cyanprint/registry-client';
 import {
   artifactCachePath,
+  claimCacheRoot,
   evaluateArtifactTrust,
   loadManifest,
   loadTrustStore,
@@ -80,7 +81,7 @@ export async function resolveTemplateInput(args: {
   if (!owner || !name) {
     throw new Error(`Invalid registry template reference: ${args.template}`);
   }
-  const client = new RegistryClient(args.registry);
+  const client = new RegistryClient(args.registry, undefined, undefined, registryClientOptionsFromEnv());
   const resolved = await client
     .batchResolve({
       refs: [
@@ -147,6 +148,7 @@ async function hydrateRegistryArtifactWithPins(
     version: artifact.version,
     integrity: pinnedIntegrity ?? artifact.object?.sha256,
   });
+  await claimCacheRoot(cacheDir);
   const stackKey = `${artifact.kind}:${artifact.owner}:${artifact.name}:${artifact.version}`;
   if (stack.has(stackKey)) {
     throw new Error(`Registry artifact dependency cycle detected: ${stackKey}`);
@@ -176,18 +178,19 @@ async function hydrateRegistryArtifactWithPins(
   const bundleIndexJson = JSON.stringify({ bundles: bundleIndex }, null, 2);
   // A hit writes nothing: concurrent creates may be reading or executing from this entry.
   // A miss hydrates into a staging dir and swaps it in, so the entry is never half-written.
-  const upToDate =
-    !bypassCache &&
-    (await isCacheValid(cachePath, artifactFingerprint)) &&
-    (await readFile(join(cachePath, '.cyan_artifact_bundles.json'), 'utf8').catch(() => undefined)) === bundleIndexJson;
-  if (!upToDate) {
+  // "Valid" is the full check (fingerprint + bundle index), also inside the install swap, so a
+  // stale index is repaired instead of being kept as a "valid" entry that re-downloads forever.
+  const isEntryValid = async (path: string): Promise<boolean> =>
+    (await isCacheValid(path, artifactFingerprint)) &&
+    (await readFile(join(path, '.cyan_artifact_bundles.json'), 'utf8').catch(() => undefined)) === bundleIndexJson;
+  if (bypassCache || !(await isEntryValid(cachePath))) {
     const stagingPath = cacheStagingPath(cachePath);
     try {
       await mkdir(stagingPath, { recursive: true });
       await hydrateRegistryArtifact(client, artifact, stagingPath);
       await writeFile(join(stagingPath, '.cyan_artifact_bundles.json'), bundleIndexJson, 'utf8');
       await writeCacheIntegrity(stagingPath, artifactFingerprint);
-      await installStagedCache(stagingPath, cachePath, artifactFingerprint, bypassCache);
+      await installStagedCache(stagingPath, cachePath, isEntryValid, bypassCache);
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
       throw error;
@@ -301,6 +304,7 @@ async function hydrateLocalTemplate(
 ): Promise<{ templateDir: string; cacheHydrated: boolean; registryHydrated: boolean }> {
   const { manifest } = await loadManifest(templateDir);
   const integrity = await fingerprintDirectory(templateDir);
+  await claimCacheRoot(resolveCyanCacheDir(cacheDirOverride));
   const cachePath = artifactCachePath(resolveCyanCacheDir(cacheDirOverride), {
     kind: manifest.kind,
     owner: manifest.owner,
@@ -314,7 +318,7 @@ async function hydrateLocalTemplate(
       await mkdir(stagingPath, { recursive: true });
       await cp(templateDir, stagingPath, { recursive: true, force: true, verbatimSymlinks: true });
       await writeCacheIntegrity(stagingPath, integrity);
-      await installStagedCache(stagingPath, cachePath, integrity, bypassCache);
+      await installStagedCache(stagingPath, cachePath, path => isCacheValid(path, integrity), bypassCache);
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
       throw error;
@@ -335,7 +339,7 @@ function cacheStagingPath(cachePath: string): string {
 async function installStagedCache(
   stagingPath: string,
   cachePath: string,
-  expected: string,
+  isValid: (path: string) => Promise<boolean>,
   force: boolean,
 ): Promise<void> {
   let lastError: unknown;
@@ -346,7 +350,7 @@ async function installStagedCache(
     } catch (error) {
       lastError = error;
     }
-    if (!force && (await isCacheValid(cachePath, expected))) {
+    if (!force && (await isValid(cachePath))) {
       await rm(stagingPath, { recursive: true, force: true });
       return;
     }
@@ -355,6 +359,15 @@ async function installStagedCache(
       () => true,
       () => false,
     );
+    // A concurrent writer may have installed a valid entry between the check above and the
+    // move-aside; re-check what was actually moved and put a valid one back.
+    if (movedAside && !force && (await isValid(asidePath))) {
+      // If the slot was refilled meanwhile, that entry wins and the displaced one is dropped.
+      await rename(asidePath, cachePath).catch(() => undefined);
+      await rm(asidePath, { recursive: true, force: true }).catch(() => undefined);
+      await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      return;
+    }
     try {
       await rename(stagingPath, cachePath);
       lastError = undefined;

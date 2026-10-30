@@ -1,5 +1,7 @@
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { ArtifactKindSchema } from '@cyanprint/contracts';
 import { sha256 } from '../util';
 
 export function resolveCyanCacheDir(override?: string): string {
@@ -25,4 +27,84 @@ export function artifactCachePath(cacheDir: string, ref: CacheArtifactRef): stri
 
 function cacheLabel(value: string): string {
   return encodeURIComponent(value).replaceAll('%', '~');
+}
+
+/** Ownership marker the engine drops in every cache root it creates or adopts. */
+export const CACHE_ROOT_MARKER = '.cyanprint-cache';
+
+const CACHE_KIND_DIRS = new Set<string>([...ArtifactKindSchema.options]);
+const PROCESSOR_OUTPUT_DIR = 'processor-output';
+// `<owner>-<name>-<24hex>`, optionally with a hydration staging suffix (`.tmp-…`, `.tmp-….old`).
+const ARTIFACT_ENTRY_NAME = /^.+-[0-9a-f]{24}(\.tmp-.+)?$/;
+const PROCESSOR_ENTRY_NAME = /^[0-9a-f]{64}$/;
+
+export type CacheRootState =
+  /** The directory does not exist or is empty. */
+  | { state: 'empty' }
+  /** The engine's ownership marker is present. */
+  | { state: 'marked'; entries: string[] }
+  /** No marker (a cache from before markers existed), but every entry matches the engine's naming. */
+  | { state: 'engine-shaped'; entries: string[] }
+  /** Holds entries the engine never creates; `foreign` lists a sample of them. */
+  | { state: 'foreign'; foreign: string[] };
+
+async function childNames(path: string): Promise<{ name: string; directory: boolean }[]> {
+  return (await readdir(path, { withFileTypes: true }).catch(() => [])).map(entry => ({
+    name: entry.name,
+    directory: entry.isDirectory(),
+  }));
+}
+
+/** Classifies a cache root by ownership marker, falling back to the engine's own naming scheme. */
+export async function inspectCacheRoot(root: string): Promise<CacheRootState> {
+  const top = await childNames(root);
+  if (top.length === 0) {
+    return { state: 'empty' };
+  }
+  if (top.some(entry => entry.name === CACHE_ROOT_MARKER)) {
+    // A marked root is the engine's, but only its own top-level directories are ever removed.
+    const owned = top
+      .map(entry => entry.name)
+      .filter(name => CACHE_KIND_DIRS.has(name) || name === PROCESSOR_OUTPUT_DIR);
+    return { state: 'marked', entries: owned };
+  }
+  const foreign: string[] = [];
+  for (const entry of top) {
+    const isProcessorOutput = entry.name === PROCESSOR_OUTPUT_DIR;
+    if (!entry.directory || !(isProcessorOutput || CACHE_KIND_DIRS.has(entry.name))) {
+      foreign.push(entry.name);
+      continue;
+    }
+    const pattern = isProcessorOutput ? PROCESSOR_ENTRY_NAME : ARTIFACT_ENTRY_NAME;
+    for (const child of await childNames(join(root, entry.name))) {
+      if (!pattern.test(child.name)) {
+        foreign.push(`${entry.name}/${child.name}`);
+      }
+    }
+  }
+  return foreign.length > 0
+    ? { state: 'foreign', foreign }
+    : { state: 'engine-shaped', entries: top.map(entry => entry.name) };
+}
+
+/**
+ * Marks a cache root as engine-owned when the engine creates or uses it. A directory that
+ * already holds foreign files is never claimed, so `cache clean` can still refuse it.
+ * Best-effort: a read-only cache root degrades to "unmarked".
+ */
+export async function claimCacheRoot(root: string): Promise<void> {
+  try {
+    // Cheap fast path: this runs on every cache write.
+    if (await Bun.file(join(root, CACHE_ROOT_MARKER)).exists()) {
+      return;
+    }
+    await mkdir(root, { recursive: true });
+    const state = await inspectCacheRoot(root);
+    if (state.state === 'foreign' || state.state === 'marked') {
+      return;
+    }
+    await writeFile(join(root, CACHE_ROOT_MARKER), 'cyanprint cache\n', { flag: 'wx' }).catch(() => undefined);
+  } catch {
+    // ignore
+  }
 }

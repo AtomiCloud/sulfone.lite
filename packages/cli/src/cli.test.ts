@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readdir, readlink, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createProject, pinsFingerprint, sha256 } from '@cyanprint/core';
+import { CACHE_ROOT_MARKER, createProject, pinsFingerprint, sha256, writeProcessorCache } from '@cyanprint/core';
 import { artifactIntegrity, CyanError, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
@@ -1931,12 +1931,71 @@ describe('cache command', () => {
   test('clean removes engine cache entries (corrupt ones included) and leaves the directory', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-ok-'));
     try {
-      await mkdir(join(root, 'template', 'entry'), { recursive: true });
-      await writeFile(join(root, 'template', 'corrupt-entry'), 'bad', 'utf8');
-      await mkdir(join(root, 'processor-output', 'abc'), { recursive: true });
+      await mkdir(join(root, 'template', `cyanprint-entry-${'a'.repeat(24)}`), { recursive: true });
+      await writeFile(join(root, 'template', `cyanprint-corrupt-${'b'.repeat(24)}`), 'bad', 'utf8');
+      await mkdir(join(root, 'processor-output', 'c'.repeat(64)), { recursive: true });
 
       await captureCache(['clean', '--cache-dir', root]);
       expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean refuses a user folder that only holds kind-named directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-kinds-'));
+    try {
+      await mkdir(join(root, 'template', 'my-app'), { recursive: true });
+      await mkdir(join(root, 'plugin'), { recursive: true });
+      await writeFile(join(root, 'template', 'my-app', 'cyan.yaml'), 'keep', 'utf8');
+
+      await expect(captureCache(['clean', '--cache-dir', root])).rejects.toBeInstanceOf(CyanError);
+      expect((await readdir(root)).sort()).toEqual(['plugin', 'template']);
+      expect(await Bun.file(join(root, 'template', 'my-app', 'cyan.yaml')).text()).toBe('keep');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean empties a marked cache root, keeps the marker and leaves non-cache files alone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-marked-'));
+    try {
+      await writeFile(join(root, CACHE_ROOT_MARKER), 'x', 'utf8');
+      await mkdir(join(root, 'template', 'anything'), { recursive: true });
+      await writeFile(join(root, 'notes.txt'), 'keep', 'utf8');
+
+      await captureCache(['clean', '--cache-dir', root]);
+      expect((await readdir(root)).sort()).toEqual([CACHE_ROOT_MARKER, 'notes.txt']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the engine marks cache roots it uses but never claims a foreign folder', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-claim-'));
+    try {
+      const fresh = join(root, 'fresh');
+      await writeProcessorCache({ key: 'k'.repeat(64), files: [], cacheDir: fresh });
+      expect(await Bun.file(join(fresh, CACHE_ROOT_MARKER)).exists()).toBe(true);
+
+      const template = join(root, 'tpl');
+      await mkdir(template, { recursive: true });
+      await writeFile(
+        join(template, 'cyan.yaml'),
+        'cyanprint: 4\nkind: template\nowner: o\nname: n\nbundledEntry: cyan.ts\n',
+      );
+      await writeFile(join(template, 'cyan.ts'), 'export default async () => ({});\n');
+      const hydrated = join(root, 'hydrated');
+      await resolveTemplateInput({ template, cacheDir: hydrated });
+      expect(await Bun.file(join(hydrated, CACHE_ROOT_MARKER)).exists()).toBe(true);
+      await captureCache(['clean', '--cache-dir', hydrated]);
+      expect(await readdir(hydrated)).toEqual([CACHE_ROOT_MARKER]);
+
+      const foreign = join(root, 'artifacts');
+      await mkdir(join(foreign, 'template', 'mine'), { recursive: true });
+      await writeProcessorCache({ key: 'k'.repeat(64), files: [], cacheDir: foreign });
+      expect(await Bun.file(join(foreign, CACHE_ROOT_MARKER)).exists()).toBe(false);
+      await expect(captureCache(['clean', '--cache-dir', foreign])).rejects.toBeInstanceOf(CyanError);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2091,6 +2150,38 @@ describe('registry template cache safety', () => {
         expect((await stat(join(first.templateDir, name))).mtimeMs).toBe(old.getTime());
       }
       expect(registry.downloads()).toBe(2);
+    } finally {
+      registry.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a stale bundle index on an otherwise valid registry entry is repaired once, not re-downloaded forever', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-registry-stale-index-'));
+    const registry = safeRegistry();
+    try {
+      const first = await resolveSafe(registry.url, root);
+      const entry = first.templateDir;
+      const freshIndex = await Bun.file(join(entry, '.cyan_artifact_bundles.json')).text();
+      // A relocated cache / different path spelling leaves a self-consistent entry whose recorded
+      // bundle index no longer matches: rewrite the index and re-seal the content fingerprint.
+      await writeFile(join(entry, '.cyan_artifact_bundles.json'), '{"bundles":[{"stale":true}]}', 'utf8');
+      const chunks: string[] = [];
+      for (const name of (await readdir(entry)).sort()) {
+        if (name === '.cyan_cache_integrity' || name === '.cyan_cache_content_integrity') {
+          continue;
+        }
+        chunks.push(`${name}:${sha256(await Bun.file(join(entry, name)).bytes())}`);
+      }
+      await writeFile(join(entry, '.cyan_cache_content_integrity'), sha256(chunks.join('\n')), 'utf8');
+
+      const before = registry.downloads();
+      await resolveSafe(registry.url, root);
+      expect(registry.downloads()).toBe(before + 2);
+      expect(await Bun.file(join(entry, '.cyan_artifact_bundles.json')).text()).toBe(freshIndex);
+
+      await resolveSafe(registry.url, root);
+      expect(registry.downloads()).toBe(before + 2);
     } finally {
       registry.stop();
       await rm(root, { recursive: true, force: true });

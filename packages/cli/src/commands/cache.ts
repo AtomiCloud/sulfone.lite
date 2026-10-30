@@ -1,13 +1,10 @@
-import { readdir, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
-import { ArtifactKindSchema, CyanError, problem } from '@cyanprint/contracts';
-import { resolveCyanCacheDir } from '@cyanprint/core';
+import { CyanError, problem } from '@cyanprint/contracts';
+import { CACHE_ROOT_MARKER, inspectCacheRoot, resolveCyanCacheDir } from '@cyanprint/core';
 import { parseFlags, flagBool } from '../args';
 import { kv, printJson, printSection, success } from '../ui';
-
-// The only top-level entries the engine ever creates in a cache dir (artifact kinds + processor output).
-const CACHE_ENTRY_NAMES = new Set<string>([...ArtifactKindSchema.options, 'processor-output']);
 
 /** Deletes only engine-created cache entries; refuses any directory that holds anything else. */
 async function cleanCacheDir(cacheDir: string): Promise<void> {
@@ -22,18 +19,20 @@ async function cleanCacheDir(cacheDir: string): Promise<void> {
       ),
     );
   }
-  const entries = await readdir(root).catch(() => [] as string[]);
-  const foreign = entries.filter(name => !CACHE_ENTRY_NAMES.has(name));
-  if (foreign.length > 0) {
+  // The engine marks every cache root it creates; an unmarked directory (a cache from before
+  // markers existed) is only cleaned when every entry matches the engine's own naming scheme.
+  const inspected = await inspectCacheRoot(root);
+  if (inspected.state === 'foreign') {
     throw new CyanError(
       problem(
         'validation',
         'cache_dir_not_engine_owned',
-        `Refusing to clean ${root}: it contains entries the cyanprint cache never creates (${foreign.slice(0, 5).join(', ')}). Nothing was deleted.`,
-        { cacheDir: root, unexpected: foreign.slice(0, 20) },
+        `Refusing to clean ${root}: it is not a cyanprint cache (no ${CACHE_ROOT_MARKER} marker) and contains entries the cache never creates (${inspected.foreign.slice(0, 5).join(', ')}). Nothing was deleted.`,
+        { cacheDir: root, unexpected: inspected.foreign.slice(0, 20) },
       ),
     );
   }
+  const entries = inspected.state === 'empty' ? [] : inspected.entries;
   for (const name of entries) {
     await rm(join(root, name), { recursive: true, force: true });
   }
