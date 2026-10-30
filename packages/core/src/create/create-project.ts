@@ -29,7 +29,7 @@ import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
 import { defaultWorkspaceRoots } from '../util/workspace-root';
-import { POST_GENERATION_TIMEOUT_ENV } from '../commands/post-generation-command';
+import { POST_GENERATION_TIMEOUT_ENV, runPostGenerationCommand } from '../commands/post-generation-command';
 import { processorCacheKey, readProcessorCache, writeProcessorCache } from '../cache/processor-cache';
 import { resolveLayers, type ResolutionLayer, type ResolverInvoker } from '../merge/resolve-layers';
 import { executeCyanScript, globTemplateFiles, isTemplateProbePath } from '../scripts/load-cyan-script';
@@ -351,9 +351,7 @@ export const defaultTemplateSourceResolver: TemplateSourceResolver = async ({ so
 };
 
 export function sortByInstalledAt<T extends { entry: { installedAt: string } }>(items: T[]): T[] {
-  return [...items].sort((left, right) =>
-    left.entry.installedAt < right.entry.installedAt ? -1 : left.entry.installedAt > right.entry.installedAt ? 1 : 0,
-  );
+  return [...items].sort((left, right) => comparePaths(left.entry.installedAt, right.entry.installedAt));
 }
 
 /**
@@ -921,11 +919,8 @@ async function applyArtifactFileScopes(
       continue;
     }
     if (scopeState.files.length > 0) {
-      const selected = scopeState.files.filter(file => file.bytesBase64 === undefined);
-      if (selected.length === 0) {
-        continue;
-      }
-      const transformed = (await invoke(selected)).map(file => ({
+      // Template-mode scopes only yield decoded text files (non-UTF-8 content throws on load).
+      const transformed = (await invoke(scopeState.files)).map(file => ({
         ...file,
         path: normalizeScopedOutputPath(file.path),
       }));
@@ -1264,7 +1259,6 @@ async function execPostGenerationCommands(
 ): Promise<CyanError | undefined> {
   for (const command of commands) {
     ctx.onProgress?.({ kind: 'command', ref: [command.command, ...(command.args ?? [])].join(' ') });
-    const { runPostGenerationCommand } = await import('../commands/post-generation-command');
     const result = await runPostGenerationCommand({ ...command, cwd: ctx.outDir });
     if (!result.allowed) {
       warnings.push({
