@@ -388,46 +388,62 @@ describe('contract-version skew (AC8)', () => {
 });
 
 describe('workspace root default', () => {
-  test('dependency lookup does not leak in from the cwd when no workspaceRoot is given', async () => {
-    const repo = join(workRoot, 'ws-default-repo');
-    const elsewhere = join(workRoot, 'ws-default-elsewhere');
+  const manifestYaml = (name: string, extra: Record<string, unknown> = {}) =>
+    YAML.stringify({ cyanprint: 4, kind: 'template', owner: 'cyanprint', name, bundledEntry: 'cyan.ts', ...extra });
+
+  async function writeDependency(root: string, probeName: string): Promise<void> {
+    await mkdir(join(root, 'examples/templates/dep/probes'), { recursive: true });
+    await writeFile(join(root, 'examples/templates/dep/cyan.yaml'), manifestYaml('ws-default-dep'), 'utf8');
+    await writeFile(
+      join(root, 'examples/templates/dep/probes/gate.ts'),
+      probeSource(probeName, 'Probe shipped by the dependency.'),
+      'utf8',
+    );
+  }
+
+  async function writeConsumer(repo: string): Promise<string> {
     await mkdir(join(repo, '.git'), { recursive: true });
     await mkdir(join(repo, 'examples/templates/consumer'), { recursive: true });
     await writeFile(
       join(repo, 'examples/templates/consumer/cyan.yaml'),
-      YAML.stringify({
-        cyanprint: 4,
-        kind: 'template',
-        owner: 'cyanprint',
-        name: 'ws-default-consumer',
-        bundledEntry: 'cyan.ts',
-        templates: { 'cyanprint/ws-default-dep': null },
-      }),
+      manifestYaml('ws-default-consumer', { templates: { 'cyanprint/ws-default-dep': null } }),
       'utf8',
     );
-    await mkdir(join(elsewhere, 'examples/templates/dep'), { recursive: true });
-    await writeFile(
-      join(elsewhere, 'examples/templates/dep/cyan.yaml'),
-      YAML.stringify({
-        cyanprint: 4,
-        kind: 'template',
-        owner: 'cyanprint',
-        name: 'ws-default-dep',
-        bundledEntry: 'cyan.ts',
-      }),
-      'utf8',
-    );
+    return join(repo, 'examples/templates/consumer');
+  }
+
+  test('the cwd stays a fallback when the template lives in a git repo that lacks the dependency', async () => {
+    const repo = join(workRoot, 'ws-default-repo');
+    const elsewhere = join(workRoot, 'ws-default-elsewhere');
+    const templateDir = await writeConsumer(repo);
+    await writeDependency(elsewhere, 'cwd-dep-probe');
     const previous = process.cwd();
     process.chdir(elsewhere);
     try {
-      // The dependency only exists under the cwd, not in the template's own repo:
-      // the result must not depend on where the CLI happens to run.
-      await expect(
-        resolveProbesForTemplate({
-          templateDir: join(repo, 'examples/templates/consumer'),
-          features: [{ template: 'cyanprint/ws-default-consumer', name: 'gate' }],
-        }),
-      ).rejects.toThrow(/Unable to resolve child template cyanprint\/ws-default-dep/);
+      const [resolved] = await resolveProbesForTemplate({
+        templateDir,
+        features: [{ template: 'cyanprint/ws-default-dep', name: 'gate' }],
+      });
+      expect(resolved?.probes[0]?.probe.name).toBe('cwd-dep-probe');
+    } finally {
+      process.chdir(previous);
+    }
+  });
+
+  test('the template repo root wins over the cwd when both hold the dependency', async () => {
+    const repo = join(workRoot, 'ws-both-repo');
+    const elsewhere = join(workRoot, 'ws-both-elsewhere');
+    const templateDir = await writeConsumer(repo);
+    await writeDependency(repo, 'repo-dep-probe');
+    await writeDependency(elsewhere, 'cwd-dep-probe');
+    const previous = process.cwd();
+    process.chdir(elsewhere);
+    try {
+      const [resolved] = await resolveProbesForTemplate({
+        templateDir,
+        features: [{ template: 'cyanprint/ws-default-dep', name: 'gate' }],
+      });
+      expect(resolved?.probes[0]?.probe.name).toBe('repo-dep-probe');
     } finally {
       process.chdir(previous);
     }

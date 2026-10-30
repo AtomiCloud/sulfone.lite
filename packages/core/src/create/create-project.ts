@@ -28,6 +28,7 @@ import { CyanError, declaredDependencyKeys, problem, vfsModeFromFileMode } from 
 import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
+import { defaultWorkspaceRoots } from '../util/workspace-root';
 import { POST_GENERATION_TIMEOUT_ENV } from '../commands/post-generation-command';
 import { processorCacheKey, readProcessorCache, writeProcessorCache } from '../cache/processor-cache';
 import { resolveLayers, type ResolutionLayer, type ResolverInvoker } from '../merge/resolve-layers';
@@ -703,7 +704,7 @@ async function executeChildTemplate(
   stack: Set<string>,
 ): Promise<GeneratedTemplate> {
   const childDir = await resolveDevTemplateDir({
-    workspaceRoot: process.cwd(),
+    workspaceRoot: await defaultWorkspaceRoots(parentDir),
     templateDir: parentDir,
     dependency,
     defaultOwner,
@@ -1721,7 +1722,7 @@ export type ResolvedDevTemplate = {
  * walks the same composition graph.
  */
 export async function resolveDevTemplate(args: {
-  workspaceRoot: string;
+  workspaceRoot: string | string[];
   templateDir: string;
   dependency: ArtifactDependency;
   defaultOwner: string;
@@ -1736,7 +1737,7 @@ export async function resolveDevTemplate(args: {
       `Local template fallback is disabled and no cached template was found for ${args.dependency.owner ?? args.defaultOwner}/${args.dependency.name}`,
     );
   }
-  for (const root of await findTemplateRoots(args.templateDir, args.workspaceRoot)) {
+  for (const root of await findTemplateRoots(args.templateDir, ...[args.workspaceRoot].flat())) {
     const entries = await readdir(root, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) {
@@ -1768,7 +1769,7 @@ export async function resolveDevTemplate(args: {
  * {@link resolveDevTemplate} for callers that only need the path.
  */
 export async function resolveDevTemplateDir(args: {
-  workspaceRoot: string;
+  workspaceRoot: string | string[];
   templateDir: string;
   dependency: ArtifactDependency;
   defaultOwner: string;

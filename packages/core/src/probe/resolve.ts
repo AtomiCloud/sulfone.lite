@@ -1,10 +1,10 @@
-import { realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 import type { ProbeFeatureIdentity, ProbeResolutionOrigin } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevTemplate } from '../create/create-project';
 import { exists, safeJoin } from '../util';
+import { defaultWorkspaceRoots } from '../util/workspace-root';
 import { builtInProbeDefinition } from './builtins';
 import { loadProbeDefinitionFile } from './load-probe';
 import type { ResolvedFeatureProbes, ResolvedProbe } from './matrix';
@@ -66,27 +66,6 @@ type CollectedOverride = {
   bundled: boolean;
 };
 
-/**
- * Default workspace root for local dependency lookup: the template's own repo
- * root (nearest ancestor holding `.git`), so resolution does not depend on where
- * the CLI was launched. Only when no repo root exists does it fall back to the
- * process cwd.
- */
-async function defaultWorkspaceRoot(templateDir: string): Promise<string> {
-  // Follow symlinks: a linked template dir must search the repo it really lives in.
-  let current = await realpath(resolve(templateDir)).catch(() => resolve(templateDir));
-  while (true) {
-    if (await exists(join(current, '.git'))) {
-      return current;
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      return process.cwd();
-    }
-    current = parent;
-  }
-}
-
 /** Declaration mode: resolve every declared feature for a consumer template. */
 export async function resolveProbesForTemplate(args: {
   templateDir: string;
@@ -95,7 +74,7 @@ export async function resolveProbesForTemplate(args: {
   workspaceRoot?: string;
   localFallback?: boolean;
 }): Promise<ResolvedFeatureProbes[]> {
-  const workspaceRoot = args.workspaceRoot ?? (await defaultWorkspaceRoot(args.templateDir));
+  const workspaceRoot = args.workspaceRoot ?? (await defaultWorkspaceRoots(args.templateDir));
   const { nodes, overrides } = await walkComposition(args.templateDir, workspaceRoot, args.localFallback);
   const consumer = [...nodes.values()].find(node => node.distance === 0);
   if (!consumer) {
@@ -161,7 +140,7 @@ export async function resolveProbesFromSource(args: {
 
 async function walkComposition(
   templateDir: string,
-  workspaceRoot: string,
+  workspaceRoot: string | string[],
   localFallback?: boolean,
 ): Promise<{ nodes: Map<string, CompositionNode>; overrides: CollectedOverride[] }> {
   const nodes = new Map<string, CompositionNode>();

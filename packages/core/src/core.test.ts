@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { CyanError, type VfsFile } from '@cyanprint/contracts';
@@ -4988,4 +4988,66 @@ describe.skipIf(process.platform === 'win32')('executable file mode', () => {
       await rm(cacheDir, { recursive: true, force: true });
     }
   });
+});
+
+describe('child template resolution root', () => {
+  test(
+    'dependency templates resolve from the template repo root first, then fall back to the cwd',
+    async () => {
+      const repo = await makeFixture('child-root-repo');
+      const elsewhere = await makeFixture('child-root-cwd');
+      const previous = process.cwd();
+      try {
+        await mkdir(join(repo.root, '.git'), { recursive: true });
+        // Only the cwd holds this dependency: the repo-root-first order must not
+        // drop the cwd fallback when the template sits inside a git repo.
+        await writeVarsProcessor(elsewhere);
+        await writeTemplate(elsewhere, { name: 'cwd-only-dep', files: { 'DEP.md': 'from cwd\n' } });
+        await writeVarsProcessor(repo);
+        const consumer = await writeTemplate(repo, {
+          name: 'cwd-fallback-consumer',
+          files: { 'ROOT.md': 'root\n' },
+          templates: { 'cyanprint/cwd-only-dep': null },
+        });
+
+        process.chdir(elsewhere.root);
+        await createProject({ template: consumer, outDir: repo.out, headless: true });
+        expect(await readFile(join(repo.out, 'DEP.md'), 'utf8')).toBe('from cwd\n');
+      } finally {
+        process.chdir(previous);
+        await repo.cleanup();
+        await elsewhere.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'a dependency present in both the template repo and the cwd resolves to the repo copy',
+    async () => {
+      const repo = await makeFixture('child-root-both-repo');
+      const elsewhere = await makeFixture('child-root-both-cwd');
+      const previous = process.cwd();
+      try {
+        await mkdir(join(repo.root, '.git'), { recursive: true });
+        await writeTemplate(elsewhere, { name: 'shared-dep', files: { 'DEP.md': 'from cwd\n' } });
+        await writeTemplate(repo, { name: 'shared-dep', files: { 'DEP.md': 'from repo\n' } });
+        await writeVarsProcessor(repo);
+        const consumer = await writeTemplate(repo, {
+          name: 'both-consumer',
+          files: { 'ROOT.md': 'root\n' },
+          templates: { 'cyanprint/shared-dep': null },
+        });
+
+        process.chdir(elsewhere.root);
+        await createProject({ template: consumer, outDir: repo.out, headless: true });
+        expect(await readFile(join(repo.out, 'DEP.md'), 'utf8')).toBe('from repo\n');
+      } finally {
+        process.chdir(previous);
+        await repo.cleanup();
+        await elsewhere.cleanup();
+      }
+    },
+    LONG,
+  );
 });
