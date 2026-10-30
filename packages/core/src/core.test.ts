@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { CyanError, type VfsFile } from '@cyanprint/contracts';
@@ -24,6 +24,7 @@ import {
   loadGeneratedState,
   readMergeOurs,
   readProjectFiles,
+  processorCacheKey,
   migrateGeneratedState,
   readProcessorCache,
   resolveCyanCacheDir,
@@ -4768,5 +4769,137 @@ describe('trust store', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('executable file mode', () => {
+  const isExecutable = async (path: string): Promise<boolean> => ((await stat(path)).mode & 0o100) !== 0;
+  const isWorldWritable = async (path: string): Promise<boolean> => ((await stat(path)).mode & 0o002) !== 0;
+
+  test(
+    'create keeps the executable bit of a template script',
+    async () => {
+      const fixture = await makeFixture('mode-create');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, {
+          name: 'exec-create',
+          files: { 'scripts/run.sh': '#!/usr/bin/env bash\necho __NAME__\n', 'README.md': '# readme\n' },
+        });
+        await chmod(join(template, 'template/scripts/run.sh'), 0o755);
+
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        expect(await isExecutable(join(fixture.out, 'scripts/run.sh'))).toBe(true);
+        expect(await isWorldWritable(join(fixture.out, 'scripts/run.sh'))).toBe(false);
+        expect(await isExecutable(join(fixture.out, 'README.md'))).toBe(false);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update keeps the executable bit through the three-way merge',
+    async () => {
+      const fixture = await makeFixture('mode-update');
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'exec-upd',
+          v1Files: { 'scripts/run.sh': 'echo v1\n', 'NEW.md': 'x\n' },
+          v2Files: { 'scripts/run.sh': 'echo v2\n', 'scripts/extra.sh': 'echo extra\n', 'NEW.md': 'x\n' },
+        });
+        await chmod(join(pair.v1, 'template/scripts/run.sh'), 0o755);
+        await chmod(join(pair.v2, 'template/scripts/run.sh'), 0o755);
+        await chmod(join(pair.v2, 'template/scripts/extra.sh'), 0o755);
+
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        expect(await isExecutable(join(fixture.out, 'scripts/run.sh'))).toBe(true);
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(await readOut(fixture.out, 'scripts/run.sh')).toBe('echo v2\n');
+        expect(await isExecutable(join(fixture.out, 'scripts/run.sh'))).toBe(true);
+        expect(await isExecutable(join(fixture.out, 'scripts/extra.sh'))).toBe(true);
+        expect(await isExecutable(join(fixture.out, 'NEW.md'))).toBe(false);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test('globTemplateFiles reports the executable bit as VfsFile.mode', async () => {
+    const { globTemplateFiles } = await import('./scripts/load-cyan-script');
+    const fixture = await makeFixture('mode-glob');
+    try {
+      const templateRoot = join(fixture.templates, 'mode-glob');
+      await mkdir(join(templateRoot, 'template'), { recursive: true });
+      await writeFile(join(templateRoot, 'template/run.sh'), 'echo\n', 'utf8');
+      await writeFile(join(templateRoot, 'template/plain.txt'), 'text\n', 'utf8');
+      await chmod(join(templateRoot, 'template/run.sh'), 0o755);
+
+      const files = await globTemplateFiles(templateRoot, '**/*', { base: 'template', mode: 'template' });
+      expect(files.find(file => file.path === 'run.sh')?.mode).toBe(0o755);
+      expect(files.find(file => file.path === 'plain.txt')?.mode).toBeUndefined();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test('gitThreeWayMerge carries mode changes and applyMergedTree writes them back', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-mode-merge-'));
+    try {
+      const base = [
+        { path: 'a.sh', content: 'a\n' },
+        { path: 'b.sh', content: 'b\n', mode: 0o755 },
+        { path: 'c.sh', content: 'c\n', mode: 0o755 },
+      ];
+      // theirs: a.sh gains +x, b.sh loses +x, c.sh keeps +x and changes content.
+      const theirs = [
+        { path: 'a.sh', content: 'a\n', mode: 0o755 },
+        { path: 'b.sh', content: 'b\n' },
+        { path: 'c.sh', content: 'c2\n', mode: 0o755 },
+      ];
+      await writeFile(join(dir, 'a.sh'), 'a\n', 'utf8');
+      await writeFile(join(dir, 'b.sh'), 'b\n', 'utf8');
+      await writeFile(join(dir, 'c.sh'), 'c\n', 'utf8');
+      await chmod(join(dir, 'b.sh'), 0o755);
+      await chmod(join(dir, 'c.sh'), 0o755);
+
+      const merge = await gitThreeWayMerge({ base, ours: base, theirs });
+      expect(merge.conflicts).toEqual([]);
+      expect(Object.fromEntries(merge.files.map(file => [file.path, file.mode]))).toEqual({
+        'a.sh': 0o755,
+        'b.sh': undefined,
+        'c.sh': 0o755,
+      });
+
+      await applyMergedTree(dir, merge);
+      expect(await isExecutable(join(dir, 'a.sh'))).toBe(true);
+      expect(await isExecutable(join(dir, 'b.sh'))).toBe(false);
+      expect(await isExecutable(join(dir, 'c.sh'))).toBe(true);
+      expect(await Bun.file(join(dir, 'c.sh')).text()).toBe('c2\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('processorCacheKey distinguishes an executable input from a plain one', () => {
+    const plain = processorCacheKey({ integrity: 'i', config: {}, inputFiles: [{ path: 'run.sh', content: 'x' }] });
+    const exec = processorCacheKey({
+      integrity: 'i',
+      config: {},
+      inputFiles: [{ path: 'run.sh', content: 'x', mode: 0o755 }],
+    });
+    expect(exec).not.toBe(plain);
   });
 });

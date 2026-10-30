@@ -90,7 +90,7 @@ export async function resolveLayers(args: {
           origin: contributors[index] as FileOrigin,
         })),
       });
-      output.push({ path, content });
+      output.push({ path, content, ...(winner.file.mode !== undefined ? { mode: winner.file.mode } : {}) });
       decisions.push({
         path,
         source: winner.layer.template,

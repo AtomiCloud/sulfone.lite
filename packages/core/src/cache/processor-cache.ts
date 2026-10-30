@@ -18,6 +18,10 @@ export function processorCacheKey(args: { integrity: string; config: unknown; in
     const type = file.bytesBase64 !== undefined ? 'binary' : 'text';
     const bytes = file.bytesBase64 !== undefined ? file.bytesBase64 : (file.content ?? '');
     parts.push(file.path, '\0', type, '\0', sha256(bytes), '\0');
+    // Appended only for an executable file so the keys of mode-free inputs stay unchanged.
+    if (file.mode !== undefined) {
+      parts.push(`mode:${file.mode}`, '\0');
+    }
   }
   return sha256(parts.join(''));
 }

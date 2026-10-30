@@ -1,6 +1,10 @@
+import { vfsModeFromFileMode } from './runtime';
+
 export type TemplateTarFile = {
   path: string;
   bytes: Uint8Array;
+  /** `EXECUTABLE_FILE_MODE` when the header marks the entry executable; omitted otherwise. */
+  mode?: number;
 };
 
 export function validateTemplateTarPayload(payload: Uint8Array): string | undefined {
@@ -43,7 +47,12 @@ export function readTemplateTarFiles(payload: Uint8Array): TemplateTarFile[] {
         throw new Error(`template archive payload has a duplicate file path: ${path}`);
       }
       seenPaths.add(normalizedPath);
-      files.push({ path: normalizedPath, bytes: payload.slice(dataStart, dataEnd) });
+      const mode = vfsModeFromFileMode(parseTarMode(header.slice(100, 108)));
+      files.push({
+        path: normalizedPath,
+        bytes: payload.slice(dataStart, dataEnd),
+        ...(mode !== undefined ? { mode } : {}),
+      });
     } else if (typeFlag !== 53) {
       throw new Error(`template archive payload has an unsupported entry type: ${path}`);
     }
@@ -90,6 +99,12 @@ function parseTarOctal(bytes: Uint8Array, message: string): number {
     throw new Error(message);
   }
   return value;
+}
+
+// Lenient: the mode never gates an archive's validity, so a malformed field just means "not executable".
+function parseTarMode(bytes: Uint8Array): number {
+  const text = decodeTarString(bytes).trim();
+  return /^[0-7]+$/.test(text) ? Number.parseInt(text, 8) : 0;
 }
 
 function decodeTarString(bytes: Uint8Array): string {

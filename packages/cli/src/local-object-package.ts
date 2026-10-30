@@ -1,7 +1,7 @@
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
-import { readTemplateTarFiles } from '@cyanprint/contracts';
-import { safeJoin, sha256 } from '@cyanprint/core';
+import { isExecutableMode, readTemplateTarFiles } from '@cyanprint/contracts';
+import { applyFileMode, safeJoin, sha256 } from '@cyanprint/core';
 import { decompress } from 'fzstd';
 
 type LocalObjectPackage = {
@@ -99,6 +99,7 @@ export async function unpackTemplateArchivePayload(payload: string | Uint8Array,
       const target = safeJoin(outDir, file.path);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, file.bytes);
+      await applyFileMode(target, file.mode);
     }
     return;
   }
@@ -118,6 +119,7 @@ export async function unpackTemplateArchivePayload(payload: string | Uint8Array,
     const target = safeJoin(outDir, file.path);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.bytes);
+    await applyFileMode(target, file.mode);
   }
 }
 
@@ -163,7 +165,8 @@ async function createTarPayload(root: string, paths: string[]): Promise<Uint8Arr
   const chunks: Uint8Array[] = [];
   for (const path of paths) {
     const bytes = await readFile(safeJoin(root, path));
-    chunks.push(createTarHeader(path, bytes.byteLength), bytes);
+    const executable = isExecutableMode((await stat(safeJoin(root, path))).mode);
+    chunks.push(createTarHeader(path, bytes.byteLength, executable), bytes);
     const padding = (512 - (bytes.byteLength % 512)) % 512;
     if (padding > 0) {
       chunks.push(new Uint8Array(padding));
@@ -173,11 +176,11 @@ async function createTarPayload(root: string, paths: string[]): Promise<Uint8Arr
   return concatBytes(chunks);
 }
 
-function createTarHeader(path: string, size: number): Uint8Array {
+function createTarHeader(path: string, size: number, executable: boolean): Uint8Array {
   const header = new Uint8Array(512);
   const { name, prefix } = splitUstarPath(path);
   writeTarString(header, 0, 100, name);
-  writeTarString(header, 100, 8, '0000644');
+  writeTarString(header, 100, 8, executable ? '0000755' : '0000644');
   writeTarString(header, 108, 8, '0000000');
   writeTarString(header, 116, 8, '0000000');
   writeTarString(header, 124, 12, size.toString(8).padStart(11, '0'));

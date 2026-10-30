@@ -76,8 +76,27 @@ export type VfsFile = {
   path: string;
   content?: string;
   bytesBase64?: string;
+  /**
+   * POSIX permission bits. Only the executable bits are carried end to end: readers report
+   * `EXECUTABLE_FILE_MODE` for an executable file and omit `mode` otherwise, so ordinary files stay
+   * byte-for-byte identical to a pre-mode VFS. Writers add the executable bits for an executable
+   * mode and clear them for any other mode; an absent `mode` leaves the file's mode alone.
+   */
   mode?: number;
 };
+
+/** The only non-default mode CyanPrint carries: an executable file (`chmod 0755`). */
+export const EXECUTABLE_FILE_MODE = 0o755;
+
+/** True when any executable bit (user, group or other) is set. */
+export function isExecutableMode(mode: number | undefined): boolean {
+  return mode !== undefined && (mode & 0o111) !== 0;
+}
+
+/** Normalize an on-disk mode (`stat.mode`, tar header) to the `VfsFile.mode` CyanPrint carries. */
+export function vfsModeFromFileMode(mode: number): number | undefined {
+  return isExecutableMode(mode) ? EXECUTABLE_FILE_MODE : undefined;
+}
 
 /**
  * CyanPrint-managed metadata that lives alongside generated files but is never part of

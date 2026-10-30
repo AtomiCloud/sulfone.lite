@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { decodeText, mapWithConcurrency, stateTimestamp, templateDirIntegrity } from './util';
+import { decodeText, mapWithConcurrency, stateTimestamp, templateDirIntegrity, writeVfsFile } from './util';
 
 describe('mapWithConcurrency', () => {
   test('runs up to N tasks concurrently and preserves input order', async () => {
@@ -91,5 +91,38 @@ describe('decodeText', () => {
     const text = decodeText(bytes);
     expect(text).toBe('﻿hi');
     expect(Buffer.from(text ?? '', 'utf8').equals(Buffer.from(bytes))).toBe(true);
+  });
+});
+
+describe('writeVfsFile mode', () => {
+  const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+
+  test('applies the executable bit without making the file world-writable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-util-mode-'));
+    try {
+      await writeVfsFile(dir, { path: 'bin/run.sh', content: 'echo\n', mode: 0o755 });
+      const mode = await modeOf(join(dir, 'bin/run.sh'));
+      expect(mode & 0o100).toBe(0o100);
+      expect(mode & 0o002).toBe(0);
+
+      await writeVfsFile(dir, { path: 'bin/blob', bytesBase64: Buffer.from('x').toString('base64'), mode: 0o755 });
+      expect((await modeOf(join(dir, 'bin/blob'))) & 0o100).toBe(0o100);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('leaves the mode untouched when none is given and clears exec bits for a non-exec mode', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-util-mode-'));
+    try {
+      await writeVfsFile(dir, { path: 'run.sh', content: 'one\n', mode: 0o755 });
+      await writeVfsFile(dir, { path: 'run.sh', content: 'two\n' });
+      expect((await modeOf(join(dir, 'run.sh'))) & 0o100).toBe(0o100);
+
+      await writeVfsFile(dir, { path: 'run.sh', content: 'three\n', mode: 0o644 });
+      expect((await modeOf(join(dir, 'run.sh'))) & 0o111).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
