@@ -23,6 +23,7 @@ import {
   gitThreeWayMerge,
   loadGeneratedState,
   readMergeOurs,
+  readProjectFiles,
   migrateGeneratedState,
   resolveCyanCacheDir,
   resolveLayers,
@@ -2257,6 +2258,23 @@ describe('merge path clashes with the user own paths', () => {
   });
 });
 
+describe('BOM files in the merge round-trip', () => {
+  test('a hard-linked file with a UTF-8 BOM is recognised as unchanged and left alone', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-bom-'));
+    try {
+      const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello\n')]);
+      await writeFile(join(dir, 'bom.txt'), bytes);
+      await link(join(dir, 'bom.txt'), join(dir, 'bom-link.txt'));
+      const files = await readProjectFiles(dir);
+      // Rewriting an unchanged file would trip the hard-link guard.
+      await applyMergedTree(dir, { files, deletions: [], conflicts: [] });
+      expect((await Bun.file(join(dir, 'bom.txt')).bytes()).length).toBe(bytes.length);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('writeGeneratedState link safety', () => {
   const state = buildGeneratedState({ templates: [], files: [], provenance: [] });
 
@@ -2532,6 +2550,34 @@ describe('update', () => {
         expect((failure as CyanError).message).toContain('cannot be updated');
         expect(await readOut(fixture.out, 'README.md')).toBe('v1\n');
         expect((await loadGeneratedState(fixture.out)).templates[0]?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update --template only checks the targeted local install, not an edited sibling',
+    async () => {
+      const fixture = await makeFixture('update-local-sibling');
+      try {
+        await writeVarsProcessor(fixture);
+        const one = await writeTemplate(fixture, { name: 'one', files: { 'ONE.md': 'one\n' } });
+        const two = await writeTemplate(fixture, { name: 'two', files: { 'TWO.md': 'two\n' } });
+        await createProject({ template: one, outDir: fixture.out, headless: true });
+        await createProject({ template: two, outDir: fixture.out, headless: true });
+        await writeFile(join(two, 'template', 'TWO.md'), 'two edited\n', 'utf8');
+
+        const update = await updateProject({ projectDir: fixture.out, headless: true, template: 'cyanprint/one' });
+        expect(update.status).toBe('done');
+
+        const failure = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          template: 'cyanprint/two',
+        }).catch(error => error);
+        expect((failure as CyanError).problem.code).toBe('local_template_not_updatable');
       } finally {
         await fixture.cleanup();
       }

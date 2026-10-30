@@ -105,7 +105,9 @@ export async function updateProject(args: {
       generation: await regenerateInstalledTemplate(entry, resolveSource, generationOptions),
     });
   }
-  await assertLocalTemplatesUnchanged(baseGenerations);
+  // Only the templates being updated need their base to be reproducible; an old or edited
+  // local install elsewhere in the project is untouched by `update --template`.
+  await assertLocalTemplatesUnchanged(baseGenerations.filter(item => targets.includes(item.entry)));
 
   // Theirs: targets execute their new versions, reusing saved answers (only new
   // questions prompt; prior values as defaults). Untouched templates reuse their base
@@ -317,10 +319,13 @@ async function assertLocalTemplatesUnchanged(
       continue;
     }
     const current = new Map(
-      generation.artifacts.filter(item => item.kind === TEMPLATE_SOURCE_KIND).map(item => [item.name, item.integrity]),
+      generation.artifacts
+        .filter(item => item.kind === TEMPLATE_SOURCE_KIND)
+        .map(item => [`${item.owner}/${item.name}`, item.integrity]),
     );
     const recorded = entry.artifacts.filter(item => item.kind === TEMPLATE_SOURCE_KIND);
-    const unchanged = recorded.length > 0 && recorded.every(item => current.get(item.name) === item.integrity);
+    const unchanged =
+      recorded.length > 0 && recorded.every(item => current.get(`${item.owner}/${item.name}`) === item.integrity);
     if (!unchanged) {
       throw new CyanError(
         problem(
