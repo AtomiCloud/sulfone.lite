@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadManifest, runArtifactTests, runTemplateTest, safeJoin } from '@cyanprint/core';
 import { RegistryClient, registryClientOptionsFromEnv } from '@cyanprint/registry-client';

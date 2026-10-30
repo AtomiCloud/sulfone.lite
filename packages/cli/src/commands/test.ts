@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { loadManifest, runArtifactTests, runTemplateTest } from '@cyanprint/core';

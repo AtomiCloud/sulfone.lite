@@ -1,5 +1,5 @@
 import { basename, dirname, join, relative } from 'node:path';
-import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import YAML from 'yaml';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
 import {

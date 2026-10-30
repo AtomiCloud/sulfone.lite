@@ -1,10 +1,4 @@
-import {
-  artifactIntegrity,
-  artifactVersionId,
-  type ArtifactPublish,
-  type ArtifactVersion,
-  type ObjectRef,
-} from '@cyanprint/contracts';
+import { artifactIntegrity, artifactVersionId, type ArtifactVersion, type ObjectRef } from '@cyanprint/contracts';
 import {
   artifactMatchesQuery,
   artifactSearchText,

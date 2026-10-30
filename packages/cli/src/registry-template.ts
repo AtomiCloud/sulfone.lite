@@ -17,8 +17,6 @@ import { artifactIntegrity, type ArtifactVersion, type ObjectRef } from '@cyanpr
 import { defaultRegistryUrl } from './registry-defaults';
 import { unpackLocalObjectPayload, unpackTemplateArchivePayload } from './local-object-package';
 
-const textEncoder = new TextEncoder();
-
 /**
  * A registry-aware resolver for installed templates' recorded sources: local paths pass
  * through; registry refs hydrate the requested version (or latest when none is given).

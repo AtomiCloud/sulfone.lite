@@ -4,7 +4,6 @@ import YAML from 'yaml';
 import { decompress } from 'fzstd';
 import {
   ArtifactPublishSchema,
-  artifactIntegrity,
   MAX_BATCH_RESOLVE_REFS,
   ObjectRefSchema,
   isSafeArchivePath,

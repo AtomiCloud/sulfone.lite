@@ -3,7 +3,6 @@ import {
   copyFile,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   realpath,

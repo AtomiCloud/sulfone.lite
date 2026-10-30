@@ -1,5 +1,3 @@
-import { mkdtemp } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { PromptAdapter } from '@cyanprint/contracts';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { flagString, parseFlags } from '../args';
