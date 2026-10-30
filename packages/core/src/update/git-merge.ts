@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { VfsFile } from '@cyanprint/contracts';
+import { vfsModeFromFileMode, type VfsFile } from '@cyanprint/contracts';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { comparePaths, decodeText, pruneEmptyDirs, safeJoin, writeVfsFile } from '../util';
 
@@ -31,6 +31,7 @@ export async function gitThreeWayMerge(args: {
     await git(repo, ['config', 'user.name', 'cyanprint']);
     await git(repo, ['config', 'commit.gpgsign', 'false']);
     await git(repo, ['config', 'core.autocrlf', 'false']);
+    await git(repo, ['config', 'core.fileMode', 'true']);
 
     await writeTree(repo, args.base);
     await commitAll(repo, 'base');
@@ -104,9 +105,12 @@ async function readTree(repo: string): Promise<VfsFile[]> {
     }
     const bytes = new Uint8Array(await Bun.file(join(repo, path)).arrayBuffer());
     const text = decodeText(bytes);
-    files.push(
-      text === undefined ? { path, bytesBase64: Buffer.from(bytes).toString('base64') } : { path, content: text },
-    );
+    const mode = vfsModeFromFileMode((await stat(join(repo, path))).mode);
+    files.push({
+      path,
+      ...(text === undefined ? { bytesBase64: Buffer.from(bytes).toString('base64') } : { content: text }),
+      ...(mode !== undefined ? { mode } : {}),
+    });
   }
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }

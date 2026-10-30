@@ -2,9 +2,9 @@
 // Moved verbatim from the artifact-runner so helper reads/writes go through the
 // exact same safe-path and binary-handling logic as the runtime.
 
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
-import { isCyanMetadataPath } from '@cyanprint/contracts';
+import { isCyanMetadataPath, isExecutableMode, vfsModeFromFileMode } from '@cyanprint/contracts';
 import type { VfsFile } from './sdk-types';
 
 export type ReadVfsOptions = {
@@ -22,6 +22,23 @@ export async function writeVfsFiles(root: string, files: VfsFile[]): Promise<voi
       target,
       file.bytesBase64 !== undefined ? Buffer.from(file.bytesBase64, 'base64') : (file.content ?? ''),
     );
+    await applyFileMode(target, file.mode);
+  }
+}
+
+/**
+ * Apply a `VfsFile.mode` to a written file: an executable mode adds the executable bit wherever the
+ * file is already readable (`chmod +x`, so the umask is respected and no write bit is ever added); any
+ * other mode clears the executable bits. An undefined mode leaves the file alone.
+ */
+export async function applyFileMode(path: string, mode: number | undefined): Promise<void> {
+  if (mode === undefined) {
+    return;
+  }
+  const current = (await stat(path)).mode & 0o777;
+  const next = isExecutableMode(mode) ? current | ((current & 0o444) >> 2) : current & ~0o111;
+  if (next !== current) {
+    await chmod(path, next);
   }
 }
 
@@ -36,11 +53,12 @@ export async function readVfsFiles(root: string, options: ReadVfsOptions = {}): 
     }
     const bytes = await readFile(path);
     const content = decodeUtf8(bytes);
-    files.push(
-      content === undefined
-        ? { path: relativePath, bytesBase64: Buffer.from(bytes).toString('base64') }
-        : { path: relativePath, content },
-    );
+    const mode = vfsModeFromFileMode((await stat(path)).mode);
+    files.push({
+      path: relativePath,
+      ...(content === undefined ? { bytesBase64: Buffer.from(bytes).toString('base64') } : { content }),
+      ...(mode !== undefined ? { mode } : {}),
+    });
   });
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }

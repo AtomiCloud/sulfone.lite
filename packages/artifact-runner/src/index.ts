@@ -22,7 +22,7 @@ import { createPluginHelper, createProcessorFsHelper } from './helpers';
 import type { Plugin, Processor, ResolvedFile, Resolver, ResolverOutput } from './sdk-types';
 
 export type { FileOrigin, ResolvedFile, ResolverInput, ResolverOutput } from './sdk-types';
-export { overlayFiles } from './fs-utils';
+export { applyFileMode, overlayFiles } from './fs-utils';
 
 const resolverSymbol = Symbol.for('cyanprint.resolver');
 const runtimeExportCache = new Map<string, unknown>();
@@ -373,11 +373,24 @@ async function invokeFolderArtifact(args: {
     await assertNoSandboxEscapes(root, entryName => entryName === 'input' || entryName === 'output');
     await assertManagedDirectory(root, inputDir, 'input');
     await assertManagedDirectory(root, outputDir, 'output');
-    const output = await readVfsFiles(outputDir);
+    const output = inheritInputModes(args.files, await readVfsFiles(outputDir));
     return args.options.preservePrevious ? overlayFiles(args.files, output) : output;
   } finally {
     await rm(container, { recursive: true, force: true });
   }
+}
+
+/**
+ * A processor writes fresh files into `outputDir`, so a script it merely rewrites would lose the
+ * executable bit it arrived with. An output at the same path as an executable input keeps that mode
+ * unless the processor already marked the output executable itself.
+ */
+function inheritInputModes(input: VfsFile[], output: VfsFile[]): VfsFile[] {
+  const inputModes = new Map(input.filter(file => file.mode !== undefined).map(file => [file.path, file.mode]));
+  return output.map(file => {
+    const mode = inputModes.get(file.path);
+    return file.mode === undefined && mode !== undefined ? { ...file, mode } : file;
+  });
 }
 
 async function mkTempRoot(prefix: string): Promise<{ container: string; root: string }> {

@@ -705,3 +705,88 @@ describe('pin integrity cache bundled artifact', () => {
     }
   });
 });
+
+describe.skipIf(process.platform === 'win32')('executable file mode', () => {
+  const processorBundle = async (
+    dir: string,
+    source: string,
+    name: string,
+  ): Promise<Parameters<typeof invokeProcessor>[0]> => {
+    const runtimeFile = join(dir, `${name}.ts`);
+    await writeFile(runtimeFile, source, 'utf8');
+    return {
+      dependency: { kind: 'processor', owner: 'cyanprint', name, version: '1' },
+      runtimeFile,
+      integrity: sha256(source),
+    };
+  };
+
+  test('processor output chmod 0755 is reported as mode 0o755', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-runner-mode-'));
+    try {
+      const bundle = await processorBundle(
+        dir,
+        [
+          "import { chmod } from 'node:fs/promises';",
+          'export async function processor(input) {',
+          '  await Bun.write(input.outputDir + "/run.sh", "echo\\n");',
+          '  await chmod(input.outputDir + "/run.sh", 0o755);',
+          '  await Bun.write(input.outputDir + "/plain.txt", "text\\n");',
+          '}',
+        ].join('\n'),
+        'chmod-out',
+      );
+      const output = await invokeProcessor(bundle, [{ path: 'seed.txt', content: 'seed' }]);
+      expect(output.find(file => file.path === 'run.sh')?.mode).toBe(0o755);
+      expect(output.find(file => file.path === 'plain.txt')?.mode).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('processor input receives the executable bit and a rewritten file keeps it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-runner-mode-'));
+    try {
+      const bundle = await processorBundle(
+        dir,
+        [
+          'export async function processor(input) {',
+          '  const text = await Bun.file(input.inputDir + "/run.sh").text();',
+          '  await Bun.write(input.outputDir + "/run.sh", text.toUpperCase());',
+          '  await Bun.write(input.outputDir + "/other.txt", "x");',
+          '}',
+        ].join('\n'),
+        'rewrite',
+      );
+      const output = await invokeProcessor(bundle, [
+        { path: 'run.sh', content: 'echo\n', mode: 0o755 },
+        { path: 'other.txt', content: 'o\n' },
+      ]);
+      expect(output.find(file => file.path === 'run.sh')).toEqual({ path: 'run.sh', content: 'ECHO\n', mode: 0o755 });
+      expect(output.find(file => file.path === 'other.txt')?.mode).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('plugin keeps the executable bit of seeded files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-runner-mode-'));
+    try {
+      const runtimeFile = join(dir, 'plugin.ts');
+      const source =
+        'export async function plugin(input) { await Bun.write(input.outputDir + "/run.sh", "changed\\n"); }';
+      await writeFile(runtimeFile, source, 'utf8');
+      const output = await invokePlugin(
+        {
+          dependency: { kind: 'plugin', owner: 'cyanprint', name: 'mode', version: '1' },
+          runtimeFile,
+          integrity: sha256(source),
+        },
+        [{ path: 'run.sh', content: 'echo\n', mode: 0o755 }],
+      );
+      expect(output).toEqual([{ path: 'run.sh', content: 'changed\n', mode: 0o755 }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

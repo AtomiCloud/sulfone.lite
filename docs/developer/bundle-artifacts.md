@@ -40,7 +40,7 @@ export async function resolver(input: ResolverInput): Promise<ResolverOutput> {
 }
 ```
 
-Processors receive `(input, fs)`: `fs.read()` returns the input folder as a VFS, `fs.write(files)` writes the transformed tree to `outputDir`. Processors must be **hermetic** — output is a pure function of (artifact version + integrity, config, input file set); no network, clock, randomness, or machine state. Hermetic outputs are cached content-addressed under `~/.cyan/cache/processor-output/`, and a cache hit skips the invocation.
+Processors receive `(input, fs)`: `fs.read()` returns the input folder as a VFS, `fs.write(files)` writes the transformed tree to `outputDir`. Processors must be **hermetic** — output is a pure function of (artifact version + integrity, config, input file set); no network, clock, randomness, or machine state. Hermetic outputs are cached content-addressed under `~/.cyan/cache/processor-output-v2/`, and a cache hit skips the invocation.
 
 Plugins receive `(input, helper)` after the template's processor outputs have been resolved into a single layer, with `read()`/`write()`/`exec()`.
 

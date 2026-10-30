@@ -12,6 +12,12 @@ export type VfsFile = {
   path: string;
   content?: string;
   bytesBase64?: string;
+  /**
+   * Executable bit only: `0o755` marks an executable file; omit for an ordinary file. A processor
+   * output that omits `mode` at the path of an executable input inherits that input's mode, and
+   * an explicit non-executable mode is not preserved when the output directory is read, so a
+   * processor cannot clear the executable bit of a file it was given.
+   */
   mode?: number;
 };
 

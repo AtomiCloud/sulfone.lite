@@ -173,7 +173,7 @@ cases:
 **Cache:**
 
 - Key: `sha256(artifactIntegrity ‖ canonicalJSON(config) ‖ digest(input files: path + bytes + type))`.
-- Value: the processor's output file set, stored under `~/.cyan/cache/processor-output/<key>/`.
+- Value: the processor's output file set, stored under `~/.cyan/cache/processor-output-v2/<key>/`.
 - Hit → skip invocation entirely. `--bypass-cache` skips reads (still writes). Age/size-based eviction like the bundle cache.
 - Payoff: repeated creates, template tests, and especially **update's base regeneration** become near-instant.
 

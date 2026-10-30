@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { applyFileMode } from '@cyanprint/artifact-runner';
 import { CyanError, problem, type VfsFile } from '@cyanprint/contracts';
+
+export { applyFileMode };
 
 export async function readText(path: string): Promise<string> {
   return readFile(path, 'utf8');
@@ -95,9 +98,10 @@ export async function writeVfsFile(outDir: string, file: VfsFile): Promise<void>
   if (file.bytesBase64 !== undefined) {
     await mkdir(dirname(target), { recursive: true });
     await Bun.write(target, Buffer.from(file.bytesBase64, 'base64'));
-    return;
+  } else {
+    await writeText(target, file.content ?? '');
   }
-  await writeText(target, file.content ?? '');
+  await applyFileMode(target, file.mode);
 }
 
 /**

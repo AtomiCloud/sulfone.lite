@@ -24,7 +24,7 @@ import type {
   ResolverDeclaration,
   VfsFile,
 } from '@cyanprint/contracts';
-import { CyanError, declaredDependencyKeys, problem } from '@cyanprint/contracts';
+import { CyanError, declaredDependencyKeys, problem, vfsModeFromFileMode } from '@cyanprint/contracts';
 import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
@@ -1067,7 +1067,9 @@ export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeRes
     await pruneEmptyDirs(outDir, path);
   }
   for (const file of writes) {
-    await writeVfsFile(outDir, file);
+    // The merge is authoritative for the executable bit: a file it leaves non-executable must lose a
+    // stale `+x` still on disk, so an absent mode is written as an explicit non-executable one.
+    await writeVfsFile(outDir, file.mode === undefined ? { ...file, mode: 0o644 } : file);
   }
 }
 
@@ -1134,7 +1136,12 @@ async function matchesOnDisk(outDir: string, file: VfsFile): Promise<boolean> {
     // Links fall through to `writeVfsFile`, whose guard produces the real refusal.
     await assertRootSafeRead(outDir, file.path);
     const target = safeJoin(outDir, file.path);
-    if (!(await lstat(target)).isFile()) {
+    const info = await lstat(target);
+    if (!info.isFile()) {
+      return false;
+    }
+    // A mode-only change must still be written: compare the executable bit too (POSIX only).
+    if (process.platform !== 'win32' && ((info.mode & 0o100) !== 0) !== (((file.mode ?? 0) & 0o100) !== 0)) {
       return false;
     }
     const wanted =
@@ -1358,11 +1365,12 @@ export async function readProjectFiles(
     }
     const bytes = await readFile(path);
     const text = decodeText(bytes);
-    files.push(
-      text === undefined
-        ? { path: relativePath, bytesBase64: Buffer.from(bytes).toString('base64') }
-        : { path: relativePath, content: text },
-    );
+    const mode = vfsModeFromFileMode((await stat(path)).mode);
+    files.push({
+      path: relativePath,
+      ...(text === undefined ? { bytesBase64: Buffer.from(bytes).toString('base64') } : { content: text }),
+      ...(mode !== undefined ? { mode } : {}),
+    });
   });
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }

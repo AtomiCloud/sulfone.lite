@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { VfsFile } from '@cyanprint/contracts';
 import { sha256, stableConfig } from '../util';
-import { claimCacheRoot, resolveCyanCacheDir } from './cache-paths';
+import { PROCESSOR_OUTPUT_DIR, claimCacheRoot, resolveCyanCacheDir } from './cache-paths';
 
 /**
  * Content-addressed cache of hermetic processor outputs. A processor's output is a pure
@@ -18,12 +18,16 @@ export function processorCacheKey(args: { integrity: string; config: unknown; in
     const type = file.bytesBase64 !== undefined ? 'binary' : 'text';
     const bytes = file.bytesBase64 !== undefined ? file.bytesBase64 : (file.content ?? '');
     parts.push(file.path, '\0', type, '\0', sha256(bytes), '\0');
+    // Appended only for an executable file so the keys of mode-free inputs stay unchanged.
+    if (file.mode !== undefined) {
+      parts.push(`mode:${file.mode}`, '\0');
+    }
   }
   return sha256(parts.join(''));
 }
 
 export function processorCacheDir(cacheDirOverride?: string): string {
-  return join(resolveCyanCacheDir(cacheDirOverride), 'processor-output');
+  return join(resolveCyanCacheDir(cacheDirOverride), PROCESSOR_OUTPUT_DIR);
 }
 
 function entryPath(root: string, key: string): string {

@@ -33,7 +33,12 @@ function cacheLabel(value: string): string {
 export const CACHE_ROOT_MARKER = '.cyanprint-cache';
 
 const CACHE_KIND_DIRS = new Set<string>([...ArtifactKindSchema.options]);
-const PROCESSOR_OUTPUT_DIR = 'processor-output';
+// The current processor-output layout; v1 (`processor-output`) entries predate executable modes and are
+// never read, but `cache clean` still owns and removes them.
+export const PROCESSOR_OUTPUT_DIR = 'processor-output-v2';
+const LEGACY_PROCESSOR_OUTPUT_DIR = 'processor-output';
+const isProcessorOutputDir = (name: string): boolean =>
+  name === PROCESSOR_OUTPUT_DIR || name === LEGACY_PROCESSOR_OUTPUT_DIR;
 // `<owner>-<name>-<24hex>`, optionally with a hydration staging suffix (`.tmp-…`, `.tmp-….old`).
 const ARTIFACT_ENTRY_NAME = /^.+-[0-9a-f]{24}(\.tmp-.+)?$/;
 const PROCESSOR_ENTRY_NAME = /^[0-9a-f]{64}$/;
@@ -63,14 +68,12 @@ export async function inspectCacheRoot(root: string): Promise<CacheRootState> {
   }
   if (top.some(entry => entry.name === CACHE_ROOT_MARKER)) {
     // A marked root is the engine's, but only its own top-level directories are ever removed.
-    const owned = top
-      .map(entry => entry.name)
-      .filter(name => CACHE_KIND_DIRS.has(name) || name === PROCESSOR_OUTPUT_DIR);
+    const owned = top.map(entry => entry.name).filter(name => CACHE_KIND_DIRS.has(name) || isProcessorOutputDir(name));
     return { state: 'marked', entries: owned };
   }
   const foreign: string[] = [];
   for (const entry of top) {
-    const isProcessorOutput = entry.name === PROCESSOR_OUTPUT_DIR;
+    const isProcessorOutput = isProcessorOutputDir(entry.name);
     if (!entry.directory || !(isProcessorOutput || CACHE_KIND_DIRS.has(entry.name))) {
       foreign.push(entry.name);
       continue;

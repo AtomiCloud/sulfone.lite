@@ -1,8 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { join, relative, resolve } from 'node:path';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import type { Answers, CyanOutput, CyanScript, PromptAdapter, PromptRequest, VfsFile } from '@cyanprint/contracts';
-import { CyanError, makePromptContext, problem, promptOptionValue } from '@cyanprint/contracts';
+import { CyanError, makePromptContext, problem, promptOptionValue, vfsModeFromFileMode } from '@cyanprint/contracts';
 import { withTempSession } from '../sessions/temp-session';
 import { comparePaths, safeJoin } from '../util';
 
@@ -209,13 +209,16 @@ export async function globTemplateFiles(
       continue;
     }
     const bytes = await readFile(join(scanRoot, path));
+    const fileMode = vfsModeFromFileMode((await stat(join(scanRoot, path))).mode);
+    const modeField = fileMode !== undefined ? { mode: fileMode } : {};
     if (mode === 'template') {
       const content = decodeTemplateContent(path, bytes);
-      files.push({ path, content });
+      files.push({ path, content, ...modeField });
     } else {
       files.push({
         path,
         bytesBase64: Buffer.from(bytes).toString('base64'),
+        ...modeField,
       });
     }
   }
