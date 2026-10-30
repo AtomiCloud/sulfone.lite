@@ -37,7 +37,7 @@ cyanprint probe --template ./my-template --update-manifest
   - **Repos generated before per-install attribution:** older `.cyan_state.yaml` files carry only the flat feature union, so declaration mode falls back to intersecting it with the install's re-derived features and can attribute a dropped feature only when it cannot be a sibling install's (the probed template's own ref, or a single-install repo). In that legacy fallback a dependency's drifted-away feature in a multi-install repo is scoped out silently. One `cyanprint update` of the repo backfills the per-install attribution and closes that gap.
 - **Explicit-source mode** (`--probes` + `--features`): both inputs are yours; features match the source's `probes/<name>.ts` directly. The run asserts nothing about any template's declared promises, so the manifest gate is skipped. `--features` is a JSON array of `{"template":"owner/name","name":"feature"}` identities (bare names allowed when the probe source is a template dir).
 - `--feature` / `--probe` select subsets (a selected mutation implicitly includes its feature's baselines). Selection output is labelled `selection` — it is a debug view, never matrix results; verdict parity between the two entry points is defined over full matrices only.
-- `--parallel <n>` bounds concurrent matrix runs; `--timeout <seconds>` sets the default per-probe timeout (`setup.pre`/`setup.post` commands have their own, longer, 10-minute timeout); `--keep-sandbox` retains the snapshot and per-run sandboxes (paths printed); `--report <file>` / `--json` emit the machine-readable run report.
+- `--parallel <n>` bounds concurrent matrix runs; `--timeout <seconds>` sets the default per-probe timeout (`setup.pre`/`setup.post` commands have their own, longer timeout: 10 minutes, or `--timeout` when that is longer); `--keep-sandbox` retains the snapshot and per-run sandboxes (paths printed); `--report <file>` / `--json` emit the machine-readable run report.
 - Exit code 1 on any `missed` or `broken` verdict, or any hard error.
 
 ## Test-flow probe tier
@@ -102,6 +102,8 @@ export default {
 ```
 
 Ignored files are never force-added to the engine-owned Git snapshot. This keeps dependency caches available on disk when setup creates them without making Git-aware gates traverse those caches as project source.
+
+**Setup commands must finish their work in the foreground.** When a `setup.pre`/`setup.post` command exits, the engine kills whatever is left in its process group, so a background process it started (`redis-server &`, `npm run dev &`) does not survive. This is deliberate: a lingering process could keep writing into the directory while the engine snapshots and forks it, making every sandbox non-deterministic. Start long-lived services inside the probe that needs them instead (probes are bounded by the per-probe timeout, which also kills their whole process tree). A process that deliberately escapes the group (`setsid`) is outside the engine's containment.
 
 ## Deliberate decisions
 

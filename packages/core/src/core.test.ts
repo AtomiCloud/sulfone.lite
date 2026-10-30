@@ -3249,6 +3249,43 @@ describe('template tests (cyan.test.yaml)', () => {
     },
     LONG,
   );
+
+  test(
+    'a case validationTimeoutMs bounds a hung validation; an invalid value is rejected',
+    async () => {
+      const fixture = await makeFixture('template-test-validation-timeout');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'slow-validation', files: { 'README.md': '# New\n' } });
+        const expectedDir = join(template, 'expected');
+        await mkdir(expectedDir, { recursive: true });
+        await writeFile(join(expectedDir, 'README.md'), '# New\n', 'utf8');
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({
+            cases: [{ name: 'basic', expected: 'expected', validationTimeoutMs: 400, validations: ['sleep 30'] }],
+          }),
+          'utf8',
+        );
+
+        const report = await runTemplateTest({ template, outDir: join(fixture.out, 'timeout') });
+        expect(report).toMatchObject({ passed: 0, failed: 1 });
+        expect(report.cases[0]?.message).toContain('timed out after 400ms');
+
+        await writeFile(
+          join(template, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', expected: 'expected', validationTimeoutMs: -1 }] }),
+          'utf8',
+        );
+        await expect(runTemplateTest({ template, outDir: join(fixture.out, 'invalid') })).rejects.toThrow(
+          'validationTimeoutMs must be a positive integer',
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 });
 
 /** Standalone artifact dir for runArtifactTests: src entry compiled into a temp runtime. */

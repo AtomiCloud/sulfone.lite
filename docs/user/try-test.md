@@ -92,7 +92,20 @@ cases:
 
 Validation entries:
 
-- A string entry is a full shell command run with `$SHELL -lc`.
+- A string entry is a full shell command run with `sh -c` (never your login shell). Write POSIX `sh`: on Debian/Ubuntu `sh` is `dash`, so bashisms like `[[ ]]`, `source`, or `set -o pipefail` fail. Call `bash -c '...'` explicitly when you need bash.
+- Login-profile setup (brew, nvm, asdf shims) is not loaded, so tools must already be on the `PATH` of the `cyanprint` process, or be invoked by absolute path.
+- Each validation command times out after 5 minutes and is killed with its whole process group. Raise or lower this per case with `validationTimeoutMs` (positive integer, milliseconds), e.g. for a nested `cyanprint test` or a slow build:
+
+  ```yaml
+  cases:
+    - name: basic
+      expected: tests/basic/expected
+      validationTimeoutMs: 900000
+      validations:
+        - nix build
+  ```
+
+- A background process a validation starts is killed when that command exits.
 - A mapping entry runs exact argv: `{ command: bun, args: [--eval, "..."] }`.
 - A mapping may also use `{ shell: "command with pipes && redirects" }`.
 - Commands run from the generated output directory.

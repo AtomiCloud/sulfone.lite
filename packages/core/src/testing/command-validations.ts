@@ -20,6 +20,17 @@ export type CommandValidation =
       shell: true;
     };
 
+/** Read an optional per-case `validationTimeoutMs` (positive integer milliseconds). */
+export function readValidationTimeoutMs(value: unknown, label: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer (milliseconds).`);
+  }
+  return value;
+}
+
 export function readCommandValidations(value: unknown, label: string): CommandValidation[] {
   if (value === undefined) {
     return [];
