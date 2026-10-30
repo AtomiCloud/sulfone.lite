@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 
 export type TempSession = {

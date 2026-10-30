@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { rm, writeFile } from 'node:fs/promises';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { loadManifest, runArtifactTests, runTemplateTest } from '@cyanprint/core';
 import { parseFlags, flagBool, flagString, parseParallel } from '../args';
+import { defaultTemplateAnswers } from '../default-answers';
 import { failure, kv, printJson, printSection, success } from '../ui';
 
 export async function testCommand(argv: string[]): Promise<void> {
@@ -60,9 +60,4 @@ export async function testCommand(argv: string[]): Promise<void> {
   if (report.failed > 0) {
     process.exitCode = 1;
   }
-}
-
-async function defaultTemplateAnswers(target: string): Promise<string | undefined> {
-  const answers = join(target, 'answers.json');
-  return (await Bun.file(answers).exists()) ? answers : undefined;
 }

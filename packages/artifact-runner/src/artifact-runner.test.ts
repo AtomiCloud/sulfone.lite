@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { engineRunPath } from '@cyanprint/contracts/run-dir';
 import { sha256 } from '@cyanprint/core';
-import { mkdir, mkdtemp, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { invokePlugin, invokeProcessor, invokeResolver } from './index';

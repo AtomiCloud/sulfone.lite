@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { vfsModeFromFileMode, type VfsFile } from '@cyanprint/contracts';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';

@@ -3,7 +3,6 @@ import {
   artifactVersionId,
   type ArtifactPublish,
   type ArtifactVersion,
-  type BatchResolveRequest,
   type BatchResolveResponse,
   type ObjectRef,
 } from '@cyanprint/contracts';

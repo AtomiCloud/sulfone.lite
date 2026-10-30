@@ -377,7 +377,7 @@ describe('recorded per-install attribution (multi-install dependency drift)', ()
 
   test('one update backfills attribution for a legacy repo, closing the dependency-drift hole', async () => {
     // Arrange: strip attribution to simulate a legacy repo.
-    const { repo, parentV1 } = await materializeMultiInstall('repo-depdrift-backfill');
+    const { repo } = await materializeMultiInstall('repo-depdrift-backfill');
     const state = await loadGeneratedState(repo);
     const legacy: GeneratedState = {
       ...state,

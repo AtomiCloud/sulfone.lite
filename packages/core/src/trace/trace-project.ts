@@ -1,6 +1,5 @@
 import type { Answers, PromptAdapter } from '@cyanprint/contracts';
 import { generateTemplateTree, assembleProvenance } from '../create/create-project';
-import { comparePaths } from '../util';
 import { unifiedDiff } from '../util/unified-diff';
 import type { TraceCollector, TraceNode, TraceResult } from './trace-types';
 
@@ -59,7 +58,7 @@ export async function traceProject(options: {
   return {
     files: generation.files,
     tree,
-    provenance: provenance.sort((left, right) => comparePaths(left.path, right.path)),
+    provenance,
     diffs,
   };
 }

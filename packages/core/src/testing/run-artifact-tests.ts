@@ -1,5 +1,5 @@
-import { basename, dirname, join, relative } from 'node:path';
-import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { basename, join, relative } from 'node:path';
+import { readdir, rm, stat } from 'node:fs/promises';
 import YAML from 'yaml';
 import { compileRuntimeBundle } from '@cyanprint/artifact-bundler';
 import {
@@ -29,6 +29,17 @@ import {
   runCommandValidations,
   type CommandValidation,
 } from './command-validations';
+import {
+  bytesEqual,
+  compareBytesTrees,
+  readOptionalPath,
+  readRequiredString,
+  rejectRemovedTestField,
+  writeBytesTree,
+  type BytesFile,
+} from './test-support';
+
+const ARTIFACT_REMOVED_FIELD_GUIDANCE = 'Use validations instead.';
 
 type ArtifactTestCase = {
   name: string;
@@ -291,8 +302,8 @@ function parseManifestCase(
     throw new Error(`cyan.test.yaml case ${index + 1} must be a mapping.`);
   }
   const record = rawCase as Record<string, unknown>;
-  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`);
-  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`);
+  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`, ARTIFACT_REMOVED_FIELD_GUIDANCE);
+  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`, ARTIFACT_REMOVED_FIELD_GUIDANCE);
   const name = readRequiredString(record.name, `cases[${index}].name`);
   const validations = readCommandValidations(record.validations, `cases[${index}].validations`);
   const validationTimeoutMs = readValidationTimeoutMs(
@@ -331,29 +342,6 @@ function parseManifestCase(
     validations,
     validationTimeoutMs,
   };
-}
-
-function rejectRemovedTestField(record: Record<string, unknown>, field: string, label: string): void {
-  if (record[field] !== undefined) {
-    throw new Error(`${label} is no longer supported. Use validations instead.`);
-  }
-}
-
-function readRequiredString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value;
-}
-
-function readOptionalPath(root: string, value: unknown): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('Test paths must be non-empty strings.');
-  }
-  return safeJoin(root, value);
 }
 
 // `expected` is rm -rf'd on --update-snapshots, so it must not be the artifact directory itself.
@@ -580,16 +568,6 @@ async function readFileTree(root: string): Promise<VfsFile[]> {
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }
 
-async function writeFileTree(root: string, files: VfsFile[]): Promise<void> {
-  await rm(root, { recursive: true, force: true });
-  await mkdir(root, { recursive: true });
-  for (const file of files) {
-    const target = safeJoin(root, file.path);
-    await mkdir(dirname(target), { recursive: true });
-    await Bun.write(target, fileToBytes(file));
-  }
-}
-
 async function walk(root: string, visit: (path: string) => Promise<void>): Promise<void> {
   if (!(await exists(root))) {
     throw new Error(`Expected directory not found: ${root}`);
@@ -608,25 +586,6 @@ async function walk(root: string, visit: (path: string) => Promise<void>): Promi
   }
 }
 
-function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | undefined {
-  const expectedMap = new Map(expected.map(file => [file.path, fileToBytes(file)]));
-  const actualMap = new Map(actual.map(file => [file.path, fileToBytes(file)]));
-  for (const path of [...expectedMap.keys()].sort()) {
-    if (!actualMap.has(path)) {
-      return `Missing output file: ${path}`;
-    }
-    if (!bytesEqual(expectedMap.get(path) ?? new Uint8Array(), actualMap.get(path) ?? new Uint8Array())) {
-      return `Output mismatch: ${path}`;
-    }
-  }
-  for (const path of [...actualMap.keys()].sort()) {
-    if (!expectedMap.has(path)) {
-      return `Unexpected output file: ${path}`;
-    }
-  }
-  return undefined;
-}
-
 function fileToBytes(file: VfsFile): Uint8Array {
   if (file.bytesBase64 !== undefined) {
     return Buffer.from(file.bytesBase64, 'base64');
@@ -634,9 +593,14 @@ function fileToBytes(file: VfsFile): Uint8Array {
   return new TextEncoder().encode(file.content ?? '');
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) {
-    return false;
-  }
-  return left.every((byte, index) => byte === right[index]);
+function toBytesFiles(files: VfsFile[]): BytesFile[] {
+  return files.map(file => ({ path: file.path, bytes: fileToBytes(file) }));
+}
+
+async function writeFileTree(root: string, files: VfsFile[]): Promise<void> {
+  await writeBytesTree(root, toBytesFiles(files));
+}
+
+function compareFileTrees(expected: VfsFile[], actual: VfsFile[]): string | undefined {
+  return compareBytesTrees(toBytesFiles(expected), toBytesFiles(actual));
 }

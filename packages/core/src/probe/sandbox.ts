@@ -327,17 +327,7 @@ function isGitAttributesPath(path: string): boolean {
 }
 
 async function materializeRawBlob(repoPath: string, destination: string, entry: GitTreeEntry): Promise<void> {
-  const proc = Bun.spawn(['git', 'cat-file', 'blob', entry.oid], {
-    cwd: repoPath,
-    env: cleanGitEnvironment(),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [bytes, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).arrayBuffer(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const { stdout: bytes, stderr, exitCode } = await spawnGit(repoPath, ['cat-file', 'blob', entry.oid]);
   if (exitCode !== 0) {
     throw new Error(`git cat-file blob ${entry.oid} failed (${exitCode}): ${stderr}`);
   }
@@ -347,7 +337,7 @@ async function materializeRawBlob(repoPath: string, destination: string, entry: 
     await symlink(new TextDecoder().decode(bytes), absolute);
     return;
   }
-  await writeFile(absolute, new Uint8Array(bytes));
+  await writeFile(absolute, bytes);
   await chmod(absolute, entry.mode === '100755' ? 0o755 : 0o644);
 }
 
@@ -391,9 +381,9 @@ async function checkoutIndex(
   destination: string,
   paths: string[],
 ): Promise<void> {
-  const proc = Bun.spawn(
+  const { stdout, stderr, exitCode } = await spawnGit(
+    cwd,
     [
-      'git',
       '-c',
       'core.autocrlf=false',
       '-c',
@@ -403,25 +393,10 @@ async function checkoutIndex(
       '-z',
       `--prefix=${destination}/`,
     ],
-    {
-      cwd,
-      env: { ...cleanGitEnvironment(), ...env },
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
+    { env, stdin: paths.length > 0 ? `${paths.join('\0')}\0` : '' },
   );
-  if (paths.length > 0) {
-    proc.stdin.write(`${paths.join('\0')}\0`);
-  }
-  proc.stdin.end();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
   if (exitCode !== 0) {
-    throw new Error(`git checkout-index failed (${exitCode}): ${stderr || stdout}`);
+    throw new Error(`git checkout-index failed (${exitCode}): ${stderr || new TextDecoder().decode(stdout)}`);
   }
 }
 
@@ -577,25 +552,18 @@ function warnVanished(relativePath: string): void {
 
 /**
  * Freeze the snapshot as a git commit inside a fresh, INDEPENDENT repository. The
- * copied `.git` (if any) is discarded first, then `git init` creates a private repo
- * for the snapshot copy — regardless of what the source tree was:
+ * snapshot tree never carries source git metadata (it is materialized from the
+ * source's exact HEAD tree, or copied with `skipGitMetadata`), so the only `.git`
+ * present here is the engine-owned "setup base" repository created before
+ * `setup.pre` ran. That one is discarded and `git init` creates the private repo
+ * for the final snapshot, so the retained snapshot holds exactly one sealed
+ * commit/pack and can never point at the original repository's metadata.
  *
- *  - a linked worktree's `.git` is a POINTER FILE (`gitdir: …/.git/worktrees/…`)
- *    aimed at the ORIGINAL repo's metadata; committing through it would stage and
- *    move the original worktree's index/branch — corrupting the very repo FR9
- *    promises never to touch (reproduced with a linked worktree);
- *  - a normal repo's `.git` is the original's whole object store, which the snapshot
- *    neither needs nor wants to carry — a restore only ever rewinds to the single
- *    snapshot commit made below, so the prior history is dead weight;
- *  - a generated repo is a plain directory with no `.git` at all.
- *
- * Removing `.git` and re-initialising covers all three uniformly and guarantees the
- * snapshot is self-contained. Source paths that were already tracked remain
- * tracked even when an ignore rule matches them; ignored setup-created outputs
- * remain present but untracked. Gates therefore see the exact source tree without
- * ingesting dependency caches merely because CyanPrint took a snapshot.
- * `repack -adq` leaves the repository as one sealed pack rather than a loose
- * object tree that can race while forks are copied.
+ * Source paths that were already tracked remain tracked even when an ignore rule
+ * matches them; ignored setup-created outputs remain present but untracked. Gates
+ * therefore see the exact source tree without ingesting dependency caches merely
+ * because CyanPrint took a snapshot. `repack -adq` leaves the repository as one
+ * sealed pack rather than a loose object tree that can race while forks are copied.
  */
 async function freezeGitSnapshot(snapshotPath: string, sourceTrackedPaths: string[]): Promise<void> {
   await rm(join(snapshotPath, '.git'), { recursive: true, force: true });
@@ -770,24 +738,13 @@ async function gitIgnoredPathsAmong(repoPath: string, paths: string[]): Promise<
   if (paths.length === 0) {
     return [];
   }
-  const proc = Bun.spawn(['git', 'check-ignore', '--stdin', '-z'], {
-    cwd: repoPath,
-    env: cleanGitEnvironment(),
-    stdin: 'pipe',
-    stdout: 'pipe',
-    stderr: 'pipe',
+  const { stdout, stderr, exitCode } = await spawnGit(repoPath, ['check-ignore', '--stdin', '-z'], {
+    stdin: `${paths.join('\0')}\0`,
   });
-  proc.stdin.write(`${paths.join('\0')}\0`);
-  proc.stdin.end();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).arrayBuffer(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
   if (exitCode !== 0 && exitCode !== 1) {
     throw new Error(`git check-ignore failed (${exitCode}): ${stderr}`);
   }
-  return decodeGitPathList(new Uint8Array(stdout)).filter(Boolean);
+  return decodeGitPathList(stdout).filter(Boolean);
 }
 
 function decodeGitPathList(bytes: Uint8Array): string[] {
@@ -879,73 +836,68 @@ async function git(cwd: string, cliArgs: string[]): Promise<void> {
 }
 
 async function gitWithEnv(cwd: string, cliArgs: string[], env: Record<string, string>): Promise<void> {
-  const proc = Bun.spawn(['git', ...cliArgs], {
-    cwd,
-    env: { ...cleanGitEnvironment(), ...env },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const { stdout, stderr, exitCode } = await spawnGit(cwd, cliArgs, { env });
   if (exitCode !== 0) {
-    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr || stdout}`);
+    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr || new TextDecoder().decode(stdout)}`);
   }
 }
 
 async function gitOutput(cwd: string, cliArgs: string[]): Promise<string> {
-  return (await gitOutputRaw(cwd, cliArgs)).trim();
-}
-
-async function gitOutputRaw(cwd: string, cliArgs: string[]): Promise<string> {
-  const proc = Bun.spawn(['git', ...cliArgs], {
-    cwd,
-    env: cleanGitEnvironment(),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const { stdout, stderr, exitCode } = await spawnGit(cwd, cliArgs);
+  const text = new TextDecoder().decode(stdout);
   if (exitCode !== 0) {
-    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr || stdout}`);
+    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr || text}`);
   }
-  return stdout;
+  return text.trim();
 }
 
 /** `git rev-parse -q --verify <ref>` exits 1, silently, when the ref does not exist; real failures exit 128. */
 const UNBORN_HEAD_EXIT_CODE = 1;
 
 async function gitExitCode(cwd: string, cliArgs: string[]): Promise<number> {
-  const proc = Bun.spawn(['git', ...cliArgs], {
-    cwd,
-    env: cleanGitEnvironment(),
-    stdout: 'ignore',
-    stderr: 'ignore',
-  });
-  return await proc.exited;
+  return (await spawnGit(cwd, cliArgs)).exitCode;
 }
 
 async function gitOutputBytes(cwd: string, cliArgs: string[]): Promise<Uint8Array> {
+  const { stdout, stderr, exitCode } = await spawnGit(cwd, cliArgs);
+  if (exitCode !== 0) {
+    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr}`);
+  }
+  return stdout;
+}
+
+type GitResult = { stdout: Uint8Array; stderr: string; exitCode: number };
+
+/**
+ * The one spawn-and-collect path for git: scrubs inherited GIT_* variables (plus any `env`
+ * overrides), optionally feeds `stdin`, and returns stdout bytes, stderr text and the exit code.
+ * Callers decide which exit codes are failures and how to word the error.
+ */
+async function spawnGit(
+  cwd: string,
+  cliArgs: string[],
+  options: { env?: Record<string, string>; stdin?: string } = {},
+): Promise<GitResult> {
   const proc = Bun.spawn(['git', ...cliArgs], {
     cwd,
-    env: cleanGitEnvironment(),
+    env: { ...cleanGitEnvironment(), ...options.env },
+    stdin: options.stdin === undefined ? 'ignore' : 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
   });
+  if (options.stdin !== undefined) {
+    const sink = proc.stdin as import('bun').FileSink;
+    if (options.stdin.length > 0) {
+      sink.write(options.stdin);
+    }
+    sink.end();
+  }
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).arrayBuffer(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  if (exitCode !== 0) {
-    throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr}`);
-  }
-  return new Uint8Array(stdout);
+  return { stdout: new Uint8Array(stdout), stderr, exitCode };
 }
 
 function cleanGitEnvironment(): Record<string, string> {

@@ -13,33 +13,6 @@ const ignoredNames = new Set(['.git', 'node_modules', '.tmp']);
 const ignoredArchiveFiles = new Set(['cyan.yaml', 'README.md', 'README.MD', 'cyan.test.yaml', 'answers.json']);
 const textEncoder = new TextEncoder();
 
-async function collectFiles(root: string, dir = root): Promise<Array<{ path: string; content: string }>> {
-  const out: Array<{ path: string; content: string }> = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (ignoredNames.has(entry.name)) {
-      continue;
-    }
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...(await collectFiles(root, fullPath)));
-      continue;
-    }
-    if (!entry.isFile()) {
-      continue;
-    }
-    out.push({ path: relative(root, fullPath), content: await readFile(fullPath, 'utf8') });
-  }
-  // Code-unit ordering: entry order feeds the payload hash and must not vary by host locale.
-  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-}
-
-export async function createLocalObjectPayload(
-  root: string,
-): Promise<{ payload: string; sha256: string; size: number }> {
-  const payload = JSON.stringify({ cyanprint: 4, files: await collectFiles(root) } satisfies LocalObjectPackage);
-  return { payload, sha256: sha256(payload), size: new TextEncoder().encode(payload).byteLength };
-}
-
 export async function createArtifactTextObject(
   path: string,
 ): Promise<{ payload: string; sha256: string; size: number }> {
@@ -259,6 +232,7 @@ function byteLength(value: string): number {
   return textEncoder.encode(value).byteLength;
 }
 
+/** Unpacks the legacy `artifact.object`-only JSON payload (utf8 text files only). New pushes use tar archives. */
 export async function unpackLocalObjectPayload(payload: string, outDir: string): Promise<void> {
   const parsed = JSON.parse(payload) as LocalObjectPackage;
   if (parsed.cyanprint !== 4 || !Array.isArray(parsed.files)) {
