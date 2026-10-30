@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { ProbeRunReport } from '@cyanprint/contracts';
+import { CyanError, type ProbeRunReport } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { writeProbeManifest } from '../probe/manifest';
 import { STATE_FILE } from '../state/generated-state';
@@ -451,6 +451,108 @@ describe('test output / expected path safety', () => {
       // Act / Assert
       await expect(runTemplateTest({ template: dir, outDir })).rejects.toThrow('resolves to the output directory');
       expect(await readText(join(outDir, 'precious.txt'))).toBe('keep me\n');
+      // Up-front: the valid sibling listed first never ran, so it created no output.
+      expect(await exists(join(outDir, 'basic'))).toBe(false);
+    },
+    T,
+  );
+
+  test(
+    'a case named like an existing user folder under --out is refused, not wiped',
+    async () => {
+      // Arrange: `--out .` run from a project root that has its own ./src
+      const dir = await writeSynthetic('synth-user-folder', {
+        features: [],
+        cases: [{ name: 'src', expected: 'expected' }],
+      });
+      const outDir = await sentinelDir('out-user-folder');
+      await mkdir(join(outDir, 'src'), { recursive: true });
+      await writeFile(join(outDir, 'src/precious.ts'), 'keep me\n', 'utf8');
+      // Act / Assert
+      let caught: unknown;
+      try {
+        await runTemplateTest({ template: dir, outDir });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CyanError);
+      expect((caught as CyanError).problem.code).toBe('unsafe_test_path');
+      expect(await readText(join(outDir, 'src/precious.ts'))).toBe('keep me\n');
+    },
+    T,
+  );
+
+  test(
+    'an engine-made case directory from a previous run is reused',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-rerun', {
+        features: [],
+        cases: [{ name: 'basic', expected: 'expected' }],
+      });
+      const outDir = join(workRoot, 'out-rerun');
+      await rm(outDir, { recursive: true, force: true });
+      // Act
+      const first = await runTemplateTest({ template: dir, outDir });
+      const second = await runTemplateTest({ template: dir, outDir });
+      // Assert
+      expect(first).toMatchObject({ passed: 1, failed: 0 });
+      expect(second).toMatchObject({ passed: 1, failed: 0 });
+    },
+    T,
+  );
+
+  test(
+    'case names that resolve to the same output directory are rejected',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-same-resolved', {
+        features: [],
+        cases: [
+          { name: 'basic', expected: 'expected' },
+          { name: './basic', expected: 'expected' },
+        ],
+      });
+      // Act / Assert
+      await expect(runTemplateTest({ template: dir, outDir: join(workRoot, 'out-same-resolved') })).rejects.toThrow(
+        'same output directory',
+      );
+    },
+    T,
+  );
+
+  test(
+    'a case directory that is an ancestor of another case directory is rejected',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-nested-cases', {
+        features: [],
+        cases: [
+          { name: 'a', expected: 'expected' },
+          { name: 'a/b', expected: 'expected' },
+        ],
+      });
+      // Act / Assert
+      await expect(runTemplateTest({ template: dir, outDir: join(workRoot, 'out-nested') })).rejects.toThrow(
+        'inside the output directory of case',
+      );
+    },
+    T,
+  );
+
+  test(
+    'answers pointing at the template root report a path error, not a deletion warning',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-dot-answers', {
+        features: [],
+        cases: [{ name: 'basic', expected: 'expected', answers: '.' }],
+      });
+      // Act
+      const report = await runTemplateTest({ template: dir, outDir: join(workRoot, 'out-dot-answers') });
+      // Assert: the case fails (a directory is not a JSON file) but never claims it "would be deleted"
+      expect(report).toMatchObject({ passed: 0, failed: 1 });
+      expect(report.cases[0]?.message).not.toContain('would be deleted');
     },
     T,
   );

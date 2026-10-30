@@ -340,8 +340,13 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
 
 // `expected` is rm -rf'd on --update-snapshots, so it must not be the artifact directory itself.
 function readExpectedPath(root: string, value: unknown): string | undefined {
-  const path = readOptionalPath(root, value);
-  return path === undefined ? undefined : safeJoinBelow(root, value as string, 'artifact directory');
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('Test paths must be non-empty strings.');
+  }
+  return safeJoinBelow(root, value, 'artifact directory');
 }
 
 async function artifactBundle(manifest: CyanManifest, runtimeFile: string): Promise<ArtifactBundleRef> {

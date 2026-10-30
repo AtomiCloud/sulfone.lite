@@ -1,6 +1,13 @@
-import { mkdir, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import type { Answers, ProbeFeatureIdentity, ProbeRunReport, Provenance } from '@cyanprint/contracts';
+import { lstat, mkdir, readdir, rm } from 'node:fs/promises';
+import { dirname, join, sep } from 'node:path';
+import {
+  CyanError,
+  problem,
+  type Answers,
+  type ProbeFeatureIdentity,
+  type ProbeRunReport,
+  type Provenance,
+} from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { createProject } from '../create/create-project';
 import { featureIdentityKey } from '../probe/features';
@@ -129,15 +136,29 @@ async function runTemplateManifestTests(args: {
   concurrency?: number;
   cases: TemplateCase[];
 }): Promise<TemplateTestReport> {
-  // Duplicate names would share one output directory and race under concurrency.
+  // Validate every case's output directory before any case runs or deletes anything.
   const seenNames = new Set<string>();
+  const seenDirs: Array<{ name: string; dir: string }> = [];
   for (const testCase of args.cases) {
     if (seenNames.has(testCase.name)) {
       throw new Error(`cyan.test.yaml has duplicate case name: ${testCase.name}`);
     }
     seenNames.add(testCase.name);
-    // Fail before any case runs: a name resolving to the out dir would wipe it mid-run.
-    safeJoinBelow(args.outDir, testCase.name, 'output directory');
+    const dir = safeJoinBelow(args.outDir, testCase.name, 'output directory');
+    // Cases sharing or nesting output directories would rm -rf each other's output under concurrency.
+    for (const other of seenDirs) {
+      if (other.dir === dir) {
+        throw new Error(`cyan.test.yaml cases "${other.name}" and "${testCase.name}" share the same output directory.`);
+      }
+      if (dir.startsWith(other.dir + sep) || other.dir.startsWith(dir + sep)) {
+        const [inner, outer] = dir.startsWith(other.dir + sep) ? [testCase, other] : [other, testCase];
+        throw new Error(
+          `cyan.test.yaml case "${inner.name}" is inside the output directory of case "${outer.name}"; rename one so they do not nest.`,
+        );
+      }
+    }
+    seenDirs.push({ name: testCase.name, dir });
+    await assertCaseOutputReplaceable(dir, testCase.name);
   }
   const perCase = await mapWithConcurrency(args.cases, args.concurrency ?? 1, testCase =>
     runTemplateCase(args, testCase),
@@ -260,8 +281,10 @@ async function runTemplateCase(
     probe: testCase.probe,
   });
   try {
+    await assertCaseOutputReplaceable(outDir, testCase.name);
     await rm(outDir, { recursive: true, force: true });
     await mkdir(outDir, { recursive: true });
+    await writeText(join(outDir, TEST_OUTPUT_MARKER), 'Created by cyanprint test; safe to delete.\n');
     const answers = await readCaseRecord<Answers>(testCase.answers ?? args.answers, 'answers');
     const deterministicState = await readCaseRecord<Record<string, unknown>>(
       testCase.deterministicState,
@@ -312,6 +335,38 @@ async function runTemplateCase(
   } catch (error) {
     return finish({ name: testCase.name, status: 'failed', message: String(error) });
   }
+}
+
+/** Written into every case output directory on creation: proof the engine made it and may rm -rf it. */
+const TEST_OUTPUT_MARKER = '.cyanprint-test-output';
+
+/**
+ * `--out` may be a user's own directory (`--out .`), so `<out>/<case>` can already be a real folder
+ * (a case named `src`). Only replace it when missing, empty, or engine-made; otherwise refuse.
+ */
+async function assertCaseOutputReplaceable(dir: string, caseName: string): Promise<void> {
+  let stats;
+  try {
+    stats = await lstat(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  if (stats.isDirectory()) {
+    const entries = await readdir(dir);
+    if (entries.length === 0 || entries.includes(TEST_OUTPUT_MARKER)) {
+      return;
+    }
+  }
+  throw new CyanError(
+    problem(
+      'validation',
+      'unsafe_test_path',
+      `Refusing to overwrite "${dir}" for case "${caseName}": it exists and was not created by cyanprint test. Rename the case or choose an empty --out.`,
+    ),
+  );
 }
 
 /**
@@ -459,7 +514,7 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
       record.deterministicState,
       `cases[${index}].deterministicState`,
     ),
-    expected: readOptionalPath(template, record.expected),
+    expected: readExpectedPath(template, record.expected),
     ignore: readStringList(record.ignore, `cases[${index}].ignore`),
     merges: readMergeAssertions(record.merges, `cases[${index}].merges`),
     allowUnassertedLww: record.allowUnassertedLww === true,
@@ -544,7 +599,17 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error('Test paths must be non-empty strings.');
   }
-  // `expected` is rm -rf'd on --update-snapshots, so it must not be the template directory itself.
+  return safeJoin(root, value);
+}
+
+// `expected` is rm -rf'd on --update-snapshots, so it must not be the template directory itself.
+function readExpectedPath(root: string, value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('Test paths must be non-empty strings.');
+  }
   return safeJoinBelow(root, value, 'template directory');
 }
 
@@ -592,7 +657,7 @@ async function readFileTree(root: string, excluded?: (path: string) => boolean):
   const files: TemplateTestFile[] = [];
   await walk(root, async path => {
     const relativePath = path.slice(root.length + 1);
-    if (relativePath === STATE_FILE || excluded?.(relativePath)) {
+    if (relativePath === STATE_FILE || relativePath === TEST_OUTPUT_MARKER || excluded?.(relativePath)) {
       return;
     }
     files.push({ path: relativePath, bytes: new Uint8Array(await Bun.file(path).arrayBuffer()) });

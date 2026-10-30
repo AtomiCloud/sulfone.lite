@@ -3616,6 +3616,48 @@ describe('artifact tests (runArtifactTests)', () => {
     },
     LONG,
   );
+
+  test(
+    'rejects a legacy Ketone resolver expected.value.path of . so snapshots cannot wipe the artifact directory',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-ketone-root-expected-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'resolver',
+          name: 'ketone-root-expected',
+          runtime: concatResolverRuntime,
+        });
+        await mkdir(join(artifactDir, 'inputs/a'), { recursive: true });
+        await writeFile(join(artifactDir, 'inputs/a/data.txt'), 'one\n', 'utf8');
+        await writeFile(
+          join(artifactDir, 'test.cyan.yaml'),
+          [
+            'tests:',
+            '  - name: basic',
+            '    expected:',
+            '      type: snapshot',
+            '      value:',
+            '        path: .',
+            '    config: {}',
+            '    resolver_inputs:',
+            '      - path: ./inputs/a',
+            '        origin:',
+            '          template: a',
+            '          layer: 0',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+        await expect(runArtifactTests({ artifactDir, updateSnapshots: true })).rejects.toThrow(
+          'resolves to the artifact directory',
+        );
+        expect(await Bun.file(join(artifactDir, 'cyan.yaml')).exists()).toBe(true);
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
 });
 
 describe('processor output cache', () => {
