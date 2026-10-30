@@ -26,8 +26,12 @@ export function processorCacheKey(args: { integrity: string; config: unknown; in
   return sha256(parts.join(''));
 }
 
+// Bumped to v2 when entries started carrying the executable bit (`mode`): v1 entries lack it, and a
+// mode-free input keeps the same key, so a warm v1 cache would otherwise hand back +x-less output.
+const PROCESSOR_CACHE_DIRNAME = 'processor-output-v2';
+
 export function processorCacheDir(cacheDirOverride?: string): string {
-  return join(resolveCyanCacheDir(cacheDirOverride), 'processor-output');
+  return join(resolveCyanCacheDir(cacheDirOverride), PROCESSOR_CACHE_DIRNAME);
 }
 
 function entryPath(root: string, key: string): string {

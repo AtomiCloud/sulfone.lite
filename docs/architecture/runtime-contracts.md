@@ -78,4 +78,4 @@ type ResolverOutput = { path: string; content: string };
 
 Selection is consensus-or-LWW: every contributing template nominates from its own `resolvers:` list; unanimous ref + identical config invokes the resolver once with all variations, anything else falls back to last-write-wins (highest layer), recorded as an `lww-override` in the provenance persisted to `.cyan_state.yaml`. There is no pairwise fold, no `current`/`next`, no `api:` versioning, and no `commutative` flag. Execution is local bundled-artifact invocation.
 
-Processors are **hermetic**: output is a pure function of (artifact version + integrity, config, input file set), which is what makes the content-addressed processor-output cache (`~/.cyan/cache/processor-output/`) sound.
+Processors are **hermetic**: output is a pure function of (artifact version + integrity, config, input file set), which is what makes the content-addressed processor-output cache (`~/.cyan/cache/processor-output-v2/`) sound.

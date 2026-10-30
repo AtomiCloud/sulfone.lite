@@ -25,6 +25,9 @@ import {
   readMergeOurs,
   readProjectFiles,
   processorCacheKey,
+  processorCacheDir,
+  readProcessorCache,
+  writeProcessorCache,
   migrateGeneratedState,
   readProcessorCache,
   resolveCyanCacheDir,
@@ -4915,5 +4918,24 @@ describe('executable file mode', () => {
       inputFiles: [{ path: 'run.sh', content: 'x', mode: 0o755 }],
     });
     expect(exec).not.toBe(plain);
+  });
+
+  test('a processor-output entry written before modes were preserved is never reused', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'cyanprint-legacy-cache-'));
+    try {
+      const key = processorCacheKey({ integrity: 'i', config: {}, inputFiles: [{ path: 'run.sh', content: 'x' }] });
+      // Pre-fix layout: same key material (a mode-free input), output stored without `mode`.
+      const legacy = join(cacheDir, 'processor-output', key);
+      await mkdir(legacy, { recursive: true });
+      await writeFile(join(legacy, 'output.json'), JSON.stringify({ files: [{ path: 'run.sh', content: 'x' }] }));
+      expect(await readProcessorCache({ key, cacheDir })).toBeUndefined();
+
+      const files = [{ path: 'run.sh', content: 'x', mode: 0o755 }];
+      await writeProcessorCache({ key, files, cacheDir });
+      expect(await readProcessorCache({ key, cacheDir })).toEqual(files);
+      expect(processorCacheDir(cacheDir)).not.toBe(join(cacheDir, 'processor-output'));
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true });
+    }
   });
 });

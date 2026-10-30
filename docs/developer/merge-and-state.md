@@ -81,4 +81,4 @@ Same-path output is merged during layering by `packages/core/src/merge/resolve-l
 
 ## Processor output cache
 
-Because processors are hermetic, outputs are cached content-addressed (`packages/core/src/cache/processor-cache.ts`): key = `sha256(artifactIntegrity ‖ canonicalJSON(config) ‖ digest(input files: path + bytes + type))`, stored under `~/.cyan/cache/processor-output/<key>/`. A hit skips the invocation; `--bypass-cache` skips reads but still writes; stale entries are evicted by age. This makes repeated creates, template tests, and update's base regeneration near-instant.
+Because processors are hermetic, outputs are cached content-addressed (`packages/core/src/cache/processor-cache.ts`): key = `sha256(artifactIntegrity ‖ canonicalJSON(config) ‖ digest(input files: path + bytes + type))`, stored under `~/.cyan/cache/processor-output-v2/<key>/`. A hit skips the invocation; `--bypass-cache` skips reads but still writes; stale entries are evicted by age. This makes repeated creates, template tests, and update's base regeneration near-instant.
