@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createProject, pinsFingerprint, sha256 } from '@cyanprint/core';
-import { artifactIntegrity, readTemplateTarFiles } from '@cyanprint/contracts';
+import { artifactIntegrity, CyanError, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
+import { cacheCommand } from './commands/cache';
 import { createCommand } from './commands/create';
 import { traceCommand } from './commands/trace';
 import { pushCommand } from './commands/push';
@@ -1881,6 +1882,72 @@ describe('registry template input', () => {
       process.chdir(original);
       server.stop(true);
       await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('cache command', () => {
+  async function captureCache(argv: string[]): Promise<void> {
+    const originalLog = console.log;
+    try {
+      console.log = () => undefined;
+      await cacheCommand(argv);
+    } finally {
+      console.log = originalLog;
+    }
+  }
+
+  test('clean refuses a directory the engine did not create and deletes nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-foreign-'));
+    try {
+      await mkdir(join(root, 'src'), { recursive: true });
+      await mkdir(join(root, 'template'), { recursive: true });
+      await writeFile(join(root, 'package.json'), '{}', 'utf8');
+      await writeFile(join(root, 'src', 'index.ts'), 'keep', 'utf8');
+
+      await expect(captureCache(['clean', '--cache-dir', root])).rejects.toBeInstanceOf(CyanError);
+      expect(await Bun.file(join(root, 'package.json')).exists()).toBe(true);
+      expect(await Bun.file(join(root, 'src', 'index.ts')).exists()).toBe(true);
+      expect((await readdir(root)).sort()).toEqual(['package.json', 'src', 'template']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean refuses the current directory even when it only holds cache-like names', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-cwd-'));
+    const originalCwd = process.cwd();
+    try {
+      await mkdir(join(root, 'template'), { recursive: true });
+      process.chdir(root);
+      await expect(captureCache(['clean', '--cache-dir', '.'])).rejects.toBeInstanceOf(CyanError);
+      expect((await readdir(root)).sort()).toEqual(['template']);
+    } finally {
+      process.chdir(originalCwd);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean removes engine cache entries (corrupt ones included) and leaves the directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-ok-'));
+    try {
+      await mkdir(join(root, 'template', 'entry'), { recursive: true });
+      await writeFile(join(root, 'template', 'corrupt-entry'), 'bad', 'utf8');
+      await mkdir(join(root, 'processor-output', 'abc'), { recursive: true });
+
+      await captureCache(['clean', '--cache-dir', root]);
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean of a missing cache directory is a no-op', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-missing-'));
+    try {
+      await captureCache(['clean', '--cache-dir', join(root, 'nope')]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

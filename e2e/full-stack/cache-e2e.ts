@@ -4,7 +4,8 @@ import app from '../../apps/worker/src/index';
 
 const cacheDir = join(process.cwd(), '.tmp/e2e/cache');
 await mkdir(cacheDir, { recursive: true });
-await writeFile(join(cacheDir, 'corrupt-entry'), 'bad', 'utf8');
+await mkdir(join(cacheDir, 'template'), { recursive: true });
+await writeFile(join(cacheDir, 'template', 'corrupt-entry'), 'bad', 'utf8');
 
 const result = Bun.spawnSync(['bun', 'run', 'cyan', '--', 'cache', 'inspect', '--cache-dir', cacheDir, '--json']);
 if (!result.success) {
@@ -15,7 +16,7 @@ if (body.cacheDir !== cacheDir) {
   throw new Error('cache inspect did not honor --cache-dir');
 }
 const clean = Bun.spawnSync(['bun', 'run', 'cyan', '--', 'cache', 'clean', '--cache-dir', cacheDir, '--json']);
-if (!clean.success || (await Bun.file(join(cacheDir, 'corrupt-entry')).exists())) {
+if (!clean.success || (await Bun.file(join(cacheDir, 'template', 'corrupt-entry')).exists())) {
   throw new Error('cache clean did not remove corrupt entry');
 }
 
