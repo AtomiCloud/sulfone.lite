@@ -463,6 +463,53 @@ describe('commander cli shell', () => {
     }
   });
 
+  test('trust approve version accepts --version instead of printing the program version', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-commander-trust-version-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--integrity',
+          'sha256:abc',
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+
+      expect(logs).not.toContain(`cyanprint ${VERSION}`);
+      expect(JSON.parse(logs[0] ?? '{}')).toMatchObject({
+        status: 'done',
+        store: { versions: [{ owner: 'cyanprint', name: 'hello', version: '3', integrity: 'sha256:abc' }] },
+      });
+    } finally {
+      console.log = originalLog;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('program-level --version and -v still print the version', async () => {
+    for (const flag of ['--version', '-v']) {
+      const writes: string[] = [];
+      const program = createProgram();
+      program.configureOutput({ writeOut: text => writes.push(text) });
+      await expect(program.parseAsync([flag], { from: 'user' })).rejects.toMatchObject({ exitCode: 0 });
+      expect(writes.join('').trim()).toBe(`cyanprint ${VERSION}`);
+    }
+  });
+
   test('trust scope flag can still use positional ref', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-commander-trust-scope-ref-'));
     const logs: string[] = [];

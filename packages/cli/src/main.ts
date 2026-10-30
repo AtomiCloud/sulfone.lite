@@ -44,6 +44,7 @@ export function createProgram(runtime: ProgramRuntime = {}): Command {
     .name('cyanprint')
     .description('CyanPrint v4 local-first template runtime')
     .version(`cyanprint ${VERSION}`, '-v, --version', 'print the CyanPrint version')
+    .enablePositionalOptions()
     .exitOverride()
     .configureOutput({
       outputError: message => {
