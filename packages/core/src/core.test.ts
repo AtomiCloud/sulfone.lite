@@ -3428,6 +3428,34 @@ describe('artifact tests (runArtifactTests)', () => {
   });
 
   test(
+    'rejects expected: . so updating artifact snapshots cannot wipe the artifact directory',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-root-expected-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'processor',
+          name: 'root-expected',
+          runtime: 'export async function processor(input) {}\n',
+        });
+        await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
+        await writeFile(join(artifactDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+        await writeFile(
+          join(artifactDir, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', input: 'tests/basic/input', expected: '.' }] }),
+          'utf8',
+        );
+        await expect(runArtifactTests({ artifactDir, updateSnapshots: true })).rejects.toThrow(
+          'resolves to the artifact directory',
+        );
+        expect(await Bun.file(join(artifactDir, 'cyan.yaml')).exists()).toBe(true);
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
     'rejects escaping processor output when updating artifact snapshots',
     async () => {
       const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-escape-'));
@@ -3584,6 +3612,48 @@ describe('artifact tests (runArtifactTests)', () => {
         await writeFile(join(artifactDir, 'snapshots/basic/data.json'), '{"b":2,"a":1}', 'utf8');
 
         expect(await runArtifactTests({ artifactDir })).toMatchObject({ kind: 'resolver', passed: 1, failed: 0 });
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'rejects a legacy Ketone resolver expected.value.path of . so snapshots cannot wipe the artifact directory',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-ketone-root-expected-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'resolver',
+          name: 'ketone-root-expected',
+          runtime: concatResolverRuntime,
+        });
+        await mkdir(join(artifactDir, 'inputs/a'), { recursive: true });
+        await writeFile(join(artifactDir, 'inputs/a/data.txt'), 'one\n', 'utf8');
+        await writeFile(
+          join(artifactDir, 'test.cyan.yaml'),
+          [
+            'tests:',
+            '  - name: basic',
+            '    expected:',
+            '      type: snapshot',
+            '      value:',
+            '        path: .',
+            '    config: {}',
+            '    resolver_inputs:',
+            '      - path: ./inputs/a',
+            '        origin:',
+            '          template: a',
+            '          layer: 0',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+        await expect(runArtifactTests({ artifactDir, updateSnapshots: true })).rejects.toThrow(
+          'resolves to the artifact directory',
+        );
+        expect(await Bun.file(join(artifactDir, 'cyan.yaml')).exists()).toBe(true);
       } finally {
         await rm(artifactDir, { recursive: true, force: true });
       }

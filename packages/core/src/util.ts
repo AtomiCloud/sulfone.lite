@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { VfsFile } from '@cyanprint/contracts';
+import { CyanError, problem, type VfsFile } from '@cyanprint/contracts';
 
 export async function readText(path: string): Promise<string> {
   return readFile(path, 'utf8');
@@ -154,6 +154,24 @@ export async function assertRootSafeWrite(root: string, relPath: string): Promis
       );
     }
   }
+}
+
+/**
+ * {@link safeJoin} for paths the engine will `rm -rf`: additionally refuses a child that resolves to
+ * `root` itself (`.`, `a/..`), which `safeJoin` accepts. `what` names the root in the error.
+ */
+export function safeJoinBelow(root: string, child: string, what: string): string {
+  const resolved = safeJoin(root, child);
+  if (resolved === resolve(root)) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'unsafe_test_path',
+        `Refusing "${child}": it resolves to the ${what} itself, which would be deleted. Use a path inside it.`,
+      ),
+    );
+  }
+  return resolved;
 }
 
 /**

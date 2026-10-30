@@ -40,6 +40,7 @@ cases:
 Semantics:
 
 - **Byte-for-byte compare.** Tree shape AND exact bytes (text and binary), excluding `ignore:` globs and paths matched by the output's own `.gitignore`. `.cyan_state.yaml` is always excluded.
+- **Output location.** Each case is generated into `<out>/<case-name>/` (even a single case; `--out` itself is never deleted). A case directory is only replaced when it is missing, empty, or was created by a previous `cyanprint test` run (it carries a `.cyanprint-test-output` marker, which is excluded from the compare); otherwise the run is refused with `unsafe_test_path`. Case names must resolve to distinct, non-nested directories.
 - **`merges:` assertions** are checked against the merge provenance persisted in the generated `.cyan_state.yaml`. Each entry names a path, the expected `decision` (`resolver` or `lww`), and optionally the `resolver` ref and the `segment` (`processor` | `dependency` | `sibling`).
 - **Strict by default.** Any `lww-override` in the persisted provenance that is not asserted in `merges:` fails the test. Attach a resolver or explicitly assert the LWW. A per-case `allowUnassertedLww: true` escape hatch exists but is discouraged — it hides unintentional overwrites.
 - **`ignore:` is discouraged.** Every entry weakens the byte-for-byte guarantee; document why each one exists.
