@@ -5051,3 +5051,82 @@ describe('child template resolution root', () => {
     LONG,
   );
 });
+
+describe('dev artifact and template resolution', () => {
+  test(
+    'skips artifact directories without a cyan.yaml instead of crashing resolution',
+    async () => {
+      const fixture = await makeFixture('dev-artifact-scratch');
+      try {
+        await mkdir(join(fixture.artifacts, 'aaa-scratch'), { recursive: true });
+        await writeFile(join(fixture.artifacts, 'aaa-scratch/notes.txt'), 'not an artifact\n', 'utf8');
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'scratch-consumer', files: { 'A.md': 'a\n' } });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        expect(await readOut(fixture.out, 'A.md')).toBe('a\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'fails on an ambiguous dev artifact instead of taking the first readdir match',
+    async () => {
+      const fixture = await makeFixture('dev-artifact-ambiguous');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'vars', version: '1', runtime: varsProcessorRuntime });
+        const duplicate = join(fixture.artifacts, 'processor-cyanprint-vars-v2');
+        await mkdir(duplicate, { recursive: true });
+        await writeFile(
+          join(duplicate, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'processor',
+            owner: 'cyanprint',
+            name: 'vars',
+            version: '2',
+            entry: 'index.ts',
+            bundledEntry: 'index.ts',
+          }),
+          'utf8',
+        );
+        await writeFile(join(duplicate, 'index.ts'), varsProcessorRuntime, 'utf8');
+        const template = await writeTemplate(fixture, { name: 'ambiguous-consumer', files: { 'A.md': 'a\n' } });
+
+        await expect(createProject({ template, outDir: fixture.out, headless: true })).rejects.toThrow(
+          /Ambiguous dev artifact processor cyanprint\/vars/,
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'fails on an ambiguous child template instead of taking the first readdir match',
+    async () => {
+      const fixture = await makeFixture('dev-template-ambiguous');
+      try {
+        await writeTemplate(fixture, { name: 'dup-child', dir: 'dup-child-a', version: '1' });
+        await writeTemplate(fixture, { name: 'dup-child', dir: 'dup-child-b', version: '2' });
+        const parent = await writeTemplate(fixture, {
+          name: 'ambiguous-parent',
+          templates: { 'cyanprint/dup-child': null },
+        });
+
+        await expect(createProject({ template: parent, outDir: fixture.out, headless: true })).rejects.toThrow(
+          /Ambiguous child template cyanprint\/dup-child/,
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+});

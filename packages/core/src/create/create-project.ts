@@ -1738,11 +1738,12 @@ export async function resolveDevTemplate(args: {
     );
   }
   for (const root of await findTemplateRoots(args.templateDir, ...[args.workspaceRoot].flat())) {
-    const entries = await readdir(root, { withFileTypes: true });
+    // Sorted so the result never depends on readdir order.
+    const entries = (await readdir(root, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory())
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    const matches: Array<{ dir: string; version?: string }> = [];
     for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
       const candidate = join(root, entry.name);
       if (!(await stat(join(candidate, 'cyan.yaml')).catch(() => undefined))) {
         continue;
@@ -1754,8 +1755,18 @@ export async function resolveDevTemplate(args: {
         manifest.name === args.dependency.name &&
         (!args.dependency.version || manifest.version === args.dependency.version)
       ) {
-        return { dir: candidate, fromArtifactCache: false };
+        matches.push({ dir: candidate, version: manifest.version });
       }
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous child template ${args.dependency.owner ?? args.defaultOwner}/${args.dependency.name}: ` +
+          `${matches.map(match => `${match.dir} (${match.version ?? 'unversioned'})`).join(', ')}. ` +
+          'Pin a version in the dependency or remove the duplicate.',
+      );
+    }
+    if (matches[0]) {
+      return { dir: matches[0].dir, fromArtifactCache: false };
     }
   }
   throw new Error(
