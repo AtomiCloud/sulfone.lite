@@ -2,15 +2,51 @@
 
 type Op = { type: ' ' | '-' | '+'; line: string };
 
+/** Largest LCS table (cells) we are willing to build; beyond it the changed region is shown as a full replacement. */
+const MAX_LCS_CELLS = 4_000_000;
+
 function diffLines(a: string[], b: string[]): Op[] {
+  // Trim the common prefix/suffix first: the quadratic table only needs the changed middle.
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < a.length - prefix &&
+    suffix < b.length - prefix &&
+    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const midA = a.slice(prefix, a.length - suffix);
+  const midB = b.slice(prefix, b.length - suffix);
+  const ops: Op[] = [];
+  for (let k = 0; k < prefix; k += 1) {
+    ops.push({ type: ' ', line: a[k]! });
+  }
+  for (const op of diffMiddle(midA, midB)) {
+    ops.push(op);
+  }
+  for (let k = a.length - suffix; k < a.length; k += 1) {
+    ops.push({ type: ' ', line: a[k]! });
+  }
+  return ops;
+}
+
+function diffMiddle(a: string[], b: string[]): Op[] {
   const n = a.length;
   const m = b.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  if (n === 0 || m === 0 || (n + 1) * (m + 1) > MAX_LCS_CELLS) {
+    // Valid (if not minimal) diff: drop all old lines, add all new lines.
+    return [...a.map(line => ({ type: '-' as const, line })), ...b.map(line => ({ type: '+' as const, line }))];
+  }
+  const width = m + 1;
+  const dp = new Uint32Array((n + 1) * width);
   for (let i = n - 1; i >= 0; i -= 1) {
-    const row = dp[i]!;
-    const nextRow = dp[i + 1]!;
     for (let j = m - 1; j >= 0; j -= 1) {
-      row[j] = a[i] === b[j] ? nextRow[j + 1]! + 1 : Math.max(nextRow[j]!, row[j + 1]!);
+      dp[i * width + j] =
+        a[i] === b[j] ? dp[(i + 1) * width + j + 1]! + 1 : Math.max(dp[(i + 1) * width + j]!, dp[i * width + j + 1]!);
     }
   }
   const ops: Op[] = [];
@@ -21,7 +57,7 @@ function diffLines(a: string[], b: string[]): Op[] {
       ops.push({ type: ' ', line: a[i]! });
       i += 1;
       j += 1;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+    } else if (dp[(i + 1) * width + j]! >= dp[i * width + j + 1]!) {
       ops.push({ type: '-', line: a[i]! });
       i += 1;
     } else {
