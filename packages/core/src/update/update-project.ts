@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Answers, CompatibilityWarning, InstalledTemplate, PromptAdapter } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
 import {
@@ -6,12 +8,14 @@ import {
   defaultTemplateSourceResolver,
   diffCommandSources,
   readFinalProjectFiles,
+  readMergeOurs,
   readProjectFiles,
   regenerateInstalledTemplate,
   reportWarnings,
   resolveSiblingTier,
   runPostGenerationCommands,
   sortByInstalledAt,
+  TEMPLATE_SOURCE_KIND,
   type GenerationProgressEvent,
   type TemplateSourceResolver,
   type TreeGeneration,
@@ -25,7 +29,7 @@ import {
   writeGeneratedState,
 } from '../state/generated-state';
 import { unionFeatureIdentities } from '../probe/features';
-import { stableConfig } from '../util';
+import { stableConfig, stateTimestamp } from '../util';
 import { gitThreeWayMerge } from './git-merge';
 
 export type UpdateProjectResult = {
@@ -101,6 +105,9 @@ export async function updateProject(args: {
       generation: await regenerateInstalledTemplate(entry, resolveSource, generationOptions),
     });
   }
+  // Only the templates being updated need their base to be reproducible; an old or edited
+  // local install elsewhere in the project is untouched by `update --template`.
+  await assertLocalTemplatesUnchanged(baseGenerations.filter(item => targets.includes(item.entry)));
 
   // Theirs: targets execute their new versions, reusing saved answers (only new
   // questions prompt; prior values as defaults). Untouched templates reuse their base
@@ -131,7 +138,7 @@ export async function updateProject(args: {
 
   const base = await resolveSiblingTier(sortByInstalledAt(baseGenerations), generationOptions);
   const theirs = await resolveSiblingTier(sortByInstalledAt(theirsGenerations), generationOptions);
-  const ours = await readProjectFiles(args.projectDir);
+  const ours = await readMergeOurs(args.projectDir, { base: base.files, theirs: theirs.files });
 
   const merge = await gitThreeWayMerge({ base: base.files, ours, theirs: theirs.files });
   await applyMergedTree(args.projectDir, merge);
@@ -178,7 +185,11 @@ export async function updateProject(args: {
     // as generated content rather than untracked user files.
     const commandWarnings: CompatibilityWarning[] = [];
     const changedTargets = theirsGenerations.filter(regenerationChanged);
-    const preCommandFiles = await readProjectFiles(args.projectDir);
+    // Command snapshots must see the whole project (a command can create files anywhere), but
+    // that is a full read per batch — skip them entirely when no command will run.
+    const hasCommands = changedTargets.some(item => item.generation.commands.length > 0);
+    const theirsPaths = new Set(theirs.files.map(file => file.path));
+    const preCommandFiles = hasCommands ? await readProjectFiles(args.projectDir) : [];
     // Run each changed template's command batch separately and snapshot the tree between
     // batches, so every file a command created or rewrote is attributed to the template
     // whose command produced it (a later batch rewriting the same path wins). A failed
@@ -192,20 +203,22 @@ export async function updateProject(args: {
         { outDir: args.projectDir, onProgress: args.onProgress },
         commandWarnings,
       );
-      const postBatch = await readProjectFiles(args.projectDir);
-      diffCommandSources(commandSnapshot, postBatch, item.generation.ref, commandSources);
-      commandSnapshot = postBatch;
+      if (item.generation.commands.length > 0) {
+        const postBatch = await readProjectFiles(args.projectDir);
+        diffCommandSources(commandSnapshot, postBatch, item.generation.ref, commandSources);
+        commandSnapshot = postBatch;
+      }
       if (commandFailure) {
         break;
       }
     }
-    const finalFiles = await readFinalProjectFiles(
-      args.projectDir,
-      new Set(theirs.files.map(file => file.path)),
-      preCommandFiles,
-    );
+    // Without commands nothing but the merged tree changed, so the generated paths are the
+    // whole final set.
+    const finalFiles = hasCommands
+      ? await readFinalProjectFiles(args.projectDir, theirsPaths, preCommandFiles)
+      : await readProjectFiles(args.projectDir, path => theirsPaths.has(path));
 
-    const time = new Date().toISOString();
+    const time = stateTimestamp();
     let templates = state.templates;
     for (const item of theirsGenerations) {
       // Advance the install's history whenever its regeneration changed (version float OR
@@ -289,4 +302,45 @@ export async function updateProject(args: {
 function matchesTemplateFilter(entry: InstalledTemplate, filter: string): boolean {
   const bare = filter.split('@')[0] ?? filter;
   return bare === `${entry.owner}/${entry.name}` || bare === entry.name;
+}
+
+/**
+ * A local-path install's base is regenerated from the template as it is on disk NOW, so any
+ * change to that template since install makes base == theirs and every upstream change would
+ * be silently dropped. The old content cannot be reconstructed, so refuse instead of
+ * reporting a success that lost changes. Unchanged templates (same recorded fingerprint)
+ * are genuinely up to date and proceed.
+ */
+async function assertLocalTemplatesUnchanged(
+  baseGenerations: Array<{ entry: InstalledTemplate; generation: TreeGeneration }>,
+): Promise<void> {
+  for (const { entry, generation } of baseGenerations) {
+    if (!(await stat(join(entry.source, 'cyan.yaml')).catch(() => undefined))) {
+      continue;
+    }
+    const current = new Map(
+      generation.artifacts
+        .filter(item => item.kind === TEMPLATE_SOURCE_KIND)
+        .map(item => [`${item.owner}/${item.name}`, item.integrity]),
+    );
+    const recorded = entry.artifacts.filter(item => item.kind === TEMPLATE_SOURCE_KIND);
+    const unchanged =
+      recorded.length > 0 && recorded.every(item => current.get(`${item.owner}/${item.name}`) === item.integrity);
+    if (!unchanged) {
+      throw new CyanError(
+        problem(
+          'validation',
+          'local_template_not_updatable',
+          `Cannot update ${entry.owner}/${entry.name}: it was installed from the local path ${entry.source}, ` +
+            (recorded.length === 0
+              ? 'and the project state has no record of its content to compare against.'
+              : 'and that template has changed since it was installed.') +
+            ' A local-path install cannot be updated because its original (base) content cannot be reproduced, ' +
+            'so the update would silently drop your changes. Publish the template to a registry and install it from ' +
+            'there, or re-create the project from the local template.',
+          { template: `${entry.owner}/${entry.name}`, source: entry.source },
+        ),
+      );
+    }
+  }
 }

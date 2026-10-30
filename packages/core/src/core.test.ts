@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { CyanError, type VfsFile } from '@cyanprint/contracts';
 import { resolveCyanRunDir } from '@cyanprint/contracts/run-dir';
 import YAML from 'yaml';
 import {
@@ -21,6 +22,8 @@ import {
   exists,
   gitThreeWayMerge,
   loadGeneratedState,
+  readMergeOurs,
+  readProjectFiles,
   migrateGeneratedState,
   resolveCyanCacheDir,
   resolveLayers,
@@ -1628,6 +1631,47 @@ describe('tier 2 — dependency tree', () => {
   );
 });
 
+describe('reproducible state timestamps', () => {
+  test(
+    'SOURCE_DATE_EPOCH pins installedAt and time in .cyan_state.yaml, so two generations are byte-identical',
+    async () => {
+      const first = await makeFixture('sde-a');
+      const second = await makeFixture('sde-b');
+      const saved = process.env.SOURCE_DATE_EPOCH;
+      try {
+        process.env.SOURCE_DATE_EPOCH = '1700000000';
+        const files = { 'README.md': '# hi\n' };
+        const stateA = await generateStateText(first, files);
+        await Bun.sleep(1100);
+        const stateB = await generateStateText(second, files);
+        expect(stateA).toContain('2023-11-14T22:13:20.000Z');
+        expect(stateA).toBe(stateB);
+
+        delete process.env.SOURCE_DATE_EPOCH;
+        expect(await generateStateText(first, files)).not.toContain('2023-11-14T22:13:20.000Z');
+      } finally {
+        if (saved === undefined) {
+          delete process.env.SOURCE_DATE_EPOCH;
+        } else {
+          process.env.SOURCE_DATE_EPOCH = saved;
+        }
+        await first.cleanup();
+        await second.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+async function generateStateText(fixture: Fixture, files: Record<string, string>): Promise<string> {
+  await writeVarsProcessor(fixture);
+  const template = await writeTemplate(fixture, { name: 'sde', files });
+  await rm(join(fixture.out, '.cyan_state.yaml'), { force: true });
+  await createProject({ template, outDir: fixture.out, headless: true });
+  const text = await Bun.file(join(fixture.out, '.cyan_state.yaml')).text();
+  return text.replace(/source: .*/g, 'source: <template>');
+}
+
 describe('tier 3 — multi-install (create upserts into an existing project)', () => {
   test(
     'sibling templates layer by installedAt with LWW, user edits survive the merge, and history upserts',
@@ -1843,6 +1887,78 @@ describe('tier 3 — multi-install (create upserts into an existing project)', (
   );
 });
 
+/** Run git for test setup/inspection with a clean env (no inherited GIT_*). */
+function testGit(cwd: string, args: string[]): string {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const proc = Bun.spawnSync(['git', '-C', cwd, ...args], { env, stdout: 'pipe', stderr: 'pipe' });
+  if (proc.exitCode !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${proc.stderr.toString()}`);
+  }
+  return proc.stdout.toString();
+}
+
+describe('gitThreeWayMerge isolation', () => {
+  test('ignores inherited GIT_* env and global git config, and never touches the caller repo', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cyanprint-git-isolation-'));
+    const otherRepo = join(scratch, 'other');
+    const hooks = join(scratch, 'hooks');
+    const marker = join(scratch, 'hook-ran');
+    try {
+      await mkdir(otherRepo, { recursive: true });
+      await mkdir(hooks, { recursive: true });
+      testGit(otherRepo, ['init', '-q', '-b', 'main']);
+      await writeFile(join(otherRepo, 'keep.txt'), 'mine\n', 'utf8');
+      testGit(otherRepo, ['add', '-A']);
+      testGit(otherRepo, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'real work']);
+      const before = {
+        commits: testGit(otherRepo, ['rev-list', '--all', '--count']),
+        refs: testGit(otherRepo, ['for-each-ref']),
+        tracked: testGit(otherRepo, ['ls-files']),
+      };
+      for (const hook of ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-merge']) {
+        await writeFile(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+      }
+      const globalConfig = join(scratch, 'gitconfig');
+      await writeFile(globalConfig, `[merge]\n\tconflictStyle = diff3\n[core]\n\thooksPath = ${hooks}\n`, 'utf8');
+
+      // As if run from a git hook (GIT_DIR/GIT_INDEX_FILE point at the user's REAL repo) on a
+      // machine whose global config uses diff3 conflict markers and global hooks. Bun.spawn
+      // ignores runtime process.env edits, so the hostile env must be set on a child process.
+      const script = `import { gitThreeWayMerge } from ${JSON.stringify(join(import.meta.dir, 'update/git-merge.ts'))};
+        console.log(JSON.stringify(await gitThreeWayMerge({
+          base: [{ path: 'f.txt', content: 'a\\n' }],
+          ours: [{ path: 'f.txt', content: 'b\\n' }],
+          theirs: [{ path: 'f.txt', content: 'c\\n' }],
+        })));`;
+      const child = Bun.spawnSync([process.execPath, '-e', script], {
+        env: {
+          ...process.env,
+          GIT_DIR: join(otherRepo, '.git'),
+          GIT_WORK_TREE: otherRepo,
+          GIT_INDEX_FILE: join(otherRepo, '.git', 'index'),
+          GIT_CONFIG_GLOBAL: globalConfig,
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      expect(child.stderr.toString()).toBe('');
+      const merge = JSON.parse(child.stdout.toString()) as Awaited<ReturnType<typeof gitThreeWayMerge>>;
+
+      expect(merge.conflicts).toEqual(['f.txt']);
+      expect(merge.files.find(file => file.path === 'f.txt')?.content).toBe(
+        '<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> incoming\n',
+      );
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(testGit(otherRepo, ['rev-list', '--all', '--count'])).toBe(before.commits);
+      expect(testGit(otherRepo, ['for-each-ref'])).toBe(before.refs);
+      expect(testGit(otherRepo, ['ls-files'])).toBe(before.tracked);
+      expect(testGit(otherRepo, ['status', '--porcelain'])).toBe('');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('applyMergedTree', () => {
   test('applies deletions before writes so a merge can replace a file with a directory', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
@@ -2042,6 +2158,117 @@ describe('applyMergedTree', () => {
       } finally {
         reader.kill();
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('merge path clashes with the user own paths', () => {
+  const base: VfsFile[] = [{ path: 'README', content: 'r\n' }];
+
+  async function mergeInto(dir: string, tiers: { base: VfsFile[]; theirs: VfsFile[] }) {
+    const ours = await readMergeOurs(dir, tiers);
+    return await gitThreeWayMerge({ base: tiers.base, ours, theirs: tiers.theirs });
+  }
+
+  test('a template file added where the user has a folder conflicts instead of crashing the apply', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await writeFile(join(dir, 'README'), 'r\n', 'utf8');
+      await mkdir(join(dir, 'docs'));
+      await writeFile(join(dir, 'docs/notes.md'), 'mine\n', 'utf8');
+      const merge = await mergeInto(dir, { base, theirs: [...base, { path: 'docs', content: 'new\n' }] });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'docs/notes.md')).text()).toBe('mine\n');
+      expect(await Bun.file(join(dir, 'docs~incoming')).text()).toBe('new\n');
+      expect(merge.conflicts).toEqual(['docs~incoming']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a template file added under a path the user has as a file conflicts instead of crashing the apply', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await writeFile(join(dir, 'README'), 'r\n', 'utf8');
+      await writeFile(join(dir, 'docs'), 'mine\n', 'utf8');
+      const merge = await mergeInto(dir, { base, theirs: [...base, { path: 'docs/x', content: 'new\n' }] });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'docs~HEAD')).text()).toBe('mine\n');
+      expect(await Bun.file(join(dir, 'docs/x')).text()).toBe('new\n');
+      expect(merge.conflicts).toEqual(['docs~HEAD']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a template file the user turned into a folder conflicts when the template edits it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await mkdir(join(dir, 'config'));
+      await writeFile(join(dir, 'config/a'), 'x\n', 'utf8');
+      const merge = await mergeInto(dir, {
+        base: [{ path: 'config', content: 'c1\n' }],
+        theirs: [{ path: 'config', content: 'c2\n' }],
+      });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'config/a')).text()).toBe('x\n');
+      expect(await Bun.file(join(dir, 'config~incoming')).text()).toBe('c2\n');
+      expect(merge.conflicts).toEqual(['config~incoming']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('applyMergedTree refuses a clashing tree before writing anything', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await mkdir(join(dir, 'docs'));
+      await writeFile(join(dir, 'docs/notes.md'), 'mine\n', 'utf8');
+      await expect(
+        applyMergedTree(dir, {
+          files: [
+            { path: 'a.txt', content: 'first\n' },
+            { path: 'docs', content: 'new\n' },
+          ],
+          deletions: [],
+          conflicts: [],
+        }),
+      ).rejects.toThrow(/docs/);
+      expect(await Bun.file(join(dir, 'a.txt')).exists()).toBe(false);
+      expect(await Bun.file(join(dir, 'docs/notes.md')).text()).toBe('mine\n');
+
+      await rm(join(dir, 'docs'), { recursive: true });
+      await writeFile(join(dir, 'docs'), 'mine\n', 'utf8');
+      await expect(
+        applyMergedTree(dir, {
+          files: [
+            { path: 'a.txt', content: 'first\n' },
+            { path: 'docs/x', content: 'new\n' },
+          ],
+          deletions: [],
+          conflicts: [],
+        }),
+      ).rejects.toThrow(/docs/);
+      expect(await Bun.file(join(dir, 'a.txt')).exists()).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('BOM files in the merge round-trip', () => {
+  test('a hard-linked file with a UTF-8 BOM is recognised as unchanged and left alone', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-bom-'));
+    try {
+      const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello\n')]);
+      await writeFile(join(dir, 'bom.txt'), bytes);
+      await link(join(dir, 'bom.txt'), join(dir, 'bom-link.txt'));
+      const files = await readProjectFiles(dir);
+      // Rewriting an unchanged file would trip the hard-link guard.
+      await applyMergedTree(dir, { files, deletions: [], conflicts: [] });
+      expect((await Bun.file(join(dir, 'bom.txt')).bytes()).length).toBe(bytes.length);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -2285,7 +2512,7 @@ describe('update', () => {
   );
 
   test(
-    'update of an unversioned local source is a no-op by design',
+    'update of an unchanged local source is genuinely up to date',
     async () => {
       const fixture = await makeFixture('update-local');
       try {
@@ -2300,6 +2527,144 @@ describe('update', () => {
         const state = await loadGeneratedState(fixture.out);
         expect(state.templates[0]?.history.length).toBe(1);
       } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update refuses a local source that changed since install instead of silently dropping the change',
+    async () => {
+      const fixture = await makeFixture('update-local-changed');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'local-edit', files: { 'README.md': 'v1\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        await writeFile(join(template, 'template', 'README.md'), 'v2\n', 'utf8');
+
+        const failure = await updateProject({ projectDir: fixture.out, headless: true }).catch(error => error);
+
+        expect(failure).toBeInstanceOf(CyanError);
+        expect((failure as CyanError).problem.code).toBe('local_template_not_updatable');
+        expect((failure as CyanError).message).toContain('cannot be updated');
+        expect(await readOut(fixture.out, 'README.md')).toBe('v1\n');
+        expect((await loadGeneratedState(fixture.out)).templates[0]?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update --template only checks the targeted local install, not an edited sibling',
+    async () => {
+      const fixture = await makeFixture('update-local-sibling');
+      try {
+        await writeVarsProcessor(fixture);
+        const one = await writeTemplate(fixture, { name: 'one', files: { 'ONE.md': 'one\n' } });
+        const two = await writeTemplate(fixture, { name: 'two', files: { 'TWO.md': 'two\n' } });
+        await createProject({ template: one, outDir: fixture.out, headless: true });
+        await createProject({ template: two, outDir: fixture.out, headless: true });
+        await writeFile(join(two, 'template', 'TWO.md'), 'two edited\n', 'utf8');
+
+        const update = await updateProject({ projectDir: fixture.out, headless: true, template: 'cyanprint/one' });
+        expect(update.status).toBe('done');
+
+        const failure = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          template: 'cyanprint/two',
+        }).catch(error => error);
+        expect((failure as CyanError).problem.code).toBe('local_template_not_updatable');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update refuses a local install whose state has no recorded template fingerprint',
+    async () => {
+      const fixture = await makeFixture('update-local-legacy');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'local-legacy', files: { 'README.md': 'v1\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        const state = await loadGeneratedState(fixture.out);
+        for (const entry of state.templates) {
+          entry.artifacts = entry.artifacts.filter(item => item.kind !== 'template-source');
+        }
+        await writeGeneratedState(fixture.out, state);
+
+        await expect(updateProject({ projectDir: fixture.out, headless: true })).rejects.toThrow('no record');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update succeeds and leaves a hard-linked node_modules file untouched when the template did not change',
+    async () => {
+      const fixture = await makeFixture('update-hardlink-noop');
+      const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'hl-noop', files: { 'README.md': 'hi\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        // `bun install` hard-links package files out of its cache: nlink > 1 inside the project.
+        await writeFile(join(outside, 'cached.js'), 'cached\n', 'utf8');
+        await mkdir(join(fixture.out, 'node_modules/pkg'), { recursive: true });
+        await link(join(outside, 'cached.js'), join(fixture.out, 'node_modules/pkg/index.js'));
+
+        const update = await updateProject({ projectDir: fixture.out, headless: true });
+
+        expect(update.status).toBe('done');
+        expect(await readOut(fixture.out, 'node_modules/pkg/index.js')).toBe('cached\n');
+        expect((await lstat(join(outside, 'cached.js'))).nlink).toBe(2);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update applies the template change and leaves a hard-linked node_modules file untouched',
+    async () => {
+      const fixture = await makeFixture('update-hardlink-change');
+      const outside = await mkdtemp(join(tmpdir(), 'cyanprint-outside-'));
+      try {
+        await writeVarsProcessor(fixture);
+        const pair = await writeVersionPair(fixture, {
+          name: 'hl-change',
+          v1Files: { 'README.md': 'body v1\n' },
+          v2Files: { 'README.md': 'body v2\n' },
+        });
+        await createProject({ template: pair.v1, outDir: fixture.out, headless: true });
+        await writeFile(join(outside, 'cached.js'), 'cached\n', 'utf8');
+        await mkdir(join(fixture.out, 'node_modules/pkg'), { recursive: true });
+        await link(join(outside, 'cached.js'), join(fixture.out, 'node_modules/pkg/index.js'));
+
+        const update = await updateProject({
+          projectDir: fixture.out,
+          headless: true,
+          resolveTemplateSource: pair.resolveTemplateSource,
+          resolveUpdateTarget: pair.resolveUpdateTarget,
+        });
+
+        expect(update.status).toBe('done');
+        expect(update.updated).toEqual([{ ref: 'cyanprint/hl-change', from: '1', to: '2' }]);
+        expect(await readOut(fixture.out, 'README.md')).toBe('body v2\n');
+        expect(await readOut(fixture.out, 'node_modules/pkg/index.js')).toBe('cached\n');
+        expect((await lstat(join(outside, 'cached.js'))).nlink).toBe(2);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
         await fixture.cleanup();
       }
     },

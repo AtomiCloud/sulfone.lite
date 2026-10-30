@@ -255,10 +255,13 @@ export async function pruneEmptyDirs(root: string, deletedPath: string): Promise
   }
 }
 
-/** Decode bytes as UTF-8 text; undefined for binary (invalid UTF-8 or embedded NUL). */
+/**
+ * Decode bytes as UTF-8 text; undefined for binary (invalid UTF-8 or embedded NUL). A leading
+ * BOM is kept in the text (`ignoreBOM`) so re-encoding yields the original bytes.
+ */
 export function decodeText(bytes: Uint8Array): string | undefined {
   try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     return text.includes('\u0000') ? undefined : text;
   } catch {
     return undefined;
@@ -277,4 +280,41 @@ export function safeJoin(root: string, child: string): string {
     throw new Error(`Refusing to write outside output directory: ${child}`);
   }
   return resolved;
+}
+
+const warnedEpochs = new Set<string>();
+
+/** Wall-clock timestamp for `.cyan_state.yaml`; honours SOURCE_DATE_EPOCH (seconds) for reproducible output. */
+export function stateTimestamp(): string {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  if (epoch !== undefined && epoch !== '') {
+    const date = /^\d+$/.test(epoch) ? new Date(Number(epoch) * 1000) : undefined;
+    if (date && !Number.isNaN(date.getTime())) {
+      return date.toISOString();
+    }
+    if (!warnedEpochs.has(epoch)) {
+      warnedEpochs.add(epoch);
+      console.warn(`Ignoring SOURCE_DATE_EPOCH="${epoch}": expected whole seconds since the Unix epoch.`);
+    }
+  }
+  return new Date().toISOString();
+}
+
+/** Registry cache bookkeeping written next to a cached template; never part of its content. */
+const CACHE_MARKER_FILES = new Set(['.cyan_cache_integrity', '.cyan_cache_content_integrity']);
+
+/**
+ * Content fingerprint of a template directory (sorted relative paths + bytes, ignoring
+ * node_modules and .git): recorded at install so update can tell whether a local-path
+ * template changed since, which its on-disk-only base regeneration cannot reveal.
+ */
+export async function templateDirIntegrity(dir: string): Promise<string> {
+  const hash = createHash('sha256');
+  const paths = (await Array.fromAsync(new Bun.Glob('**/*').scan({ cwd: dir, onlyFiles: true, dot: true })))
+    .filter(path => !/(^|\/)(node_modules|\.git)(\/|$)/.test(path) && !CACHE_MARKER_FILES.has(path))
+    .sort(comparePaths);
+  for (const path of paths) {
+    hash.update(`${path}\0${sha256(new Uint8Array(await Bun.file(join(dir, path)).arrayBuffer()))}\0`);
+  }
+  return hash.digest('hex');
 }
