@@ -27,8 +27,8 @@ import type { AccountUser } from '../account/token-service';
 import { artifactKinds, filterArtifacts, normalizeArtifactKind } from '../registry/artifact-search';
 import { artifactDetailHref } from '../registry/artifact-url';
 import { createPendingNavigation } from './pending-navigation';
-import { nextSearchDraft } from './search-draft';
 import { useUrlState } from './url-state';
+import { useSearchDraft } from './use-search-draft';
 import { formatUrl, parseUrl } from './url-update';
 
 const navItems = [
@@ -53,10 +53,13 @@ export function AppShell({
   );
   const { pathname, params, update, settled } = useUrlState({ navigation });
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const lastPushedQuery = useRef<string | undefined>(undefined);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchDraft, setSearchDraft] = useState(params.get('q') ?? '');
+  const { draft: searchDraft, type: typeSearchDraft } = useSearchDraft({
+    params,
+    navigation,
+    inputRef: searchInputRef,
+  });
   const [searchResults, setSearchResults] = useState(artifacts);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [themePreferenceReady, setThemePreferenceReady] = useState(false);
@@ -79,15 +82,6 @@ export function AppShell({
       delete document.documentElement.dataset.cyanprintShell;
     };
   }, [shellReady]);
-
-  useEffect(() => {
-    // The URL echoes our own typing late (debounce + router), so do not let it overwrite characters typed since.
-    const urlQuery = params.get('q') ?? '';
-    const pending = navigation.target() !== undefined;
-    const focused = searchInputRef.current !== null && searchInputRef.current === document.activeElement;
-    const lastPushed = lastPushedQuery.current;
-    setSearchDraft(draft => nextSearchDraft({ draft, urlQuery, pending, focused, lastPushed }));
-  }, [params, navigation]);
 
   useEffect(() => {
     if (themePreferenceReady) {
@@ -179,7 +173,12 @@ export function AppShell({
       }
     }
     search.delete('cursor');
-    navigation.schedule(formatUrl({ pathname: '/search', params: search }), navigationOptions);
+    const url = formatUrl({ pathname: '/search', params: search });
+    // Nothing changes (e.g. re-picking the selected kind): do not start a navigation that would never report back.
+    if (url === (pendingTarget ?? formatUrl({ pathname, params }))) {
+      return;
+    }
+    navigation.schedule(url, navigationOptions);
   }
 
   function setThemePreference(nextTheme: 'dark' | 'light') {
@@ -221,8 +220,7 @@ export function AppShell({
               ref={searchInputRef}
               onChange={event => {
                 const value = event.currentTarget.value;
-                setSearchDraft(value);
-                lastPushedQuery.current = value;
+                typeSearchDraft(value);
                 updateSearchState({ q: value }, { defer: true });
               }}
               placeholder="Search the registry"
