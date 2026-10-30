@@ -3,6 +3,16 @@
 
 ### 🐛 Bug Fixes 🐛
 
+* **update:** make cyanprint update robust (hard links, local templates, git isolation, state determinism) ([#32](https://github.com/AtomiCloud/sulfone.lite/issues/32)) ([97de5fa](https://github.com/AtomiCloud/sulfone.lite/commit/97de5fae3ba6a2d4b7878b938bcbd10abf6c351d))
+* **testing:** never rm -rf the user --out dir or a test root ([#29](https://github.com/AtomiCloud/sulfone.lite/issues/29)) ([97575a5](https://github.com/AtomiCloud/sulfone.lite/commit/97575a5881779bb25d01a30f772d55aa37bda477))
+* **probe:** process lifetime, timeouts, determinism and cwd-independent resolution ([#33](https://github.com/AtomiCloud/sulfone.lite/issues/33)) ([bc735d8](https://github.com/AtomiCloud/sulfone.lite/commit/bc735d8c761588c354b0038b212b0c4141cee85a))
+* **cli:** trust --version, slim push start body, real trust pins, prompt hardening ([#31](https://github.com/AtomiCloud/sulfone.lite/issues/31)) ([ae02e12](https://github.com/AtomiCloud/sulfone.lite/commit/ae02e12fc4df4574f0f333083f34e6e363b6487a))
+
+## [4.9.3](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.2...v4.9.3) (2026-10-30)
+
+
+### 🐛 Bug Fixes 🐛
+
 * **testing:** never rm -rf the user --out dir or a test root ([#29](https://github.com/AtomiCloud/sulfone.lite/issues/29)) ([97575a5](https://github.com/AtomiCloud/sulfone.lite/commit/97575a5881779bb25d01a30f772d55aa37bda477))
 * **probe:** process lifetime, timeouts, determinism and cwd-independent resolution ([#33](https://github.com/AtomiCloud/sulfone.lite/issues/33)) ([bc735d8](https://github.com/AtomiCloud/sulfone.lite/commit/bc735d8c761588c354b0038b212b0c4141cee85a))
 * **cli:** trust --version, slim push start body, real trust pins, prompt hardening ([#31](https://github.com/AtomiCloud/sulfone.lite/issues/31)) ([ae02e12](https://github.com/AtomiCloud/sulfone.lite/commit/ae02e12fc4df4574f0f333083f34e6e363b6487a))
