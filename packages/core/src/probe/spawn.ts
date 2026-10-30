@@ -15,6 +15,72 @@
  * DOCUMENTED, out-of-scope limitation, not a gap to close in userspace.
  */
 
+/**
+ * Process groups the engine currently owns (detached children that have not yet
+ * exited). A SIGINT/SIGTERM to the engine would otherwise orphan them — they lead
+ * their OWN group, so the terminal's Ctrl-C never reaches them — and the sandbox
+ * reaper would later delete the directory they are still running in. The signal
+ * handlers below are installed only while at least one group is live, so the
+ * default signal behaviour is untouched outside a probe run.
+ */
+const liveGroups = new Set<number>();
+let handlersInstalled = false;
+let shuttingDown = false;
+
+function killLiveGroupsNow(): void {
+  for (const pgid of liveGroups) {
+    signalProcessGroup(pgid, 'SIGKILL');
+  }
+}
+
+function onTerminationSignal(signal: NodeJS.Signals): void {
+  const exitCode = signal === 'SIGINT' ? 130 : 143;
+  if (shuttingDown) {
+    // Second signal: stop being polite.
+    killLiveGroupsNow();
+    process.exit(exitCode);
+  }
+  shuttingDown = true;
+  void Promise.allSettled([...liveGroups].map(pgid => killProcessTree(pgid))).finally(() => process.exit(exitCode));
+}
+
+const onSigint = () => onTerminationSignal('SIGINT');
+const onSigterm = () => onTerminationSignal('SIGTERM');
+
+function installHandlers(): void {
+  if (handlersInstalled) {
+    return;
+  }
+  handlersInstalled = true;
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
+  process.on('exit', killLiveGroupsNow);
+}
+
+function removeHandlers(): void {
+  if (!handlersInstalled || liveGroups.size > 0) {
+    return;
+  }
+  handlersInstalled = false;
+  process.off('SIGINT', onSigint);
+  process.off('SIGTERM', onSigterm);
+  process.off('exit', killLiveGroupsNow);
+}
+
+/**
+ * Track a detached child's process group so an engine SIGINT/SIGTERM (or exit)
+ * kills it. Returns the release function; call it once the group has been dealt
+ * with.
+ */
+export function trackProcessGroup(pgid: number): () => void {
+  liveGroups.add(pgid);
+  installHandlers();
+  return () => {
+    liveGroups.delete(pgid);
+    removeHandlers();
+  };
+}
+
 export type DetachedCommandResult = {
   exitCode: number;
   stdout: string;
@@ -53,6 +119,7 @@ export async function runDetachedCommand(args: {
     stdin: 'ignore',
     detached,
   });
+  const release = detached ? trackProcessGroup(proc.pid) : undefined;
   const stdout = collectPipe(proc.stdout);
   const stderr = collectPipe(proc.stderr);
   let timedOut = false;
@@ -84,6 +151,14 @@ export async function runDetachedCommand(args: {
     // then drain each pipe with a bounded grace so the read can never outlive the
     // command.
     const exitCode = await proc.exited;
+    // A detached command leads its own group: sweep it now that the leader is gone,
+    // so a background child it left behind cannot keep mutating the directory the
+    // caller is about to snapshot/fork (non-deterministic forks). Best-effort — an
+    // empty group is fine; a descendant that left the group is the documented
+    // out-of-scope limitation.
+    if (detached) {
+      signalProcessGroup(proc.pid, 'SIGKILL');
+    }
     // Clear the timeout the instant the command's OWN process exits, BEFORE any
     // kill/drain work — matching `probe-process.ts`. Once the owner has exited the
     // deadline no longer applies: leaving the timer armed across the awaits below
@@ -109,6 +184,7 @@ export async function runDetachedCommand(args: {
     if (timer !== undefined) {
       clearTimeout(timer);
     }
+    release?.();
   }
 }
 

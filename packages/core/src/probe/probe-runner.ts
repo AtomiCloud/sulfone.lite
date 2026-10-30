@@ -36,6 +36,28 @@ type ProbeRunnerPayload = {
   timeoutMs: number;
 };
 
+/**
+ * Slack past the probe's own timeout before the runner gives up on itself. The
+ * parent kills the group at `timeoutMs`; this backstop only matters when the
+ * parent is gone (SIGKILLed, crashed) and nobody is left to enforce the deadline.
+ */
+const SELF_DEADLINE_SLACK_MS = 10_000;
+
+function armSelfDeadline(timeoutMs: number): void {
+  const timer = setTimeout(() => {
+    console.error(`probe-runner: exceeded its own deadline (${timeoutMs}ms + ${SELF_DEADLINE_SLACK_MS}ms); exiting`);
+    try {
+      // The runner leads its own group when the parent spawned it; take its gate
+      // commands down with it. Not a leader (run by hand) → ESRCH, ignored.
+      process.kill(-process.pid, 'SIGKILL');
+    } catch {
+      // not a group leader
+    }
+    process.exit(RUNNER_EXIT.engineFailed);
+  }, timeoutMs + SELF_DEADLINE_SLACK_MS);
+  timer.unref();
+}
+
 async function loadProbe(payload: ProbeRunnerPayload): Promise<Probe> {
   const definition: ProbeDefinition | undefined =
     payload.source.kind === 'file'
@@ -78,6 +100,10 @@ export async function runProbeRunner(raw: string | undefined): Promise<number> {
     // a failure here is `broken`, never a false verdict.
     console.error(`probe-runner: ${error instanceof Error ? error.message : String(error)}`);
     return RUNNER_EXIT.engineFailed;
+  }
+
+  if (Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0) {
+    armSelfDeadline(payload.timeoutMs);
   }
 
   // exec children inherit THIS process's group (detached: false), so the parent's

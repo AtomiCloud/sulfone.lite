@@ -766,3 +766,20 @@ describe('probe sandbox — two-phase setup (AC3)', () => {
     ).rejects.toThrow(ProbeSetupError);
   });
 });
+
+describe('probe sandbox — setup background children', () => {
+  test('a background child left by setup.pre cannot write into the frozen snapshot after the command exits', async () => {
+    const repo = await makeRepo();
+    const source = await prepareProbeSandboxSource({
+      repoPath: repo,
+      setup: { pre: ['(sleep 1; echo late > late.txt) &'] },
+    });
+    try {
+      await Bun.sleep(1_600);
+
+      expect(await Bun.file(join(source.snapshotPath, 'late.txt')).exists()).toBe(false);
+    } finally {
+      await source.dispose();
+    }
+  });
+});
