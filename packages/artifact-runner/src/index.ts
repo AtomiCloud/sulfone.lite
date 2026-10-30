@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   copyFile,
   lstat,
@@ -11,6 +11,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
 } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -30,15 +31,49 @@ function resolverGlobal(): Record<PropertyKey, unknown> {
   return globalThis as unknown as Record<PropertyKey, unknown>;
 }
 
+// Legacy resolvers register through one process-global symbol, so only one resolver
+// module may be mid-import at a time; concurrent first loads would read each other's.
+let resolverImportChain: Promise<unknown> = Promise.resolve();
+
+function serializeResolverImport<T>(task: () => Promise<T>): Promise<T> {
+  const run = resolverImportChain.then(task, task);
+  resolverImportChain = run.catch(() => undefined);
+  return run;
+}
+
 export async function loadArtifactExport<T>(path: string, exportName: string, cacheKey?: string): Promise<T> {
   const sourcePath = path.startsWith('file:') ? fileURLToPath(path) : path;
-  const importPath = cacheKey ? await materializeImportPath(sourcePath, cacheKey) : sourcePath;
-  const url = pathToFileURL(importPath);
+  const layout = cacheKey ? await importLayout(sourcePath, cacheKey) : undefined;
+  const url = pathToFileURL(layout?.importPath ?? sourcePath);
   const runtimeExportCacheKey = `${url.href}:${exportName}`;
-  if (runtimeExportCache.has(runtimeExportCacheKey)) {
-    return runtimeExportCache.get(runtimeExportCacheKey) as T;
+  const load = async (): Promise<T> => {
+    // A hit still touches the import dir so another process's sweep sees it as in use.
+    if (layout) {
+      await touch(layout.targetDir);
+    }
+    if (runtimeExportCache.has(runtimeExportCacheKey)) {
+      return runtimeExportCache.get(runtimeExportCacheKey) as T;
+    }
+    if (layout) {
+      await materializeImportPath(sourcePath, layout, cacheKey as string);
+    }
+    return await importExport<T>({ path, url, exportName, runtimeExportCacheKey });
+  };
+  return exportName === 'resolver' ? await serializeResolverImport(load) : await load();
+}
+
+async function importExport<T>(args: {
+  path: string;
+  url: URL;
+  exportName: string;
+  runtimeExportCacheKey: string;
+}): Promise<T> {
+  const { path, url, exportName } = args;
+  // Only resolver loads are serialized, so only they may touch the shared registration
+  // slot; a processor/plugin load must never wipe a resolver that is mid-import.
+  if (exportName === 'resolver') {
+    delete resolverGlobal()[resolverSymbol];
   }
-  delete resolverGlobal()[resolverSymbol];
   let loaded: Record<string, unknown>;
   try {
     loaded = (await import(url.href)) as Record<string, unknown>;
@@ -63,33 +98,50 @@ export async function loadArtifactExport<T>(path: string, exportName: string, ca
     isRegisteredLegacyResolver,
     label: `Artifact bundle ${path}`,
   });
-  runtimeExportCache.set(runtimeExportCacheKey, exported);
+  runtimeExportCache.set(args.runtimeExportCacheKey, exported);
   return exported as T;
 }
 
-async function materializeImportPath(path: string, cacheKey: string): Promise<string> {
-  const sourceDir = dirname(path);
+type ImportLayout = { importsRoot: string; targetDir: string; importPath: string };
+
+async function importLayout(path: string, cacheKey: string): Promise<ImportLayout> {
   const importsRoot = await engineRunPath('cyanprint-artifact-imports');
   const targetDir = join(importsRoot, cacheKey);
+  if (isSourceRuntime(path)) {
+    return { importsRoot, targetDir, importPath: join(targetDir, 'bundle.js') };
+  }
+  const parsed = parse(path);
+  return { importsRoot, targetDir, importPath: join(targetDir, `${parsed.name}-${cacheKey}${parsed.ext || '.js'}`) };
+}
+
+async function touch(dir: string): Promise<void> {
+  const now = new Date();
+  await utimes(dir, now, now).catch(() => undefined);
+}
+
+async function materializeImportPath(path: string, layout: ImportLayout, cacheKey: string): Promise<void> {
+  const sourceDir = dirname(path);
+  const { importsRoot, targetDir } = layout;
   await cleanStaleImportDirs(importsRoot, cacheKey);
   await mkdir(targetDir, { recursive: true });
+  await touch(targetDir);
   if (isSourceRuntime(path)) {
     // Bundle source runtimes into a self-contained file: compiled cyanprint binaries
     // cannot resolve bare imports (node_modules) from external files at runtime, but
     // Bun.build's resolver works everywhere and inlines the dependencies.
     // Always rebuild and atomically replace the bundle — the temp path is predictable,
     // so a pre-existing file there must never be trusted as executable code.
-    const bundlePath = join(targetDir, 'bundle.js');
     const result = await Bun.build({ entrypoints: [path], target: 'bun' });
     if (!result.success || !result.outputs[0]) {
       throw new Error(
         `Failed to bundle artifact source runtime ${path}: ${result.logs.map(log => String(log)).join('\n')}`,
       );
     }
-    const staging = `${bundlePath}.${process.pid}.tmp`;
+    // Unique per call: concurrent loads in one process share the pid.
+    const staging = `${layout.importPath}.${process.pid}.${randomUUID()}.tmp`;
     await Bun.write(staging, await result.outputs[0].text());
-    await rename(staging, bundlePath);
-    return bundlePath;
+    await rename(staging, layout.importPath);
+    return;
   }
   for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
     if (entry.name === basename(path)) {
@@ -101,11 +153,17 @@ async function materializeImportPath(path: string, cacheKey: string): Promise<st
   if (nearestNodeModules) {
     await symlink(nearestNodeModules, join(targetDir, 'node_modules')).catch(() => undefined);
   }
-  const parsed = parse(path);
-  const target = join(targetDir, `${parsed.name}-${cacheKey}${parsed.ext || '.js'}`);
-  await mkdir(dirname(target), { recursive: true });
-  await copyFile(path, target);
-  return target;
+  await mkdir(dirname(layout.importPath), { recursive: true });
+  // Stage + rename: the import path is shared, so a concurrent import must never see a
+  // half-copied file.
+  const staging = `${layout.importPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await copyFile(path, staging);
+    await rename(staging, layout.importPath);
+  } catch (error) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 // Materialized import dirs are content-hash keyed and never reused after the artifact changes,

@@ -7,7 +7,7 @@ import {
   type TrustScope,
   type TrustStore,
 } from '@cyanprint/core';
-import { RegistryClient } from '@cyanprint/registry-client';
+import { RegistryClient, registryClientOptionsFromEnv } from '@cyanprint/registry-client';
 import { artifactIntegrity } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString } from '../args';
 import { kv, printJson, printSection, success } from '../ui';
@@ -55,7 +55,7 @@ export async function trustCommand(argv: string[]): Promise<void> {
   let fingerprint = flagString(flags, 'pins-fingerprint');
   const registry = flagString(flags, 'registry');
   if (scope === 'version' && registry && name && version && (!integrity || fingerprint === undefined)) {
-    const resolved = await new RegistryClient(registry)
+    const resolved = await new RegistryClient(registry, undefined, undefined, registryClientOptionsFromEnv())
       .batchResolve({ refs: [{ kind, owner, name, version }] })
       .catch((error: unknown) => {
         throw new Error(

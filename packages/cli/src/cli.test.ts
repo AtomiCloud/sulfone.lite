@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readlink, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createProject, pinsFingerprint, sha256 } from '@cyanprint/core';
-import { artifactIntegrity, readTemplateTarFiles } from '@cyanprint/contracts';
+import { CACHE_ROOT_MARKER, createProject, pinsFingerprint, sha256, writeProcessorCache } from '@cyanprint/core';
+import { artifactIntegrity, CyanError, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
+import { cacheCommand } from './commands/cache';
 import { createCommand } from './commands/create';
 import { traceCommand } from './commands/trace';
 import { pushCommand } from './commands/push';
@@ -1881,6 +1882,364 @@ describe('registry template input', () => {
       process.chdir(original);
       server.stop(true);
       await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('cache command', () => {
+  async function captureCache(argv: string[]): Promise<void> {
+    const originalLog = console.log;
+    try {
+      console.log = () => undefined;
+      await cacheCommand(argv);
+    } finally {
+      console.log = originalLog;
+    }
+  }
+
+  test('clean refuses a directory the engine did not create and deletes nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-foreign-'));
+    try {
+      await mkdir(join(root, 'src'), { recursive: true });
+      await mkdir(join(root, 'template'), { recursive: true });
+      await writeFile(join(root, 'package.json'), '{}', 'utf8');
+      await writeFile(join(root, 'src', 'index.ts'), 'keep', 'utf8');
+
+      await expect(captureCache(['clean', '--cache-dir', root])).rejects.toBeInstanceOf(CyanError);
+      expect(await Bun.file(join(root, 'package.json')).exists()).toBe(true);
+      expect(await Bun.file(join(root, 'src', 'index.ts')).exists()).toBe(true);
+      expect((await readdir(root)).sort()).toEqual(['package.json', 'src', 'template']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean refuses the current directory even when it only holds cache-like names', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-cwd-'));
+    const originalCwd = process.cwd();
+    try {
+      await mkdir(join(root, 'template'), { recursive: true });
+      process.chdir(root);
+      await expect(captureCache(['clean', '--cache-dir', '.'])).rejects.toBeInstanceOf(CyanError);
+      expect((await readdir(root)).sort()).toEqual(['template']);
+    } finally {
+      process.chdir(originalCwd);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean removes engine cache entries (corrupt ones included) and leaves the directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-ok-'));
+    try {
+      await mkdir(join(root, 'template', `cyanprint-entry-${'a'.repeat(24)}`), { recursive: true });
+      await writeFile(join(root, 'template', `cyanprint-corrupt-${'b'.repeat(24)}`), 'bad', 'utf8');
+      await mkdir(join(root, 'processor-output', 'c'.repeat(64)), { recursive: true });
+
+      await captureCache(['clean', '--cache-dir', root]);
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean refuses a user folder that only holds kind-named directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-kinds-'));
+    try {
+      await mkdir(join(root, 'template', 'my-app'), { recursive: true });
+      await mkdir(join(root, 'plugin'), { recursive: true });
+      await writeFile(join(root, 'template', 'my-app', 'cyan.yaml'), 'keep', 'utf8');
+
+      await expect(captureCache(['clean', '--cache-dir', root])).rejects.toBeInstanceOf(CyanError);
+      expect((await readdir(root)).sort()).toEqual(['plugin', 'template']);
+      expect(await Bun.file(join(root, 'template', 'my-app', 'cyan.yaml')).text()).toBe('keep');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean empties a marked cache root, keeps the marker and leaves non-cache files alone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-marked-'));
+    try {
+      await writeFile(join(root, CACHE_ROOT_MARKER), 'x', 'utf8');
+      await mkdir(join(root, 'template', 'anything'), { recursive: true });
+      await writeFile(join(root, 'notes.txt'), 'keep', 'utf8');
+
+      await captureCache(['clean', '--cache-dir', root]);
+      expect((await readdir(root)).sort()).toEqual([CACHE_ROOT_MARKER, 'notes.txt']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the engine marks cache roots it uses but never claims a foreign folder', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-claim-'));
+    try {
+      const fresh = join(root, 'fresh');
+      await writeProcessorCache({ key: 'k'.repeat(64), files: [], cacheDir: fresh });
+      expect(await Bun.file(join(fresh, CACHE_ROOT_MARKER)).exists()).toBe(true);
+
+      const template = join(root, 'tpl');
+      await mkdir(template, { recursive: true });
+      await writeFile(
+        join(template, 'cyan.yaml'),
+        'cyanprint: 4\nkind: template\nowner: o\nname: n\nbundledEntry: cyan.ts\n',
+      );
+      await writeFile(join(template, 'cyan.ts'), 'export default async () => ({});\n');
+      const hydrated = join(root, 'hydrated');
+      await resolveTemplateInput({ template, cacheDir: hydrated });
+      expect(await Bun.file(join(hydrated, CACHE_ROOT_MARKER)).exists()).toBe(true);
+      await captureCache(['clean', '--cache-dir', hydrated]);
+      expect(await readdir(hydrated)).toEqual([CACHE_ROOT_MARKER]);
+
+      const foreign = join(root, 'artifacts');
+      await mkdir(join(foreign, 'template', 'mine'), { recursive: true });
+      await writeProcessorCache({ key: 'k'.repeat(64), files: [], cacheDir: foreign });
+      expect(await Bun.file(join(foreign, CACHE_ROOT_MARKER)).exists()).toBe(false);
+      await expect(captureCache(['clean', '--cache-dir', foreign])).rejects.toBeInstanceOf(CyanError);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('clean of a missing cache directory is a no-op', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-cache-clean-missing-'));
+    try {
+      await captureCache(['clean', '--cache-dir', join(root, 'nope')]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('registry template cache safety', () => {
+  const MANIFEST = 'cyanprint: 4\nkind: template\nowner: cyanprint\nname: safe\nbundledEntry: cyan.ts\n';
+  const BUNDLE = 'export default async () => ({});\n';
+
+  async function localTemplate(root: string): Promise<string> {
+    const dir = join(root, 'src-template');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'cyan.yaml'), MANIFEST, 'utf8');
+    await writeFile(join(dir, 'cyan.ts'), BUNDLE, 'utf8');
+    return dir;
+  }
+
+  type RegistryHooks = {
+    /** Called with the object key on every /objects/download. */
+    onDownload?: (key: string) => Promise<void> | void;
+    /** Mutates the resolved artifact per resolve (1-based), e.g. to reorder keys. */
+    shape?: (artifact: Record<string, unknown>, resolve: number) => Record<string, unknown>;
+  };
+
+  /** A registry serving one `cyanprint/safe` template whose manifest + bundle are separate objects. */
+  function safeRegistry(hooks: RegistryHooks = {}): { url: string; downloads: () => number; stop: () => void } {
+    const objectRef = (key: string, payload: string) => ({
+      bucket: 'cyanprint-local-r2',
+      key,
+      sha256: sha256(payload),
+      size: textEncoder.encode(payload).byteLength,
+    });
+    const payloads: Record<string, string> = { 'safe/manifest': MANIFEST, 'safe/bundle': BUNDLE };
+    let resolves = 0;
+    let downloads = 0;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === '/batch-resolve') {
+          resolves += 1;
+          const artifact = {
+            id: 'template_safe_4',
+            kind: 'template',
+            owner: 'cyanprint',
+            name: 'safe',
+            version: '4',
+            readme: '',
+            dependencies: [],
+            resolvedPins: [],
+            artifactObjects: {
+              manifest: objectRef('safe/manifest', MANIFEST),
+              bundle: objectRef('safe/bundle', BUNDLE),
+            },
+            disabled: false,
+            moderationState: 'active',
+            downloads: 0,
+            likes: 0,
+          };
+          return Response.json({ resolved: [hooks.shape ? hooks.shape(artifact, resolves) : artifact], missing: [] });
+        }
+        if (url.pathname === '/objects/download') {
+          downloads += 1;
+          const body = (await request.json()) as { ref: { key: string } };
+          await hooks.onDownload?.(body.ref.key);
+          return Response.json({ payload: payloads[body.ref.key] });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    return {
+      url: server.url.toString().replace(/\/$/, ''),
+      downloads: () => downloads,
+      stop: () => server.stop(true),
+    };
+  }
+
+  const resolveSafe = (registry: string, cacheDir: string) =>
+    resolveTemplateInput({ template: 'cyanprint/safe', registry, cacheDir, trustFixture: 'local-registry' });
+
+  test('an invalid existing local cache entry is replaced instead of failing with ENOTEMPTY', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-local-cache-invalid-'));
+    try {
+      const template = await localTemplate(root);
+      const cacheDir = join(root, 'cache');
+      const first = await resolveTemplateInput({ template, cacheDir });
+      // Corrupt the entry: still a non-empty dir with cyan.yaml, but its integrity no longer matches.
+      await writeFile(join(first.templateDir, 'extra.txt'), 'tampered', 'utf8');
+
+      const second = await resolveTemplateInput({ template, cacheDir });
+      expect(second.templateDir).toBe(first.templateDir);
+      expect(await Bun.file(join(second.templateDir, 'extra.txt')).exists()).toBe(false);
+      expect(await Bun.file(join(second.templateDir, 'cyan.ts')).text()).toBe(BUNDLE);
+      const siblings = await readdir(dirname(first.templateDir));
+      expect(siblings.filter(name => name.includes('.tmp-') || name.includes('.old-'))).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('local template fingerprint tolerates dangling and looping symlinks and ignores .git', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-local-cache-symlink-'));
+    try {
+      const template = await localTemplate(root);
+      const cacheDir = join(root, 'cache');
+      await symlink('does-not-exist', join(template, 'dangling'));
+      await symlink('.', join(template, 'loop'));
+      await mkdir(join(template, '.git'), { recursive: true });
+      await writeFile(join(template, '.git', 'HEAD'), 'ref: refs/heads/one\n', 'utf8');
+
+      const first = await resolveTemplateInput({ template, cacheDir });
+      expect(await readlink(join(first.templateDir, 'dangling'))).toBe('does-not-exist');
+      expect(await readlink(join(first.templateDir, 'loop'))).toBe('.');
+
+      // Git activity in the source template must not change the cache key.
+      await writeFile(join(template, '.git', 'HEAD'), 'ref: refs/heads/two\n', 'utf8');
+      const second = await resolveTemplateInput({ template, cacheDir });
+      expect(second.templateDir).toBe(first.templateDir);
+
+      // Retargeting a symlink is a content change.
+      await rm(join(template, 'dangling'));
+      await symlink('elsewhere', join(template, 'dangling'));
+      const third = await resolveTemplateInput({ template, cacheDir });
+      expect(third.templateDir).not.toBe(first.templateDir);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a registry cache hit rewrites no files in the cache entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-registry-hit-'));
+    const registry = safeRegistry();
+    try {
+      const first = await resolveSafe(registry.url, root);
+      const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      const tracked = ['.cyan_artifact_bundles.json', '.cyan_cache_integrity', '.cyan_cache_content_integrity'];
+      for (const name of tracked) {
+        await utimes(join(first.templateDir, name), old, old);
+      }
+      await resolveSafe(registry.url, root);
+      for (const name of tracked) {
+        expect((await stat(join(first.templateDir, name))).mtimeMs).toBe(old.getTime());
+      }
+      expect(registry.downloads()).toBe(2);
+    } finally {
+      registry.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a stale bundle index on an otherwise valid registry entry is repaired once, not re-downloaded forever', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-registry-stale-index-'));
+    const registry = safeRegistry();
+    try {
+      const first = await resolveSafe(registry.url, root);
+      const entry = first.templateDir;
+      const freshIndex = await Bun.file(join(entry, '.cyan_artifact_bundles.json')).text();
+      // A relocated cache / different path spelling leaves a self-consistent entry whose recorded
+      // bundle index no longer matches: rewrite the index and re-seal the content fingerprint.
+      await writeFile(join(entry, '.cyan_artifact_bundles.json'), '{"bundles":[{"stale":true}]}', 'utf8');
+      const chunks: string[] = [];
+      for (const name of (await readdir(entry)).sort()) {
+        if (name === '.cyan_cache_integrity' || name === '.cyan_cache_content_integrity') {
+          continue;
+        }
+        chunks.push(`${name}:${sha256(await Bun.file(join(entry, name)).bytes())}`);
+      }
+      await writeFile(join(entry, '.cyan_cache_content_integrity'), sha256(chunks.join('\n')), 'utf8');
+
+      const before = registry.downloads();
+      await resolveSafe(registry.url, root);
+      expect(registry.downloads()).toBe(before + 2);
+      expect(await Bun.file(join(entry, '.cyan_artifact_bundles.json')).text()).toBe(freshIndex);
+
+      await resolveSafe(registry.url, root);
+      expect(registry.downloads()).toBe(before + 2);
+    } finally {
+      registry.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('re-hydrating an invalid registry entry keeps the old entry in place until the swap', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-registry-swap-'));
+    let entry = '';
+    let rehydrating = false;
+    const seenWhileDownloading: boolean[] = [];
+    const registry = safeRegistry({
+      onDownload: async () => {
+        if (rehydrating) {
+          seenWhileDownloading.push(await Bun.file(join(entry, 'cyan.yaml')).exists());
+        }
+      },
+    });
+    try {
+      const first = await resolveSafe(registry.url, root);
+      entry = first.templateDir;
+      await rm(join(entry, '.cyan_cache_integrity'));
+      rehydrating = true;
+      const second = await resolveSafe(registry.url, root);
+      expect(second.templateDir).toBe(entry);
+      expect(seenWhileDownloading.length).toBeGreaterThan(0);
+      expect(seenWhileDownloading.every(Boolean)).toBe(true);
+      expect(await Bun.file(join(entry, 'cyan.ts')).text()).toBe(BUNDLE);
+      expect(await Bun.file(join(entry, '.cyan_cache_integrity')).exists()).toBe(true);
+    } finally {
+      registry.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('registry cache fingerprint does not depend on JSON key order', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cyanprint-registry-key-order-'));
+    const reverse = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(reverse)
+        : value && typeof value === 'object'
+          ? Object.fromEntries(
+              Object.entries(value as Record<string, unknown>)
+                .reverse()
+                .map(([key, inner]) => [key, reverse(inner)]),
+            )
+          : value;
+    const registry = safeRegistry({
+      shape: (artifact, resolve) => (resolve === 1 ? artifact : (reverse(artifact) as Record<string, unknown>)),
+    });
+    try {
+      await resolveSafe(registry.url, root);
+      await resolveSafe(registry.url, root);
+      // manifest + bundle per hydrate: a second hydrate would make this 4.
+      expect(registry.downloads()).toBe(2);
+    } finally {
+      registry.stop();
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { engineRunPath } from '@cyanprint/contracts/run-dir';
 import { sha256 } from '@cyanprint/core';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { invokePlugin, invokeProcessor, invokeResolver } from './index';
@@ -395,6 +396,192 @@ describe('pin integrity cache bundled artifact', () => {
           },
         ),
       ).rejects.toThrow('must return { path, content }');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('concurrent first loads of legacy hook resolvers each get their own resolver', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    try {
+      // `slow` registers first, then keeps loading; `fast` registers while `slow` is still
+      // importing. Without serialized loads, `slow` reads back `fast`'s resolver.
+      const legacy = (name: string, before: number, after: number): string =>
+        [
+          `await Bun.sleep(${before});`,
+          'Object.defineProperty(globalThis, Symbol.for("cyanprint.resolver"), {',
+          '  configurable: true,',
+          `  value: input => ({ path: input.files[0].path, content: ${JSON.stringify(name)} }),`,
+          '});',
+          `await Bun.sleep(${after});`,
+          '',
+        ].join('\n');
+      const slowFile = join(dir, 'slow.ts');
+      const fastFile = join(dir, 'fast.ts');
+      await writeFile(slowFile, legacy('slow', 0, 60), 'utf8');
+      await writeFile(fastFile, legacy('fast', 15, 0), 'utf8');
+      const run = async (name: string, runtimeFile: string): Promise<string> =>
+        (
+          await invokeResolver(
+            {
+              dependency: { kind: 'resolver', owner: 'cyanprint', name, version: '1' },
+              runtimeFile,
+              integrity: sha256(await Bun.file(runtimeFile).text()),
+            },
+            { files: [{ path: 'x.txt', content: '', origin: { template: 't', layer: 0 } }], config: {} },
+          )
+        ).content;
+      const [slow, fast] = await Promise.all([run('slow', slowFile), run('fast', fastFile)]);
+      expect(slow).toBe('slow');
+      expect(fast).toBe('fast');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a processor load during a legacy resolver import does not wipe the resolver registration', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    try {
+      const resolverFile = join(dir, 'legacy.js');
+      await writeFile(
+        resolverFile,
+        [
+          'Object.defineProperty(globalThis, Symbol.for("cyanprint.resolver"), {',
+          '  configurable: true,',
+          '  value: input => ({ path: input.files[0].path, content: "ok" }),',
+          '});',
+          'await Bun.sleep(300);',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      const processorFile = join(dir, 'proc.js');
+      await writeFile(
+        processorFile,
+        'export async function processor(input) { await Bun.write(input.outputDir + "/a.txt", "x"); }\n',
+        'utf8',
+      );
+      const resolved = invokeResolver(
+        {
+          dependency: { kind: 'resolver', owner: 'cyanprint', name: 'legacy', version: '1' },
+          runtimeFile: resolverFile,
+          integrity: sha256(await Bun.file(resolverFile).text()),
+        },
+        { files: [{ path: 'x.txt', content: '', origin: { template: 't', layer: 0 } }], config: {} },
+      );
+      await Bun.sleep(80);
+      await invokeProcessor(
+        {
+          dependency: { kind: 'processor', owner: 'cyanprint', name: 'proc', version: '1' },
+          runtimeFile: processorFile,
+          integrity: sha256(await Bun.file(processorFile).text()),
+        },
+        [{ path: 'a.txt', content: 'i' }],
+      );
+      expect((await resolved).content).toBe('ok');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('non-source resolver runtimes are installed by rename, never copied in place', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    try {
+      const runtimeFile = join(dir, 'resolver.js');
+      await writeFile(
+        runtimeFile,
+        'export function resolver(input) { return { path: input.files[0].path, content: "js" }; }\n',
+        'utf8',
+      );
+      const run = async (): Promise<string> =>
+        (
+          await invokeResolver(
+            {
+              dependency: { kind: 'resolver', owner: 'cyanprint', name: 'js-resolver', version: '1' },
+              runtimeFile,
+              integrity: sha256(await Bun.file(runtimeFile).text()),
+            },
+            { files: [{ path: 'x.txt', content: '', origin: { template: 't', layer: 0 } }], config: {} },
+          )
+        ).content;
+      expect(await Promise.all([run(), run(), run()])).toEqual(['js', 'js', 'js']);
+      const importsRoot = await engineRunPath('cyanprint-artifact-imports');
+      for (const entry of await readdir(importsRoot)) {
+        expect((await readdir(join(importsRoot, entry))).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('concurrent first loads of one source runtime do not collide on the bundle staging file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    const runtimeFile = join(dir, 'processor.ts');
+    try {
+      await writeFile(
+        runtimeFile,
+        'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "same"); }',
+        'utf8',
+      );
+      const integrity = sha256(await Bun.file(runtimeFile).text());
+      const outputs = await Promise.all(
+        Array.from({ length: 32 }, () =>
+          invokeProcessor(
+            {
+              dependency: { kind: 'processor', owner: 'cyanprint', name: 'racy', version: '1' },
+              runtimeFile,
+              integrity,
+            },
+            [{ path: 'README.md', content: 'input' }],
+          ),
+        ),
+      );
+      for (const output of outputs) {
+        expect(output[0]?.content).toBe('same');
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('reuse bumps the import dir mtime and a cache hit does not re-materialize', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    const runtimeFile = join(dir, 'processor.ts');
+    const marker = `hit-${crypto.randomUUID()}`;
+    try {
+      await writeFile(
+        runtimeFile,
+        'export async function processor(input) { await Bun.write(input.outputDir + "/README.md", "' + marker + '"); }',
+        'utf8',
+      );
+      const bundle = {
+        dependency: { kind: 'processor', owner: 'cyanprint', name: 'reuse', version: '1' } as const,
+        runtimeFile,
+        integrity: sha256(await Bun.file(runtimeFile).text()),
+      };
+      await invokeProcessor(bundle, [{ path: 'README.md', content: 'input' }]);
+      const importsRoot = await engineRunPath('cyanprint-artifact-imports');
+      const dirs = await readdir(importsRoot);
+      const targets: string[] = [];
+      for (const name of dirs) {
+        const bundlePath = join(importsRoot, name, 'bundle.js');
+        if ((await stat(bundlePath).catch(() => undefined))?.isFile()) {
+          const source = await Bun.file(bundlePath).text();
+          if (source.includes(marker)) {
+            targets.push(name);
+          }
+        }
+      }
+      expect(targets).toHaveLength(1);
+      const importDir = join(importsRoot, targets[0] as string);
+      const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      await utimes(importDir, old, old);
+      await rm(join(importDir, 'bundle.js'));
+
+      const output = await invokeProcessor(bundle, [{ path: 'README.md', content: 'input' }]);
+      expect(output[0]?.content).toBe(marker);
+      expect((await stat(importDir)).mtimeMs).toBeGreaterThan(Date.now() - 60_000);
+      expect(await Bun.file(join(importDir, 'bundle.js')).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

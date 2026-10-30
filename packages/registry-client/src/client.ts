@@ -9,15 +9,72 @@ import type {
 
 type UploadObjectSpec = Pick<ObjectRef, 'sha256' | 'size'> & { payload?: never };
 
+export interface RegistryClientOptions {
+  /** Per-attempt timeout in milliseconds for JSON calls (headers and body). */
+  timeoutMs?: number;
+  /** Per-attempt timeout in milliseconds for object upload/download bodies, which can be large. */
+  transferTimeoutMs?: number;
+  /** Extra attempts for idempotent calls (GET, batch-resolve, download) after a network error, 5xx or 429. */
+  retries?: number;
+  /** Base backoff in milliseconds; doubles on each retry. */
+  retryDelayMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TRANSFER_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 250;
+
+const TIMEOUT_ENV = 'CYANPRINT_REGISTRY_TIMEOUT_MS';
+const TRANSFER_TIMEOUT_ENV = 'CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS';
+
+function positiveMs(env: Record<string, string | undefined>, name: string): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer number of milliseconds, got "${raw}".`);
+  }
+  return value;
+}
+
+/**
+ * Client options from the environment. CYANPRINT_REGISTRY_TIMEOUT_MS sets the per-attempt timeout
+ * of JSON calls (default 30000); CYANPRINT_REGISTRY_TRANSFER_TIMEOUT_MS sets the one for object
+ * uploads/downloads (default 15 minutes).
+ */
+export function registryClientOptionsFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): RegistryClientOptions {
+  const timeoutMs = positiveMs(env, TIMEOUT_ENV);
+  const transferTimeoutMs = positiveMs(env, TRANSFER_TIMEOUT_ENV);
+  return {
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(transferTimeoutMs === undefined ? {} : { transferTimeoutMs }),
+  };
+}
+
+/** A fully-read response: the body is consumed inside the timeout/retry window. */
+type RegistryResponse = { status: number; ok: boolean; headers: Headers; bytes: Uint8Array; text(): string };
+
 export class RegistryClient {
   readonly baseUrl: string;
   readonly token?: string;
   readonly session?: string;
+  private readonly options: Required<RegistryClientOptions>;
 
-  constructor(baseUrl: string, token?: string, session?: string) {
+  constructor(baseUrl: string, token?: string, session?: string, options: RegistryClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.token = token;
     this.session = session;
+    this.options = {
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      transferTimeoutMs: options.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS,
+      retries: options.retries ?? DEFAULT_RETRIES,
+      retryDelayMs: options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+    };
   }
 
   async health(): Promise<{ ok: boolean }> {
@@ -74,7 +131,7 @@ export class RegistryClient {
   }
 
   async batchResolve(request: BatchResolveRequest): Promise<BatchResolveResponse> {
-    return this.post('/batch-resolve', request);
+    return this.post('/batch-resolve', request, {}, true);
   }
 
   async createLocalSession(
@@ -88,7 +145,7 @@ export class RegistryClient {
     if (!session) {
       throw new Error('createToken requires a local authenticated session.');
     }
-    return new RegistryClient(this.baseUrl, this.token, session).post('/tokens', { name });
+    return this.withSession(session).post('/tokens', { name });
   }
 
   async listTokens(
@@ -97,16 +154,16 @@ export class RegistryClient {
     if (!session) {
       throw new Error('listTokens requires a local authenticated session.');
     }
-    return new RegistryClient(this.baseUrl, this.token, session).get('/tokens');
+    return this.withSession(session).get('/tokens');
   }
 
   async revokeToken(id: string, session = this.session): Promise<{ ok: boolean }> {
     if (!session) {
       throw new Error('revokeToken requires a local authenticated session.');
     }
-    const response = await fetch(`${this.baseUrl}/tokens/${id}`, {
+    const response = await this.send(`${this.baseUrl}/tokens/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: new RegistryClient(this.baseUrl, this.token, session).headers(),
+      headers: this.withSession(session).headers(),
     });
     return this.parse<{ ok: boolean }>(response);
   }
@@ -139,9 +196,9 @@ export class RegistryClient {
       typeof payload === 'string'
         ? payload
         : (payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer);
-    const response = await fetch(url, { method: 'PUT', headers: this.headers(), body });
+    const response = await this.send(url, { method: 'PUT', headers: this.headers(), body }, false, 'transfer');
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw new Error(response.text());
     }
   }
 
@@ -162,37 +219,91 @@ export class RegistryClient {
   }
 
   async downloadObjectBytes(ref: ObjectRef): Promise<Uint8Array> {
-    const response = await fetch(`${this.baseUrl}/objects/download`, {
-      method: 'POST',
-      headers: { ...this.headers(), 'content-type': 'application/json', accept: 'application/octet-stream' },
-      body: JSON.stringify({ ref }),
-    });
+    const response = await this.send(
+      `${this.baseUrl}/objects/download`,
+      {
+        method: 'POST',
+        headers: { ...this.headers(), 'content-type': 'application/json', accept: 'application/octet-stream' },
+        body: JSON.stringify({ ref }),
+      },
+      true,
+      'transfer',
+    );
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw new Error(response.text());
     }
     const contentType = response.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {
-      const body = (await response.json()) as { payload?: string };
+      const body = JSON.parse(response.text()) as { payload?: string };
       if (typeof body.payload !== 'string') {
         throw new Error('Registry object download response did not include a payload.');
       }
       return new TextEncoder().encode(body.payload);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    return response.bytes;
   }
 
   private async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, { headers: this.headers() });
+    const response = await this.send(`${this.baseUrl}${path}`, { headers: this.headers() }, true);
     return this.parse<T>(response);
   }
 
-  private async post<T>(path: string, body: unknown, headers: Record<string, string> = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: { ...this.headers(), ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  private async post<T>(
+    path: string,
+    body: unknown,
+    headers: Record<string, string> = {},
+    idempotent = false,
+  ): Promise<T> {
+    const response = await this.send(
+      `${this.baseUrl}${path}`,
+      {
+        method: 'POST',
+        headers: { ...this.headers(), ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      idempotent,
+    );
     return this.parse<T>(response);
+  }
+
+  private withSession(session: string): RegistryClient {
+    return new RegistryClient(this.baseUrl, this.token, session, this.options);
+  }
+
+  /**
+   * One attempt covers headers AND the body read, so a body that stalls or resets mid-stream is
+   * retried like any other network error. `transfer` calls (object bodies) use the longer
+   * transfer timeout so large archives are not cut off by the short JSON-call timeout.
+   */
+  private async send(
+    url: string,
+    init: RequestInit,
+    retry = false,
+    kind: 'json' | 'transfer' = 'json',
+  ): Promise<RegistryResponse> {
+    const attempts = retry ? this.options.retries + 1 : 1;
+    const timeoutMs = kind === 'transfer' ? this.options.transferTimeoutMs : this.options.timeoutMs;
+    for (let attempt = 1; ; attempt += 1) {
+      const last = attempt >= attempts;
+      try {
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (last || !(response.status >= 500 || response.status === 429)) {
+          return {
+            status: response.status,
+            ok: response.ok,
+            headers: response.headers,
+            bytes,
+            text: () => new TextDecoder().decode(bytes),
+          };
+        }
+      } catch (error) {
+        if (last) {
+          throw describeRequestError(error, init.method ?? 'GET', url, timeoutMs, kind);
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, this.options.retryDelayMs * 2 ** (attempt - 1)));
+    }
   }
 
   private headers(): Record<string, string> {
@@ -202,10 +313,10 @@ export class RegistryClient {
     };
   }
 
-  private async parse<T>(response: Response): Promise<T> {
+  private parse<T>(response: RegistryResponse): T {
     // Read text first: an HTML/plain-text error from a proxy must surface as an HTTP error
     // with its status and body, not as a JSON parse SyntaxError.
-    const text = await response.text();
+    const text = response.text();
     let body: T | undefined;
     try {
       body = JSON.parse(text) as T;
@@ -220,6 +331,24 @@ export class RegistryClient {
     }
     return body;
   }
+}
+
+function describeRequestError(
+  error: unknown,
+  method: string,
+  url: string,
+  timeoutMs: number,
+  kind: 'json' | 'transfer',
+): Error {
+  // The query string is dropped: presigned upload URLs carry credentials in it. The original
+  // error is not kept as a cause either, since Bun's network errors carry the full URL.
+  const target = `${method} ${url.split('?')[0]}`;
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    const variable = kind === 'transfer' ? TRANSFER_TIMEOUT_ENV : TIMEOUT_ENV;
+    return new Error(`Registry request timed out after ${timeoutMs}ms: ${target}. Raise ${variable} to wait longer.`);
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`Registry request failed: ${target}: ${reason}`);
 }
 
 function artifactSearchParams(args: {
