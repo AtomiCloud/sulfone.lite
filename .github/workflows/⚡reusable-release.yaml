@@ -4,16 +4,16 @@ on:
 jobs:
   release:
     name: Semantic Release
-    runs-on:
-      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
-      - nscloud-cache-size-50gb
-      - nscloud-cache-tag-atomi-nix-store-cache
+    runs-on: ubuntu-24.04
     steps:
       - uses: AtomiCloud/actions.setup-nix@v3
         with:
+          namespacelabs: 'false'
           auth-bot-app-id: ${{ vars.AUTH_BOT_APP_ID }}
           auth-bot-secret-key: ${{ secrets.AUTH_BOT_SECRET_KEY }}
       - uses: AtomiCloud/actions.cache-npm@v1
+        with:
+          namespacelabs: 'false'
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
