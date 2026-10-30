@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ProbeFeatureIdentity, ProbeResolutionOrigin } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
 import { loadManifest } from '../manifest/load-manifest';
@@ -65,6 +65,26 @@ type CollectedOverride = {
   bundled: boolean;
 };
 
+/**
+ * Default workspace root for local dependency lookup: the template's own repo
+ * root (nearest ancestor holding `.git`), so resolution does not depend on where
+ * the CLI was launched. Only when no repo root exists does it fall back to the
+ * process cwd.
+ */
+async function defaultWorkspaceRoot(templateDir: string): Promise<string> {
+  let current = resolve(templateDir);
+  while (true) {
+    if (await exists(join(current, '.git'))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return process.cwd();
+    }
+    current = parent;
+  }
+}
+
 /** Declaration mode: resolve every declared feature for a consumer template. */
 export async function resolveProbesForTemplate(args: {
   templateDir: string;
@@ -73,7 +93,7 @@ export async function resolveProbesForTemplate(args: {
   workspaceRoot?: string;
   localFallback?: boolean;
 }): Promise<ResolvedFeatureProbes[]> {
-  const workspaceRoot = args.workspaceRoot ?? process.cwd();
+  const workspaceRoot = args.workspaceRoot ?? (await defaultWorkspaceRoot(args.templateDir));
   const { nodes, overrides } = await walkComposition(args.templateDir, workspaceRoot, args.localFallback);
   const consumer = [...nodes.values()].find(node => node.distance === 0);
   if (!consumer) {
