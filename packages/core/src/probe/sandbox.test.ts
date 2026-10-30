@@ -3,6 +3,7 @@ import * as fsPromises from 'node:fs/promises';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CyanError } from '@cyanprint/contracts';
 import { ProbeSetupError, prepareProbeSandboxSource } from './sandbox';
 
 /** Run a git command in `cwd`, returning its exit code and trimmed stdout. */
@@ -384,7 +385,7 @@ describe('probe sandbox — snapshot/restore (AC1)', () => {
     expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
 
     await expect(prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } })).rejects.toThrow(
-      /rev-parse --verify HEAD\^\{tree\} failed/,
+      /git repository with no commits/,
     );
   });
 
@@ -781,5 +782,35 @@ describe('probe sandbox — setup background children', () => {
     } finally {
       await source.dispose();
     }
+  });
+});
+
+describe('probe sandbox — snapshot determinism and unborn git repos', () => {
+  test('git strategy: the same repo content freezes to the same snapshot commit hash on every run', async () => {
+    const repo = await makeRepo();
+    const first = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } });
+    const firstHead = await gitRun(first.snapshotPath, ['rev-parse', 'HEAD']);
+    await first.dispose();
+    await Bun.sleep(1_100);
+    const second = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } });
+    try {
+      const secondHead = await gitRun(second.snapshotPath, ['rev-parse', 'HEAD']);
+
+      expect(firstHead.code).toBe(0);
+      expect(secondHead.stdout).toBe(firstHead.stdout);
+    } finally {
+      await second.dispose();
+    }
+  });
+
+  test('a repo with `git init` but no commit yet fails with a clear, actionable CyanError (auto strategy)', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+
+    const error = await prepareProbeSandboxSource({ repoPath: repo }).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(CyanError);
+    expect((error as CyanError).problem.code).toBe('probe_repo_has_no_commits');
+    expect((error as CyanError).message).toContain('Commit the generated project');
   });
 });
