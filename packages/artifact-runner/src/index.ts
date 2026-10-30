@@ -69,7 +69,11 @@ async function importExport<T>(args: {
   runtimeExportCacheKey: string;
 }): Promise<T> {
   const { path, url, exportName } = args;
-  delete resolverGlobal()[resolverSymbol];
+  // Only resolver loads are serialized, so only they may touch the shared registration
+  // slot; a processor/plugin load must never wipe a resolver that is mid-import.
+  if (exportName === 'resolver') {
+    delete resolverGlobal()[resolverSymbol];
+  }
   let loaded: Record<string, unknown>;
   try {
     loaded = (await import(url.href)) as Record<string, unknown>;
@@ -150,7 +154,16 @@ async function materializeImportPath(path: string, layout: ImportLayout, cacheKe
     await symlink(nearestNodeModules, join(targetDir, 'node_modules')).catch(() => undefined);
   }
   await mkdir(dirname(layout.importPath), { recursive: true });
-  await copyFile(path, layout.importPath);
+  // Stage + rename: the import path is shared, so a concurrent import must never see a
+  // half-copied file.
+  const staging = `${layout.importPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await copyFile(path, staging);
+    await rename(staging, layout.importPath);
+  } catch (error) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 // Materialized import dirs are content-hash keyed and never reused after the artifact changes,

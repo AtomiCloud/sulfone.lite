@@ -439,6 +439,81 @@ describe('pin integrity cache bundled artifact', () => {
     }
   });
 
+  test('a processor load during a legacy resolver import does not wipe the resolver registration', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    try {
+      const resolverFile = join(dir, 'legacy.js');
+      await writeFile(
+        resolverFile,
+        [
+          'Object.defineProperty(globalThis, Symbol.for("cyanprint.resolver"), {',
+          '  configurable: true,',
+          '  value: input => ({ path: input.files[0].path, content: "ok" }),',
+          '});',
+          'await Bun.sleep(300);',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      const processorFile = join(dir, 'proc.js');
+      await writeFile(
+        processorFile,
+        'export async function processor(input) { await Bun.write(input.outputDir + "/a.txt", "x"); }\n',
+        'utf8',
+      );
+      const resolved = invokeResolver(
+        {
+          dependency: { kind: 'resolver', owner: 'cyanprint', name: 'legacy', version: '1' },
+          runtimeFile: resolverFile,
+          integrity: sha256(await Bun.file(resolverFile).text()),
+        },
+        { files: [{ path: 'x.txt', content: '', origin: { template: 't', layer: 0 } }], config: {} },
+      );
+      await Bun.sleep(80);
+      await invokeProcessor(
+        {
+          dependency: { kind: 'processor', owner: 'cyanprint', name: 'proc', version: '1' },
+          runtimeFile: processorFile,
+          integrity: sha256(await Bun.file(processorFile).text()),
+        },
+        [{ path: 'a.txt', content: 'i' }],
+      );
+      expect((await resolved).content).toBe('ok');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('non-source resolver runtimes are installed by rename, never copied in place', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
+    try {
+      const runtimeFile = join(dir, 'resolver.js');
+      await writeFile(
+        runtimeFile,
+        'export function resolver(input) { return { path: input.files[0].path, content: "js" }; }\n',
+        'utf8',
+      );
+      const run = async (): Promise<string> =>
+        (
+          await invokeResolver(
+            {
+              dependency: { kind: 'resolver', owner: 'cyanprint', name: 'js-resolver', version: '1' },
+              runtimeFile,
+              integrity: sha256(await Bun.file(runtimeFile).text()),
+            },
+            { files: [{ path: 'x.txt', content: '', origin: { template: 't', layer: 0 } }], config: {} },
+          )
+        ).content;
+      expect(await Promise.all([run(), run(), run()])).toEqual(['js', 'js', 'js']);
+      const importsRoot = await engineRunPath('cyanprint-artifact-imports');
+      for (const entry of await readdir(importsRoot)) {
+        expect((await readdir(join(importsRoot, entry))).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('concurrent first loads of one source runtime do not collide on the bundle staging file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-artifact-cache-'));
     const runtimeFile = join(dir, 'processor.ts');
