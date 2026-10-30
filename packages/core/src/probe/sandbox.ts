@@ -365,12 +365,16 @@ async function gitTreeForRepositoryRoot(repoPath: string): Promise<string | unde
     return await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD^{tree}']);
   } catch (error) {
     // A HEAD that resolves but whose tree cannot be read is a real git failure
-    // (missing/corrupt object): surface it instead of calling it "no commits".
+    // (missing/corrupt object): surface it instead of calling it "no commits". So is any
+    // failure that is not git's unknown-revision/unborn-HEAD answer (unreadable refs, ...).
     if (
-      await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD']).then(
+      !/unknown revision|ambiguous argument|bad revision|needed a single revision/i.test(
+        error instanceof Error ? error.message : String(error),
+      ) ||
+      (await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD']).then(
         () => true,
         () => false,
-      )
+      ))
     ) {
       throw error;
     }

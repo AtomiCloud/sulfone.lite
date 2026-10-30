@@ -448,15 +448,21 @@ describe('workspace root default', () => {
       'utf8',
     );
     await writeFile(join(realRepo, 'examples/templates/dep/cyan.yaml'), manifest('ws-link-dep'), 'utf8');
+    await mkdir(join(realRepo, 'examples/templates/dep/probes'), { recursive: true });
+    await writeFile(
+      join(realRepo, 'examples/templates/dep/probes/gate.ts'),
+      probeSource('linked-dep-probe', 'Probe shipped by the dependency.'),
+      'utf8',
+    );
     await symlink(join(realRepo, 'examples/templates/consumer'), join(linkRepo, 'consumer-link'));
 
-    const outcome = await resolveProbesForTemplate({
+    const [resolved] = await resolveProbesForTemplate({
       templateDir: join(linkRepo, 'consumer-link'),
-      features: [{ template: 'cyanprint/ws-link-consumer', name: 'gate' }],
-    }).catch(error => error as Error);
+      features: [{ template: 'cyanprint/ws-link-dep', name: 'gate' }],
+    });
 
-    // The dependency lives beside the REAL template; whatever else the resolve
-    // reports, it must not fail to find that child.
-    expect(outcome instanceof Error ? outcome.message : '').not.toMatch(/Unable to resolve child template/);
+    // The dependency lives beside the REAL template; it must actually resolve and
+    // supply its probe, not merely fail with some other error.
+    expect(resolved?.probes[0]?.probe.name).toBe('linked-dep-probe');
   });
 });

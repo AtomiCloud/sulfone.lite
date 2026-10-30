@@ -27,7 +27,7 @@ const RUNNER_PATH = fileURLToPath(new URL('./probe-runner.ts', import.meta.url))
  * `PROBE_RUNNER_SUBCOMMAND`; a source/`bun run` process spawns the runner file
  * directly (unchanged, so tests and `bun run` keep their existing path).
  */
-const IS_COMPILED_BINARY = import.meta.url.includes('$bunfs') || import.meta.url.includes('~BUN');
+export const IS_COMPILED_BINARY = import.meta.url.includes('$bunfs') || import.meta.url.includes('~BUN');
 
 /**
  * The argv that runs ONE probe in an isolated child. In a compiled binary
