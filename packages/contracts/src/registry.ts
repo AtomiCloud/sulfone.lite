@@ -8,6 +8,10 @@ export const ObjectRefSchema = z.object({
   size: z.number().int().nonnegative(),
 });
 
+/** Owners are registry handles; names are a single path-safe segment (no '/', '@', whitespace or traversal). */
+export const ArtifactOwnerSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,38}$/, 'Invalid artifact owner.');
+export const ArtifactNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'Invalid artifact name.');
+
 export const ArtifactObjectsSchema = z.object({
   manifest: ObjectRefSchema,
   readme: ObjectRefSchema.optional(),
@@ -50,7 +54,9 @@ export const ArtifactVersionSchema = z.object({
   likes: z.number().int().nonnegative().default(0),
 });
 
-export const ArtifactPublishSchema = ArtifactVersionSchema.omit({ id: true, version: true }).strict();
+export const ArtifactPublishSchema = ArtifactVersionSchema.omit({ id: true, version: true })
+  .extend({ owner: ArtifactOwnerSchema, name: ArtifactNameSchema })
+  .strict();
 
 export type ObjectRef = z.infer<typeof ObjectRefSchema>;
 export type ArtifactObjects = z.infer<typeof ArtifactObjectsSchema>;

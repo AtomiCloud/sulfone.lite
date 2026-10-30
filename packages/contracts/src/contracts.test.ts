@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readTemplateTarFiles, validateTemplateTarPayload } from './archive';
 import { parseCyanManifest } from './manifest';
-import { artifactVersionId } from './registry';
+import { ArtifactPublishSchema, artifactVersionId } from './registry';
 import type { PromptAdapter } from './runtime';
 import { makePromptContext } from './script';
 
@@ -362,3 +362,22 @@ function makeTar(entries: TarEntry[]): Uint8Array {
 function writeTarString(header: Uint8Array, offset: number, length: number, value: string): void {
   header.set(new TextEncoder().encode(value).slice(0, length), offset);
 }
+
+describe('registry publish identity', () => {
+  const publish = (owner: string, name: string) =>
+    ArtifactPublishSchema.safeParse({ kind: 'template', owner, name, readme: '' }).success;
+
+  test('accepts handle-style owners and path-safe names', () => {
+    expect(publish('cyanprint', 'hello')).toBe(true);
+    expect(publish('publisher-a', 'my_template.v2-x')).toBe(true);
+  });
+
+  test('rejects owners and names that could escape a key segment or confuse refs', () => {
+    for (const name of ['', '../escape', 'a/b', 'a@1', 'has space', '.hidden', 'x'.repeat(65)]) {
+      expect(publish('cyanprint', name)).toBe(false);
+    }
+    for (const owner of ['', 'Upper', 'a/b', 'a b', '-lead', 'x'.repeat(40)]) {
+      expect(publish(owner, 'hello')).toBe(false);
+    }
+  });
+});
