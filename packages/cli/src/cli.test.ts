@@ -505,7 +505,7 @@ describe('commander cli shell', () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-registry-'));
     const logs: string[] = [];
     const originalLog = console.log;
-    const pin = { kind: 'processor', owner: 'cyanprint', name: 'dep', version: '2', integrity: 'sha256:dep' };
+    const pin = { kind: 'processor' as const, owner: 'cyanprint', name: 'dep', version: '2', integrity: 'sha256:dep' };
     const artifact = {
       id: 'template__cyanprint__hello__3',
       kind: 'template',
@@ -731,7 +731,8 @@ describe('inquirer prompt adapter', () => {
     } as unknown as InquirerPrompts;
     const answers: Record<string, unknown> = {};
     const adapter = inquirerPromptAdapter(answers, prompts);
-    expect(await adapter.ask({ kind: 'text', name: 'constructor', message: 'Name?' })).toBe('typed');
+    const reply: unknown = await adapter.ask({ kind: 'text', name: 'constructor', message: 'Name?' });
+    expect(reply).toBe('typed');
     expect(asked).toEqual(['input']);
     expect(Object.hasOwn(answers, 'constructor')).toBe(true);
   });
