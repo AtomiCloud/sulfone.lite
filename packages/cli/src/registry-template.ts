@@ -6,6 +6,7 @@ import {
   evaluateArtifactTrust,
   loadManifest,
   loadTrustStore,
+  pinsFingerprint,
   resolveCyanCacheDir,
   resolveTrustStorePath,
   safeJoin,
@@ -93,7 +94,12 @@ export async function resolveTemplateInput(args: {
   if (!args.trusted && args.trustFixture !== 'local-registry') {
     const decision = evaluateArtifactTrust(await loadTrustStore(resolveTrustStorePath(args.trustDir)), artifact);
     if (!decision.trusted) {
-      throw new Error(`${decision.reason} Run cyanprint trust approve before local execution.`);
+      throw new Error(
+        `${decision.reason} Run cyanprint trust approve before local execution.` +
+          ` To trust this exact version: cyanprint trust approve version ${artifact.owner}/${artifact.name}` +
+          ` --version ${artifact.version} --integrity ${artifactIntegrity(artifact)}` +
+          ` --pins-fingerprint '${pinsFingerprint(artifact.resolvedPins)}'`,
+      );
     }
   }
   const cacheDir = resolveCyanCacheDir(args.cacheDir);

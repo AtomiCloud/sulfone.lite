@@ -14,7 +14,9 @@ import {
   createTempSession,
   currentHistoryEntry,
   deriveFeaturesForAnswers,
+  approveTrust,
   evaluateTrust,
+  loadTrustStore,
   executeCyanScript,
   exists,
   gitThreeWayMerge,
@@ -4228,6 +4230,31 @@ describe('probe surface', () => {
       expect(payloadPaths.filter(path => path === 'probes.yaml' || path.startsWith('probes/'))).toEqual([]);
     } finally {
       await fixture.cleanup();
+    }
+  });
+});
+
+describe('trust store', () => {
+  test('malformed trust.json raises a clear CyanError', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-trust-bad-'));
+    try {
+      await writeFile(join(dir, 'trust.json'), '{ not json', 'utf8');
+      await expect(loadTrustStore(join(dir, 'trust.json'))).rejects.toMatchObject({ name: 'CyanError' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('version approvals with different pins fingerprints are both kept', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-trust-pins-'));
+    const path = join(dir, 'trust.json');
+    try {
+      const base = { scope: 'version' as const, owner: 'o', name: 'n', version: '1', integrity: 'i' };
+      await approveTrust({ ...base, pinsFingerprint: 'a' }, path);
+      const store = await approveTrust({ ...base, pinsFingerprint: 'b' }, path);
+      expect(store.versions.map(v => v.pinsFingerprint)).toEqual(['a', 'b']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

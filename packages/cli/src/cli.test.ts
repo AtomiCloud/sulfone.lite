@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createProject, sha256 } from '@cyanprint/core';
+import { createProject, pinsFingerprint, sha256 } from '@cyanprint/core';
 import { artifactIntegrity, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
@@ -494,6 +494,78 @@ describe('commander cli shell', () => {
         status: 'done',
         store: { versions: [{ owner: 'cyanprint', name: 'hello', version: '3', integrity: 'sha256:abc' }] },
       });
+    } finally {
+      console.log = originalLog;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve version --registry records the real integrity and pins fingerprint', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-registry-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    const pin = { kind: 'processor', owner: 'cyanprint', name: 'dep', version: '2', integrity: 'sha256:dep' };
+    const artifact = {
+      id: 'template__cyanprint__hello__3',
+      kind: 'template',
+      owner: 'cyanprint',
+      name: 'hello',
+      version: '3',
+      object: { sha256: 'abc', size: 1, key: 'k' },
+      resolvedPins: [pin],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--registry',
+          server.url.toString().replace(/\/$/, ''),
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+      const report = JSON.parse(logs[0] ?? '{}');
+      expect(report.decision).toMatchObject({ trusted: true, scope: 'version' });
+      expect(report.store.versions[0]).toMatchObject({
+        owner: 'cyanprint',
+        name: 'hello',
+        version: '3',
+        integrity: artifactIntegrity(artifact as never),
+        pinsFingerprint: pinsFingerprint([pin]),
+      });
+    } finally {
+      console.log = originalLog;
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve reports resolved owner and name from flags', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-flags-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+      await createProgram().parseAsync(
+        ['trust', 'approve', 'template', '--owner', 'acme', '--name', 'widget', '--trust-dir', tempRoot],
+        { from: 'user' },
+      );
+      const text = logs.join('\n');
+      expect(text).toContain('acme');
+      expect(text).toContain('widget');
     } finally {
       console.log = originalLog;
       await rm(tempRoot, { recursive: true, force: true });
