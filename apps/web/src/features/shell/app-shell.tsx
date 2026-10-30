@@ -29,7 +29,7 @@ import { artifactDetailHref } from '../registry/artifact-url';
 import { createPendingNavigation } from './pending-navigation';
 import { useUrlState } from './url-state';
 import { useSearchDraft } from './use-search-draft';
-import { formatUrl, parseUrl } from './url-update';
+import { buildSearchNavigation } from './url-update';
 
 const navItems = [
   { href: '/search', label: 'Search', icon: Search },
@@ -157,28 +157,15 @@ export function AppShell({
   }
 
   function updateSearchState(next: { q?: string; kind?: string }, navigationOptions?: { defer?: boolean }) {
-    // Build on a pending navigation's target so changing the kind does not drop a debounced query (and vice versa).
-    const pendingTarget = navigation.target();
-    const search = new URLSearchParams(
-      (pendingTarget === undefined ? params : parseUrl(pendingTarget).params).toString(),
-    );
-    if (!search.has('kind') && kind !== 'all') {
-      search.set('kind', kind);
+    const url = buildSearchNavigation({
+      current: { pathname, params },
+      pendingTarget: navigation.target(),
+      kind,
+      next,
+    });
+    if (url !== undefined) {
+      navigation.schedule(url, navigationOptions);
     }
-    for (const [key, value] of Object.entries(next)) {
-      if (!value || (key === 'kind' && value === 'all')) {
-        search.delete(key);
-      } else {
-        search.set(key, value);
-      }
-    }
-    search.delete('cursor');
-    const url = formatUrl({ pathname: '/search', params: search });
-    // Nothing changes (e.g. re-picking the selected kind): do not start a navigation that would never report back.
-    if (url === (pendingTarget ?? formatUrl({ pathname, params }))) {
-      return;
-    }
-    navigation.schedule(url, navigationOptions);
   }
 
   function setThemePreference(nextTheme: 'dark' | 'light') {

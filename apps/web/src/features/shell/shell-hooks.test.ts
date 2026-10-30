@@ -231,6 +231,24 @@ describe('useUrlState with a pending navigation', () => {
   });
 });
 
+describe('safety timeout while typing continues', () => {
+  test('does not cancel a queued debounce, so the newest query still navigates', () => {
+    const router = fakeRouter('/search');
+    renderUrlState(router.navigation);
+
+    router.navigation.schedule('/search?q=a', { defer: true });
+    router.clock.fire(DEBOUNCE);
+    // The user keeps typing with gaps shorter than the debounce, so a debounce is always queued...
+    router.navigation.schedule('/search?q=ab', { defer: true });
+    // ...when the safety timeout of the first issue elapses.
+    router.clock.fire(SAFETY);
+
+    expect(router.navigation.target()).toBe('/search?q=ab');
+    router.clock.fire(DEBOUNCE);
+    expect(router.replaced).toEqual(['/search?q=a', '/search?q=ab']);
+  });
+});
+
 function renderSearchDraft(navigation: PendingNavigation, input: HTMLInputElement) {
   const current: { value?: ReturnType<typeof useSearchDraft> } = {};
   const inputRef = { current: input } as RefObject<HTMLInputElement | null>;

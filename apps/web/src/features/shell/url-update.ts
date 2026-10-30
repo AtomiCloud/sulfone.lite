@@ -40,3 +40,33 @@ export function buildUrlUpdate(base: UrlState, next: Record<string, string | und
   const state = { pathname: base.pathname, params };
   return { ...state, url: formatUrl(state) };
 }
+
+/**
+ * URL the search box / kind dropdown should navigate to, or undefined when that would change nothing (re-picking the
+ * selected kind, retyping the same query): a no-op navigation would never report back to the router state.
+ * Builds on the target of a pending navigation so a kind change keeps a debounced query (and vice versa).
+ */
+export function buildSearchNavigation(input: {
+  current: UrlState;
+  pendingTarget: string | undefined;
+  /** The kind currently shown, used when the URL carries none. */
+  kind: string;
+  next: { q?: string; kind?: string };
+}): string | undefined {
+  const { current, pendingTarget, kind, next } = input;
+  const base = pendingTarget === undefined ? current : parseUrl(pendingTarget);
+  const search = new URLSearchParams(base.params.toString());
+  if (!search.has('kind') && kind !== 'all') {
+    search.set('kind', kind);
+  }
+  for (const [key, value] of Object.entries(next)) {
+    if (!value || (key === 'kind' && value === 'all')) {
+      search.delete(key);
+    } else {
+      search.set(key, value);
+    }
+  }
+  search.delete('cursor');
+  const url = formatUrl({ pathname: '/search', params: search });
+  return url === (pendingTarget ?? formatUrl(current)) ? undefined : url;
+}

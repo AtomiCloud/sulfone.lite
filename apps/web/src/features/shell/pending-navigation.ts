@@ -77,7 +77,10 @@ export function createPendingNavigation(
     }
     safety = timers.setTimeout(() => {
       safety = undefined;
-      drop();
+      // Keep typing alive: a queued debounce is the newest query and must still navigate.
+      if (debounce === undefined) {
+        drop();
+      }
     }, SAFETY_TIMEOUT_MS);
     replace(url);
   };
