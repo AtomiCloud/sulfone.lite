@@ -93,6 +93,15 @@ export const describedText: DescribedPrompt<string, DescribedTextConfig> = creat
   },
 );
 
+// Blank/whitespace input would otherwise coerce to 0, and Infinity is not a usable answer.
+export function parseNumberInput(raw: string): number | undefined {
+  if (raw.trim() === '') {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = createPrompt<
   number,
   DescribedNumberConfig
@@ -108,8 +117,8 @@ export const describedNumber: DescribedPrompt<number, DescribedNumberConfig> = c
     }
     if (isEnterKey(key)) {
       const raw = value || (config.default !== undefined ? String(config.default) : '');
-      const parsed = Number(raw);
-      if (raw === '' || Number.isNaN(parsed)) {
+      const parsed = parseNumberInput(raw);
+      if (parsed === undefined) {
         rl.write(value);
         setError('Enter a number.');
         return;

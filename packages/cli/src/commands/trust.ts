@@ -7,6 +7,8 @@ import {
   type TrustScope,
   type TrustStore,
 } from '@cyanprint/core';
+import { RegistryClient } from '@cyanprint/registry-client';
+import { artifactIntegrity } from '@cyanprint/contracts';
 import { parseFlags, flagBool, flagString } from '../args';
 import { kv, printJson, printSection, success } from '../ui';
 
@@ -49,6 +51,29 @@ export async function trustCommand(argv: string[]): Promise<void> {
   if (scope === 'version' && !version) {
     throw new Error('trust approve version requires a version (pass owner/name@version or --version)');
   }
+  let integrity = flagString(flags, 'integrity', parsed.integrity);
+  let fingerprint = flagString(flags, 'pins-fingerprint');
+  const registry = flagString(flags, 'registry');
+  if (scope === 'version' && registry && name && version && (!integrity || fingerprint === undefined)) {
+    const resolved = await new RegistryClient(registry)
+      .batchResolve({ refs: [{ kind, owner, name, version }] })
+      .catch((error: unknown) => {
+        throw new Error(
+          `Could not reach registry ${registry} to resolve ${owner}/${name}@${version}: ${error instanceof Error ? error.message : String(error)}. To approve offline, pass both --integrity and --pins-fingerprint.`,
+        );
+      });
+    const artifact = resolved.resolved[0];
+    if (!artifact) {
+      throw new Error(`Registry artifact not found: ${owner}/${name}@${version}`);
+    }
+    integrity ??= artifactIntegrity(artifact);
+    fingerprint ??= pinsFingerprint(artifact.resolvedPins);
+  }
+  if (scope === 'version' && fingerprint === undefined) {
+    console.error(
+      'warning: no --pins-fingerprint and no --registry, so the dependency pins are recorded as empty; this will not match a template with dependencies. Pass --registry or --pins-fingerprint.',
+    );
+  }
   const store = await approveTrust(
     {
       scope,
@@ -56,17 +81,17 @@ export async function trustCommand(argv: string[]): Promise<void> {
       owner,
       name,
       version,
-      integrity: flagString(flags, 'integrity', parsed.integrity),
-      pinsFingerprint: flagString(flags, 'pins-fingerprint', pinsFingerprint([])),
+      integrity,
+      pinsFingerprint: fingerprint ?? pinsFingerprint([]),
     },
     trustPath,
   );
   const decision = evaluateTrust({
     requestedScope: scope,
-    org: parsed.owner,
-    template: parsed.name,
-    version: flagString(flags, 'version', parsed.version),
-    integrity: flagString(flags, 'integrity', parsed.integrity),
+    org: owner,
+    template: name,
+    version,
+    integrity,
     trusted: true,
   });
   const report = { status: 'done', action, trustPath, decision, store };
@@ -74,7 +99,7 @@ export async function trustCommand(argv: string[]): Promise<void> {
     printJson(report);
   } else {
     console.log(success(`approved ${scope} trust`));
-    printSection('Trust', [kv('path', trustPath), kv('owner', parsed.owner), kv('name', parsed.name)]);
+    printSection('Trust', [kv('path', trustPath), kv('owner', owner), kv('name', name)]);
   }
 }
 

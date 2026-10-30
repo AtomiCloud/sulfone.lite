@@ -232,6 +232,12 @@ describe('deterministic state hermetic gateway', () => {
     expect(state['toString']).toBe('computed');
   });
 
+  test('get ignores inherited Object.prototype keys', () => {
+    const ctx = makePromptContext(adapter, {}, {});
+    expect(ctx.deterministic.get('constructor')).toBeUndefined();
+    expect(ctx.deterministic.get('toString')).toBeUndefined();
+  });
+
   test('a producer failure does not pin anything, so the next load retries', async () => {
     const state: Record<string, unknown> = {};
     const ctx = makePromptContext(adapter, {}, state);

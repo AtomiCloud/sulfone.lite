@@ -44,6 +44,7 @@ export function createProgram(runtime: ProgramRuntime = {}): Command {
     .name('cyanprint')
     .description('CyanPrint v4 local-first template runtime')
     .version(`cyanprint ${VERSION}`, '-v, --version', 'print the CyanPrint version')
+    .enablePositionalOptions()
     .exitOverride()
     .configureOutput({
       outputError: message => {
@@ -409,6 +410,7 @@ const TRUST_OPTIONS: CliOptionSpec[] = [
   { flag: 'version', value: '<version>', description: 'registry-assigned integer version' },
   { flag: 'integrity', value: '<sha>', description: 'artifact integrity' },
   { flag: 'pins-fingerprint', value: '<hash>', description: 'dependency pins fingerprint' },
+  { flag: 'registry', value: '<url>', description: 'resolve version integrity and pins from this registry' },
   { flag: 'json', description: 'print machine-readable JSON' },
 ];
 

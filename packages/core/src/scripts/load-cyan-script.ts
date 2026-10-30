@@ -9,7 +9,7 @@ import { comparePaths, safeJoin } from '../util';
 export function answersPromptAdapter(answers: Answers, interactive = false): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
-      if (request.name in answers) {
+      if (Object.hasOwn(answers, request.name)) {
         return answers[request.name] as T;
       }
       if (!interactive && request.default !== undefined) {
@@ -107,7 +107,7 @@ export async function loadCyanScript(scriptPath: string): Promise<CyanScript> {
 function recordingPromptAdapter(answers: Answers, adapter: PromptAdapter): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
-      if (request.name in answers) {
+      if (Object.hasOwn(answers, request.name)) {
         return answers[request.name] as T;
       }
       const value = await adapter.ask<T>(request);

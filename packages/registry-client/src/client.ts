@@ -7,6 +7,8 @@ import type {
   ObjectRef,
 } from '@cyanprint/contracts';
 
+type UploadObjectSpec = Pick<ObjectRef, 'sha256' | 'size'> & { payload?: never };
+
 export class RegistryClient {
   readonly baseUrl: string;
   readonly token?: string;
@@ -118,10 +120,10 @@ export class RegistryClient {
     owner: string;
     name: string;
     objects: {
-      manifest: Pick<ObjectRef, 'sha256' | 'size'>;
-      readme?: Pick<ObjectRef, 'sha256' | 'size'>;
-      bundle: Pick<ObjectRef, 'sha256' | 'size'>;
-      archive?: Pick<ObjectRef, 'sha256' | 'size'>;
+      manifest: UploadObjectSpec;
+      readme?: UploadObjectSpec;
+      bundle: UploadObjectSpec;
+      archive?: UploadObjectSpec;
     };
   }): Promise<{
     uploadId: string;

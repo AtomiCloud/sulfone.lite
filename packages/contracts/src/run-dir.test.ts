@@ -118,7 +118,7 @@ describe('reapAbandonedEngineRunDirs', () => {
     await mkdir(root, { recursive: true });
     const abandoned = await plantRunDir(root, 'cyanprint-probe', await deadPid());
 
-    expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0 })).toEqual([abandoned]);
+    expect(await reapAbandonedEngineRunDirs(root, { graceMs: 0, now: Date.now() + 1000 })).toEqual([abandoned]);
     expect(await readdir(root)).toEqual([]);
   });
 

@@ -700,7 +700,7 @@ async function executeChildTemplate(
   };
   const child = await generateTemplate(childDir, childContext, stack);
   for (const [key, value] of Object.entries(childContext.answers)) {
-    if (!(key in context.answers)) {
+    if (!Object.hasOwn(context.answers, key)) {
       context.answers[key] = value;
     }
   }
@@ -709,7 +709,7 @@ async function executeChildTemplate(
 
 function seedDeterministic(context: GenerationContext, deterministic: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(deterministic)) {
-    if (!(key in context.deterministicState)) {
+    if (!Object.hasOwn(context.deterministicState, key)) {
       context.deterministicState[key] = value;
     }
   }

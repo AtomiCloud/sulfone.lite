@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createProject, sha256 } from '@cyanprint/core';
+import { createProject, pinsFingerprint, sha256 } from '@cyanprint/core';
 import { artifactIntegrity, readTemplateTarFiles } from '@cyanprint/contracts';
 import type { PromptRequest } from '@cyanprint/contracts';
 import { bundleCommand } from './commands/bundle';
@@ -19,6 +19,7 @@ import {
   unpackTemplateArchivePayload,
 } from './local-object-package';
 import { createProgram, main } from './main';
+import { parseNumberInput } from './described-prompts';
 import { VERSION } from './version';
 import { resolveTemplateInput } from './registry-template';
 
@@ -463,6 +464,184 @@ describe('commander cli shell', () => {
     }
   });
 
+  test('trust approve version accepts --version instead of printing the program version', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-commander-trust-version-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--integrity',
+          'sha256:abc',
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+
+      expect(logs).not.toContain(`cyanprint ${VERSION}`);
+      expect(JSON.parse(logs[0] ?? '{}')).toMatchObject({
+        status: 'done',
+        store: { versions: [{ owner: 'cyanprint', name: 'hello', version: '3', integrity: 'sha256:abc' }] },
+      });
+    } finally {
+      console.log = originalLog;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve version --registry offline error names the URL and the offline route', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-offline-'));
+    try {
+      await expect(
+        createProgram().parseAsync(
+          [
+            'trust',
+            'approve',
+            'version',
+            'cyanprint/hello',
+            '--version',
+            '3',
+            '--registry',
+            'http://127.0.0.1:1',
+            '--trust-dir',
+            tempRoot,
+          ],
+          { from: 'user' },
+        ),
+      ).rejects.toThrow(/http:\/\/127\.0\.0\.1:1.*--integrity.*--pins-fingerprint/s);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve version without --registry or --pins-fingerprint warns that pins are recorded as empty', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-nopins-'));
+    const warnings: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    try {
+      console.log = () => {};
+      console.error = (message?: unknown) => {
+        warnings.push(String(message));
+      };
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--integrity',
+          'sha256:abc',
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+      expect(warnings.join('\n')).toContain('--pins-fingerprint');
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve version --registry records the real integrity and pins fingerprint', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-registry-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    const pin = { kind: 'processor' as const, owner: 'cyanprint', name: 'dep', version: '2', integrity: 'sha256:dep' };
+    const artifact = {
+      id: 'template__cyanprint__hello__3',
+      kind: 'template',
+      owner: 'cyanprint',
+      name: 'hello',
+      version: '3',
+      object: { sha256: 'abc', size: 1, key: 'k' },
+      resolvedPins: [pin],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--registry',
+          server.url.toString().replace(/\/$/, ''),
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+      const report = JSON.parse(logs[0] ?? '{}');
+      expect(report.decision).toMatchObject({ trusted: true, scope: 'version' });
+      expect(report.store.versions[0]).toMatchObject({
+        owner: 'cyanprint',
+        name: 'hello',
+        version: '3',
+        integrity: artifactIntegrity(artifact as never),
+        pinsFingerprint: pinsFingerprint([pin]),
+      });
+    } finally {
+      console.log = originalLog;
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve reports resolved owner and name from flags', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-flags-'));
+    const logs: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (message?: unknown) => {
+        logs.push(String(message));
+      };
+      await createProgram().parseAsync(
+        ['trust', 'approve', 'template', '--owner', 'acme', '--name', 'widget', '--trust-dir', tempRoot],
+        { from: 'user' },
+      );
+      const text = logs.join('\n');
+      expect(text).toContain('acme');
+      expect(text).toContain('widget');
+    } finally {
+      console.log = originalLog;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('program-level --version and -v still print the version', async () => {
+    for (const flag of ['--version', '-v']) {
+      const writes: string[] = [];
+      const program = createProgram();
+      program.configureOutput({ writeOut: text => writes.push(text) });
+      await expect(program.parseAsync([flag], { from: 'user' })).rejects.toMatchObject({ exitCode: 0 });
+      expect(writes.join('').trim()).toBe(`cyanprint ${VERSION}`);
+    }
+  });
+
   test('trust scope flag can still use positional ref', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-commander-trust-scope-ref-'));
     const logs: string[] = [];
@@ -569,6 +748,52 @@ describe('inquirer prompt adapter', () => {
       select: 'two',
       text: 'text answer',
     });
+  });
+
+  test('number input rejects blank, whitespace and non-finite values', () => {
+    expect(parseNumberInput('   ')).toBeUndefined();
+    expect(parseNumberInput('')).toBeUndefined();
+    expect(parseNumberInput('Infinity')).toBeUndefined();
+    expect(parseNumberInput('abc')).toBeUndefined();
+    expect(parseNumberInput(' 4 ')).toBe(4);
+    expect(parseNumberInput('-2.5')).toBe(-2.5);
+  });
+
+  test('a rejected select answer re-asks instead of aborting', async () => {
+    const picks = ['bad', 'good'];
+    const originalError = console.error;
+    console.error = () => {};
+    const prompts = { select: async () => picks.shift() } as unknown as InquirerPrompts;
+    try {
+      const adapter = inquirerPromptAdapter({}, prompts);
+      const value = await adapter.ask({
+        kind: 'select',
+        name: 'flavor',
+        message: 'Pick',
+        options: ['bad', 'good'],
+        validate: (v: unknown) => (v === 'good' ? true : 'pick good'),
+      });
+      expect(value).toBe('good');
+      expect(picks).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('answers named like Object.prototype keys are still prompted', async () => {
+    const asked: string[] = [];
+    const prompts = {
+      input: async () => {
+        asked.push('input');
+        return 'typed';
+      },
+    } as unknown as InquirerPrompts;
+    const answers: Record<string, unknown> = {};
+    const adapter = inquirerPromptAdapter(answers, prompts);
+    const reply: unknown = await adapter.ask({ kind: 'text', name: 'constructor', message: 'Name?' });
+    expect(reply).toBe('typed');
+    expect(asked).toEqual(['input']);
+    expect(Object.hasOwn(answers, 'constructor')).toBe(true);
   });
 
   test('passes placeholders and descriptions through, and maps per-option descriptions', async () => {
@@ -1567,7 +1792,166 @@ describe('registry template hydration', () => {
   });
 });
 
+describe('registry template input', () => {
+  test('a local directory without cyan.yaml is not treated as a registry ref', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-nocyan-'));
+    const original = process.cwd();
+    try {
+      await mkdir(join(tempRoot, 'templates', 'foo'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(resolveTemplateInput({ template: 'templates/foo', registry: 'http://127.0.0.1:1' })).rejects.toThrow(
+        'without a cyan.yaml',
+      );
+    } finally {
+      process.chdir(original);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a real registry ref is not shadowed by a same-named local directory', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-shadow-'));
+    const original = process.cwd();
+    const artifact = {
+      id: 'template__acme__web__1',
+      kind: 'template',
+      owner: 'acme',
+      name: 'web',
+      version: '1',
+      object: { sha256: 'abc', size: 1, key: 'k' },
+      resolvedPins: [],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      await mkdir(join(tempRoot, 'acme', 'web'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(
+        resolveTemplateInput({
+          template: 'acme/web',
+          registry: server.url.toString().replace(/\/$/, ''),
+          trustDir: join(tempRoot, 'trust'),
+        }),
+      ).rejects.toThrow('trust approve version acme/web');
+    } finally {
+      process.chdir(original);
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('the untrusted hint carries --kind so template-group artifacts can be approved', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-kind-hint-'));
+    const artifact = {
+      id: 'template-group__acme__grp__1',
+      kind: 'template-group',
+      owner: 'acme',
+      name: 'grp',
+      version: '1',
+      artifactObjects: {
+        manifest: { bucket: 'b', key: 'm', sha256: 'abc', size: 1 },
+        bundle: { bucket: 'b', key: 'x', sha256: 'def', size: 2 },
+      },
+      resolvedPins: [],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      await expect(
+        resolveTemplateInput({
+          template: 'acme/grp',
+          registry: server.url.toString().replace(/\/$/, ''),
+          trustDir: join(tempRoot, 'trust'),
+        }),
+      ).rejects.toThrow(/--kind template-group --version 1 --integrity 'artifact-objects-v1\|[^']*'/);
+    } finally {
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a registry miss for an existing local directory explains the missing cyan.yaml', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-miss-'));
+    const original = process.cwd();
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [], missing: [] }) });
+    try {
+      await mkdir(join(tempRoot, 'acme', 'web'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(
+        resolveTemplateInput({ template: 'acme/web', registry: server.url.toString().replace(/\/$/, '') }),
+      ).rejects.toThrow('without a cyan.yaml');
+    } finally {
+      process.chdir(original);
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('push command', () => {
+  test('upload start request carries only sha256 and size, never payload bytes', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-push-start-'));
+    const artifactDir = join(tempRoot, 'template');
+    let startBody: unknown;
+    const putBodies: Record<string, number> = {};
+    const originalToken = process.env.CYANPRINT_TOKEN;
+    const originalLog = console.log;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === '/batch-resolve') {
+          return Response.json({ resolved: [], missing: [] });
+        }
+        if (url.pathname === '/uploads/start') {
+          startBody = await request.json();
+          return Response.json({
+            uploadId: 'upload-1',
+            objects: {},
+            urls: { manifest: '/put/manifest', bundle: '/put/bundle', readme: '/put/readme', archive: '/put/archive' },
+          });
+        }
+        if (url.pathname.startsWith('/put/')) {
+          putBodies[url.pathname] = (await request.arrayBuffer()).byteLength;
+          return Response.json({ ok: true });
+        }
+        if (url.pathname === '/uploads/finalize') {
+          return Response.json({ artifact: {} });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      await mkdir(join(artifactDir, 'template'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        ['cyanprint: 4', 'kind: template', 'owner: cyanprint', 'name: start-body', 'bundledEntry: cyan.ts', ''].join(
+          '\n',
+        ),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
+      await writeFile(join(artifactDir, 'template', 'a.txt'), 'archive payload\n', 'utf8');
+      process.env.CYANPRINT_TOKEN = 'test-token';
+      console.log = () => {};
+
+      await pushCommand([artifactDir, '--registry', server.url.toString().replace(/\/$/, ''), '--json']);
+
+      const objects = (startBody as { objects: Record<string, Record<string, unknown>> }).objects;
+      expect(Object.keys(objects).sort()).toEqual(['archive', 'bundle', 'manifest']);
+      for (const object of Object.values(objects)) {
+        expect(Object.keys(object).sort()).toEqual(['sha256', 'size']);
+      }
+      expect(putBodies['/put/archive']).toBe(objects.archive?.size as number);
+    } finally {
+      console.log = originalLog;
+      if (originalToken === undefined) {
+        delete process.env.CYANPRINT_TOKEN;
+      } else {
+        process.env.CYANPRINT_TOKEN = originalToken;
+      }
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test('normalizes ownerless dependency refs to the publishing owner before registry resolve', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-push-owner-'));
     const artifactDir = join(tempRoot, 'template');

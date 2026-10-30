@@ -32,7 +32,7 @@ export function inquirerPromptAdapter(
 ): PromptAdapter {
   return {
     async ask<T>(request: PromptRequest): Promise<T> {
-      if (request.name in answers) {
+      if (Object.hasOwn(answers, request.name)) {
         return answers[request.name] as T;
       }
       const value = await askPrompt(applySuggestion(request, suggestions), prompts);
@@ -85,19 +85,23 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
     });
   }
   if (request.kind === 'confirm') {
-    return await prompts.confirm({
-      message: request.message,
-      default: request.default,
-      description: request.description,
-    });
+    return await askUntilValid(request, () =>
+      prompts.confirm({
+        message: request.message,
+        default: request.default,
+        description: request.description,
+      }),
+    );
   }
   if (request.kind === 'select') {
-    return await prompts.select({
-      message: request.message,
-      choices: request.options.map(option => promptChoice(option, request.description)),
-      default: request.default,
-      theme: listDescriptionTheme,
-    });
+    return await askUntilValid(request, () =>
+      prompts.select({
+        message: request.message,
+        choices: request.options.map(option => promptChoice(option, request.description)),
+        default: request.default,
+        theme: listDescriptionTheme,
+      }),
+    );
   }
   if (request.kind === 'multiselect') {
     return await prompts.checkbox({
@@ -117,6 +121,19 @@ async function askPrompt(request: PromptRequest, prompts: InquirerPrompts): Prom
     description: request.description,
     validate: validate ? value => validate(value) : undefined,
   });
+}
+
+// confirm/select prompts have no inline validate hook, so a rejected answer re-asks here
+// instead of aborting the run with invalid_answer.
+async function askUntilValid(request: PromptRequest, ask: () => Promise<unknown>): Promise<unknown> {
+  for (;;) {
+    const value = await ask();
+    const result = request.validate ? request.validate(value) : true;
+    if (result === true) {
+      return value;
+    }
+    console.error(chalk.red(typeof result === 'string' ? result : 'Invalid answer.'));
+  }
 }
 
 // The bottom lines are pre-styled in promptChoice (option help cyan, prompt description

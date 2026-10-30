@@ -1,7 +1,13 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { artifactIntegrity, type ArtifactVersion, type ResolvedDependencyPin } from '@cyanprint/contracts';
+import {
+  artifactIntegrity,
+  CyanError,
+  problem,
+  type ArtifactVersion,
+  type ResolvedDependencyPin,
+} from '@cyanprint/contracts';
 import { isRecord } from '../util';
 
 export type TrustScope = 'organization' | 'template' | 'version';
@@ -60,7 +66,26 @@ export async function loadTrustStore(path = resolveTrustStorePath()): Promise<Tr
   if (!raw) {
     return emptyTrustStore();
   }
-  const parsed = JSON.parse(raw) as Partial<TrustStore>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'invalid_trust_store',
+        `Trust store ${path} is not valid JSON: ${(error as Error).message}`,
+        {
+          path,
+        },
+      ),
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new CyanError(
+      problem('validation', 'invalid_trust_store', `Trust store ${path} must contain a JSON object.`, { path }),
+    );
+  }
   return {
     organizations: Array.isArray(parsed.organizations) ? parsed.organizations.filter(isString) : [],
     templates: Array.isArray(parsed.templates) ? parsed.templates.filter(isTrustIdentity) : [],
@@ -191,7 +216,8 @@ function addUniqueVersion(values: TrustStore['versions'], value: TrustStore['ver
         entry.owner === value.owner &&
         entry.name === value.name &&
         entry.version === value.version &&
-        entry.integrity === value.integrity,
+        entry.integrity === value.integrity &&
+        entry.pinsFingerprint === value.pinsFingerprint,
     )
   ) {
     values.push(value);
