@@ -39,15 +39,13 @@ export function parseGitignore(content: string): (path: string) => boolean {
     if (!anchored) {
       selfGlobs.push(new Bun.Glob(`**/${pattern}`));
     }
-    const underGlobs = [new Bun.Glob(`${pattern}/**`)];
-    if (!anchored) {
-      underGlobs.push(new Bun.Glob(`**/${pattern}/**`));
-    }
     const matchesDirectory = (path: string): boolean => selfGlobs.some(glob => glob.match(path));
     rules.push({
       negated,
       matchesDirectory,
-      matches: path => (!directoryOnly && matchesDirectory(path)) || underGlobs.some(glob => glob.match(path)),
+      // A rule only ever matches the path itself: files under an ignored directory are handled by the
+      // ancestor walk below, so a directory-only rule (e.g. `!*/`) must not touch files beneath it.
+      matches: path => !directoryOnly && matchesDirectory(path),
     });
   }
   const lastMatch = (path: string, test: (rule: IgnoreRule, path: string) => boolean): boolean => {

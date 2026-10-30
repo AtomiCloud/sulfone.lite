@@ -21,4 +21,12 @@ describe('parseGitignore', () => {
     expect(ignored('x.log')).toBe(true);
     expect(ignored('important.log')).toBe(false);
   });
+
+  test('a directory-only negation does not un-ignore files beneath that directory', () => {
+    const ignored = parseGitignore('*\n!*/\n!*.ts\n');
+    expect(ignored('src/a.ts')).toBe(false);
+    expect(ignored('src/a.js')).toBe(true);
+    expect(ignored('src/deep/b.js')).toBe(true);
+    expect(ignored('src/deep/b.ts')).toBe(false);
+  });
 });
