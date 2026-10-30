@@ -377,6 +377,15 @@ function isDownloadCountingRef(artifact: ArtifactVersion, ref: ObjectRef): boole
   return Boolean(primaryRef && objectRefsMatch(primaryRef, ref));
 }
 
+// A failed counter update must never fail the download itself.
+async function countDownload(storage: RegistryStorage, ref: ObjectRef): Promise<void> {
+  try {
+    await storage.recordDownload(ref);
+  } catch (error) {
+    console.error('download counter update failed', error);
+  }
+}
+
 function objectRefsMatch(left: ObjectRef, right: ObjectRef): boolean {
   return (
     left.bucket === right.bucket && left.key === right.key && left.sha256 === right.sha256 && left.size === right.size
@@ -450,6 +459,9 @@ function isBatchResolveRequest(input: unknown): input is BatchResolveRequest {
   if (!input || typeof input !== 'object' || !Array.isArray((input as { refs?: unknown }).refs)) {
     return false;
   }
+  if ((input as { refs: unknown[] }).refs.length > maxBatchResolveRefs) {
+    return false;
+  }
   return (input as { refs: unknown[] }).refs.every(
     ref =>
       Boolean(ref) &&
@@ -491,6 +503,10 @@ function isEffectiveAdmin(user: RegistryUser | undefined, env: WorkerBindings | 
   return !user.id.startsWith('github:') || githubAdminLogins(env ?? {}).has(login);
 }
 
+// 'local' is the implicit owner of unowned refs; 'cyan' is the registry's default publishing account.
+const reservedHandles = new Set(['local', 'cyan']);
+const maxBatchResolveRefs = 50;
+
 function normalizeGitHubHandle(login: string): string {
   return normalizeHandle(login);
 }
@@ -504,7 +520,7 @@ function validateHandle(value: unknown): string | undefined {
     return undefined;
   }
   const handle = normalizeHandle(value);
-  return /^[a-z0-9][a-z0-9-]{2,38}$/.test(handle) ? handle : undefined;
+  return /^[a-z0-9][a-z0-9-]{2,38}$/.test(handle) && !reservedHandles.has(handle) ? handle : undefined;
 }
 
 function publicUser(user: RegistryUser, env?: WorkerBindings) {
@@ -893,7 +909,16 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
       likes: 0,
     };
     const parsedArtifact = ArtifactPublishSchema.safeParse(artifactForPermission);
-    if (!parsedArtifact.success || !(await canPublishArtifact(storage, token, parsedArtifact.data, c.env))) {
+    if (!parsedArtifact.success) {
+      return problemResponse(
+        c,
+        400,
+        'validation',
+        'invalid_upload_start',
+        'Upload start requires a valid artifact kind, owner, and name.',
+      );
+    }
+    if (!(await canPublishArtifact(storage, token, parsedArtifact.data, c.env))) {
       return problemResponse(c, 403, 'permission', 'owner_required', 'Token owner cannot upload this artifact owner.');
     }
     const uploadId = crypto.randomUUID();
@@ -1107,7 +1132,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
         return problemResponse(c, 404, 'not_found', 'object_not_found', `Object not found: ${ref.data.key}`);
       }
       if (isDownloadCountingRef(artifact, ref.data)) {
-        await storage.recordDownload(ref.data);
+        await countDownload(storage, ref.data);
       }
       return new Response(toArrayBuffer(bytes), { headers: { 'content-type': 'application/octet-stream' } });
     }
@@ -1116,7 +1141,7 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
       return problemResponse(c, 404, 'not_found', 'object_not_found', `Object not found: ${ref.data.key}`);
     }
     if (isDownloadCountingRef(artifact, ref.data)) {
-      await storage.recordDownload(ref.data);
+      await countDownload(storage, ref.data);
     }
     return c.json({ payload });
   });
@@ -1186,7 +1211,13 @@ export function createApp(source: StorageSource): Hono<{ Bindings: WorkerBinding
     const storage = resolveStorage(source, c);
     const body = (await c.req.json().catch(() => undefined)) as unknown;
     if (!isBatchResolveRequest(body)) {
-      return problemResponse(c, 400, 'validation', 'invalid_batch_resolve', 'Batch resolve requires a refs array.');
+      return problemResponse(
+        c,
+        400,
+        'validation',
+        'invalid_batch_resolve',
+        `Batch resolve requires a refs array of at most ${maxBatchResolveRefs} refs.`,
+      );
     }
     return c.json(await storage.batchResolve(body));
   });

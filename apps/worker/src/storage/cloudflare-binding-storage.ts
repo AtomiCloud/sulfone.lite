@@ -10,7 +10,6 @@ import {
 import {
   artifactFtsQuery,
   artifactSearchText,
-  batchResolve,
   createLocalRegistryState,
   isActiveArtifact,
   seedArtifacts,
@@ -28,6 +27,7 @@ type D1Statement = {
 
 type D1DatabaseBinding = {
   prepare(sql: string): D1Statement;
+  batch(statements: D1Statement[]): Promise<unknown[]>;
 };
 
 type R2ObjectBody = {
@@ -61,6 +61,9 @@ export type WorkerBindings = {
   CYANPRINT_DEFAULT_TOKEN_HASH?: string;
 };
 
+const COUNTER_QUERY_CHUNK = 90;
+const LOOKUP_CANDIDATES = 5;
+
 export function createCloudflareBindingStorage(env: WorkerBindings): RegistryStorage {
   const db = requireBinding(env.DB, 'D1');
   const r2 = requireBinding(env.R2, 'R2');
@@ -68,7 +71,10 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
   let seeded: Promise<void> | undefined;
 
   async function ensureSeeded(): Promise<void> {
-    seeded ??= seed();
+    seeded ??= seed().catch(error => {
+      seeded = undefined;
+      throw error;
+    });
     await seeded;
   }
 
@@ -109,13 +115,22 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     }
     // Canonical upserts: every deploy re-asserts the full account/token shape, so a
     // drifted row (e.g. a flipped admin bit or a re-pointed token) is corrected in place.
-    await db
-      .prepare(
-        `INSERT INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET handle = excluded.handle, login = excluded.login, admin = excluded.admin`,
-      )
-      .bind('svc:cyan', 'cyan', null, 0)
-      .run();
+    try {
+      await db
+        .prepare(
+          `INSERT INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET handle = excluded.handle, login = excluded.login, admin = excluded.admin`,
+        )
+        .bind('svc:cyan', 'cyan', null, 0)
+        .run();
+    } catch (error) {
+      // Another account already owns the handle: a permanent conflict must not 500 the whole registry.
+      if (!isUniqueHandleError(error)) {
+        throw error;
+      }
+      console.error('Default account seed skipped: handle "cyan" is already claimed by another user.');
+      return;
+    }
     await db
       .prepare(
         `INSERT INTO tokens (id, user_id, name, secret_hash, revoked) VALUES (?, ?, ?, ?, 0)
@@ -148,85 +163,136 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     return raw ? (JSON.parse(raw) as ArtifactVersion) : undefined;
   }
 
+  // KV body first, then ONE atomic D1 batch that publishes the version, then the object index.
+  // Readers discover versions through D1, so they never see a version whose KV body is missing,
+  // and a failed batch leaves no half-committed rows. Counters are D1-owned and never overwritten here.
   async function persistArtifact(artifact: ArtifactVersion): Promise<void> {
-    await db
-      .prepare(
-        `INSERT INTO artifacts (id, kind, owner, name, disabled, moderation_state)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           kind = excluded.kind,
-           owner = excluded.owner,
-           name = excluded.name,
-           disabled = excluded.disabled,
-           moderation_state = excluded.moderation_state`,
-      )
-      .bind(
-        artifact.id,
-        artifact.kind,
-        artifact.owner,
-        artifact.name,
-        artifact.disabled ? 1 : 0,
-        artifact.moderationState,
-      )
-      .run();
     const searchText = artifactSearchText(artifact);
-    await db
-      .prepare(
-        `INSERT INTO versions (id, artifact_id, version, published_at, object_key, sha256, size, downloads, likes, search_text)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           artifact_id = excluded.artifact_id,
-           version = excluded.version,
-           published_at = excluded.published_at,
-           object_key = excluded.object_key,
-           sha256 = excluded.sha256,
-           size = excluded.size,
-           downloads = excluded.downloads,
-           likes = excluded.likes,
-           search_text = excluded.search_text`,
-      )
-      .bind(
-        artifact.id,
-        artifact.id,
-        artifact.version,
-        artifact.publishedAt ?? new Date().toISOString(),
-        artifact.object?.key ?? null,
-        artifact.object?.sha256 ?? null,
-        artifact.object?.size ?? 0,
-        artifact.downloads,
-        artifact.likes,
-        searchText,
-      )
-      .run();
-    await db.prepare('DELETE FROM artifact_search WHERE version_id = ?').bind(artifact.id).run();
-    await db
-      .prepare('INSERT INTO artifact_search (version_id, search_text) VALUES (?, ?)')
-      .bind(artifact.id, searchText)
-      .run();
-    await db.prepare('DELETE FROM refs WHERE version_id = ?').bind(artifact.id).run();
-    await db.prepare('DELETE FROM artifact_objects WHERE version_id = ?').bind(artifact.id).run();
-    for (const [part, ref] of artifactObjectEntries(artifact)) {
-      await db
-        .prepare('INSERT INTO artifact_objects (version_id, part, object_key, sha256, size) VALUES (?, ?, ?, ?, ?)')
-        .bind(artifact.id, part, ref.key, ref.sha256, ref.size)
-        .run();
-    }
-    for (const pin of artifact.resolvedPins) {
-      await db
-        .prepare('INSERT INTO refs (version_id, kind, owner, name, version, integrity) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(artifact.id, pin.kind, pin.owner, pin.name, pin.version, pin.integrity)
-        .run();
-    }
-    await advanceCounter(artifact.kind, artifact.owner, artifact.name, artifact.version);
     await kv.put(artifactKey(artifact.id), JSON.stringify(artifact));
-    for (const [, ref] of artifactObjectEntries(artifact)) {
-      await kv.put(objectArtifactIndexKey(ref), artifact.id);
+    const statements = [
+      db
+        .prepare(
+          `INSERT INTO artifacts (id, kind, owner, name, disabled, moderation_state)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             kind = excluded.kind,
+             owner = excluded.owner,
+             name = excluded.name,
+             disabled = excluded.disabled,
+             moderation_state = excluded.moderation_state`,
+        )
+        .bind(
+          artifact.id,
+          artifact.kind,
+          artifact.owner,
+          artifact.name,
+          artifact.disabled ? 1 : 0,
+          artifact.moderationState,
+        ),
+      db.prepare('DELETE FROM artifact_search WHERE version_id = ?').bind(artifact.id),
+      db.prepare('INSERT INTO artifact_search (version_id, search_text) VALUES (?, ?)').bind(artifact.id, searchText),
+      db.prepare('DELETE FROM refs WHERE version_id = ?').bind(artifact.id),
+      db.prepare('DELETE FROM artifact_objects WHERE version_id = ?').bind(artifact.id),
+      ...artifactObjectEntries(artifact).map(([part, ref]) =>
+        db
+          .prepare('INSERT INTO artifact_objects (version_id, part, object_key, sha256, size) VALUES (?, ?, ?, ?, ?)')
+          .bind(artifact.id, part, ref.key, ref.sha256, ref.size),
+      ),
+      ...artifact.resolvedPins.map(pin =>
+        db
+          .prepare('INSERT INTO refs (version_id, kind, owner, name, version, integrity) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(artifact.id, pin.kind, pin.owner, pin.name, pin.version, pin.integrity),
+      ),
+      ...advanceCounterStatements(artifact.kind, artifact.owner, artifact.name, artifact.version),
+      db
+        .prepare(
+          `INSERT INTO versions (id, artifact_id, version, published_at, object_key, sha256, size, downloads, likes, search_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             artifact_id = excluded.artifact_id,
+             version = excluded.version,
+             published_at = excluded.published_at,
+             object_key = excluded.object_key,
+             sha256 = excluded.sha256,
+             size = excluded.size,
+             search_text = excluded.search_text`,
+        )
+        .bind(
+          artifact.id,
+          artifact.id,
+          artifact.version,
+          artifact.publishedAt ?? new Date().toISOString(),
+          artifact.object?.key ?? null,
+          artifact.object?.sha256 ?? null,
+          artifact.object?.size ?? 0,
+          artifact.downloads,
+          artifact.likes,
+          searchText,
+        ),
+    ];
+    await db.batch(statements);
+    // The index is only a lookup accelerator; findActiveArtifactByObjectRef falls back to D1.
+    await Promise.all(
+      artifactObjectEntries(artifact).map(([, ref]) =>
+        kv.put(objectArtifactIndexKey(ref), artifact.id).catch(() => undefined),
+      ),
+    );
+  }
+
+  async function loadStoredArtifact(id: string): Promise<ArtifactVersion | undefined> {
+    const raw = await kv.get(artifactKey(id));
+    return raw ? (JSON.parse(raw) as ArtifactVersion) : undefined;
+  }
+
+  // Counters live in D1 only; the KV body is never rewritten for them, so overlay them on read.
+  async function loadArtifacts(ids: string[]): Promise<Array<ArtifactVersion | undefined>> {
+    const stored = await Promise.all(ids.map(loadStoredArtifact));
+    const present = stored.filter((artifact): artifact is ArtifactVersion => Boolean(artifact));
+    const counters = new Map<string, { downloads: number; likes: number }>();
+    for (let start = 0; start < present.length; start += COUNTER_QUERY_CHUNK) {
+      const chunk = present.slice(start, start + COUNTER_QUERY_CHUNK);
+      const { results } = await db
+        .prepare(`SELECT id, downloads, likes FROM versions WHERE id IN (${chunk.map(() => '?').join(', ')})`)
+        .bind(...chunk.map(artifact => artifact.id))
+        .all<{ id: string; downloads: number; likes: number }>();
+      for (const row of results) {
+        counters.set(row.id, { downloads: Number(row.downloads), likes: Number(row.likes) });
+      }
     }
+    return stored.map(artifact => (artifact ? { ...artifact, ...counters.get(artifact.id) } : undefined));
   }
 
   async function loadArtifact(id: string): Promise<ArtifactVersion | undefined> {
-    const raw = await kv.get(artifactKey(id));
-    return raw ? (JSON.parse(raw) as ArtifactVersion) : undefined;
+    return (await loadArtifacts([id]))[0];
+  }
+
+  // Newest-first active versions of one identity (or one exact version). A few candidates are
+  // tried so that a KV body that is not yet readable does not 404 the whole artifact.
+  async function findActiveArtifact(
+    kind: string,
+    owner: string,
+    name: string,
+    version?: string,
+  ): Promise<ArtifactVersion | undefined> {
+    const { results } = await db
+      .prepare(
+        `SELECT versions.id
+         FROM versions
+         JOIN artifacts ON artifacts.id = versions.artifact_id
+         WHERE artifacts.kind = ? AND artifacts.owner = ? AND artifacts.name = ?
+           AND artifacts.disabled = 0 AND artifacts.moderation_state = 'active'${version ? ' AND versions.version = ?' : ''}
+         ORDER BY CAST(versions.version AS INTEGER) DESC, versions.version DESC
+         LIMIT ${LOOKUP_CANDIDATES}`,
+      )
+      .bind(...(version ? [kind, owner, name, version] : [kind, owner, name]))
+      .all<{ id: string }>();
+    for (const row of results) {
+      const artifact = await loadArtifact(row.id);
+      if (artifact && isActiveArtifact(artifact)) {
+        return artifact;
+      }
+    }
+    return undefined;
   }
 
   async function findActiveArtifactByObjectRef(ref: ObjectRef): Promise<ArtifactVersion | undefined> {
@@ -238,12 +304,21 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
       }
     }
     const { results } = await db
-      .prepare("SELECT id FROM artifacts WHERE disabled = 0 AND moderation_state = 'active' ORDER BY kind, owner, name")
+      .prepare(
+        `SELECT DISTINCT artifacts.id, artifacts.kind, artifacts.owner, artifacts.name
+         FROM artifact_objects
+         JOIN artifacts ON artifacts.id = artifact_objects.version_id
+         WHERE artifact_objects.object_key = ? AND artifact_objects.sha256 = ? AND artifact_objects.size = ?
+           AND artifacts.disabled = 0 AND artifacts.moderation_state = 'active'
+         ORDER BY artifacts.kind, artifacts.owner, artifacts.name
+         LIMIT ${LOOKUP_CANDIDATES}`,
+      )
+      .bind(ref.key, ref.sha256, ref.size)
       .all<{ id: string }>();
     for (const row of results) {
       const artifact = await loadArtifact(row.id);
       if (artifact && isActiveArtifact(artifact) && artifactHasObjectRef(artifact, ref)) {
-        await kv.put(objectArtifactIndexKey(ref), artifact.id);
+        await kv.put(objectArtifactIndexKey(ref), artifact.id).catch(() => undefined);
         return artifact;
       }
     }
@@ -429,7 +504,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         ? db.prepare('SELECT id FROM artifacts WHERE kind = ? ORDER BY owner, name').bind(kind)
         : db.prepare('SELECT id FROM artifacts ORDER BY kind, owner, name');
       const { results } = await statement.all<{ id: string }>();
-      const artifacts = await Promise.all(results.map(row => this.getArtifact(row.id)));
+      const artifacts = await loadArtifacts(results.map(row => row.id));
       return artifacts.filter((artifact): artifact is ArtifactVersion => Boolean(artifact));
     },
     async searchArtifacts(args = {}) {
@@ -446,24 +521,11 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async getArtifact(id) {
       await ensureSeeded();
-      const raw = await kv.get(artifactKey(id));
-      return raw ? (JSON.parse(raw) as ArtifactVersion) : undefined;
+      return loadArtifact(id);
     },
     async getArtifactByIdentity(kind, owner, name) {
       await ensureSeeded();
-      const row = await db
-        .prepare(
-          `SELECT versions.id
-           FROM versions
-           JOIN artifacts ON artifacts.id = versions.artifact_id
-           WHERE artifacts.kind = ? AND artifacts.owner = ? AND artifacts.name = ?
-             AND artifacts.disabled = 0 AND artifacts.moderation_state = 'active'
-           ORDER BY CAST(versions.version AS INTEGER) DESC, versions.version DESC
-           LIMIT 1`,
-        )
-        .bind(kind, owner, name)
-        .first<{ id: string }>();
-      return row ? this.getArtifact(row.id) : undefined;
+      return findActiveArtifact(kind, owner, name);
     },
     async listArtifactVersions(kind, owner, name) {
       await ensureSeeded();
@@ -478,7 +540,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         )
         .bind(kind, owner, name)
         .all<{ id: string }>();
-      const artifacts = await Promise.all(results.map(row => this.getArtifact(row.id)));
+      const artifacts = await loadArtifacts(results.map(row => row.id));
       return artifacts.filter((artifact): artifact is ArtifactVersion => Boolean(artifact));
     },
     async getActiveArtifactByObjectRef(ref) {
@@ -503,7 +565,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async likeArtifact(id, userId) {
       await ensureSeeded();
-      const artifact = await this.getArtifact(id);
+      const artifact = await loadArtifact(id);
       if (!artifact) {
         return undefined;
       }
@@ -511,15 +573,18 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         .prepare('SELECT user_id FROM likes WHERE user_id = ? AND artifact_id = ?')
         .bind(userId, id)
         .first();
-      if (!liked) {
-        await db
-          .prepare('INSERT OR IGNORE INTO likes (user_id, artifact_id, created_at) VALUES (?, ?, ?)')
-          .bind(userId, id, new Date().toISOString())
-          .run();
-        artifact.likes = await countRows('likes', 'artifact_id', id);
-        await persistArtifactCounters(artifact);
+      if (liked) {
+        return artifact;
       }
-      return artifact;
+      await db
+        .prepare('INSERT OR IGNORE INTO likes (user_id, artifact_id, created_at) VALUES (?, ?, ?)')
+        .bind(userId, id, new Date().toISOString())
+        .run();
+      await db
+        .prepare('UPDATE versions SET likes = (SELECT COUNT(*) FROM likes WHERE artifact_id = ?) WHERE id = ?')
+        .bind(id, id)
+        .run();
+      return loadArtifact(id);
     },
     async recordDownload(ref) {
       await ensureSeeded();
@@ -531,9 +596,11 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
         .prepare('INSERT INTO downloads (id, artifact_id, version_id, created_at) VALUES (?, ?, ?, ?)')
         .bind(crypto.randomUUID(), artifact.id, artifact.id, new Date().toISOString())
         .run();
-      artifact.downloads = await countRows('downloads', 'artifact_id', artifact.id);
-      await persistArtifactCounters(artifact);
-      return artifact;
+      const row = await db
+        .prepare('UPDATE versions SET downloads = downloads + 1 WHERE id = ? RETURNING downloads')
+        .bind(artifact.id)
+        .first<{ downloads: number }>();
+      return { ...artifact, downloads: Number(row?.downloads ?? artifact.downloads + 1) };
     },
     async putObject(ref, payload) {
       await this.putObjectBytes(ref, new TextEncoder().encode(payload));
@@ -565,34 +632,51 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     },
     async hasVersionPin(pin) {
       await ensureSeeded();
-      const artifacts = await this.listArtifacts(pin.kind);
-      return artifacts.some(artifact => {
-        const expectedIntegrity = artifactIntegrity(artifact);
-        return (
-          artifact.owner === pin.owner &&
-          artifact.name === pin.name &&
-          artifact.version === pin.version &&
-          isActiveArtifact(artifact) &&
-          pin.integrity === expectedIntegrity
-        );
-      });
+      const artifact = await findActiveArtifact(pin.kind, pin.owner, pin.name, pin.version);
+      return Boolean(artifact && pin.integrity === artifactIntegrity(artifact));
     },
     async batchResolve(request) {
       await ensureSeeded();
-      const state = createLocalRegistryState();
-      state.artifacts = await this.listArtifacts();
-      return batchResolve(state, request) satisfies BatchResolveResponse;
+      const lookups = new Map<string, Promise<ArtifactVersion | undefined>>();
+      const matches = request.refs.map(ref => {
+        const owner = ref.owner ?? 'local';
+        const key = JSON.stringify([ref.kind, owner, ref.name, ref.version ?? '']);
+        let lookup = lookups.get(key);
+        if (!lookup) {
+          lookup = findActiveArtifact(ref.kind, owner, ref.name, ref.version || undefined);
+          lookups.set(key, lookup);
+        }
+        return lookup;
+      });
+      const found = await Promise.all(matches);
+      const resolved: ArtifactVersion[] = [];
+      const missing: BatchResolveResponse['missing'] = [];
+      request.refs.forEach((ref, index) => {
+        const owner = ref.owner ?? 'local';
+        const match = found[index];
+        if (match) {
+          resolved.push(match);
+        } else if (
+          !missing.some(
+            item =>
+              item.kind === ref.kind && item.owner === owner && item.name === ref.name && item.version === ref.version,
+          )
+        ) {
+          missing.push({ ...ref, owner });
+        }
+      });
+      return { resolved, missing } satisfies BatchResolveResponse;
     },
     async disableArtifact(id) {
       await ensureSeeded();
-      const artifact = await this.getArtifact(id);
-      if (!artifact) {
+      const stored = await loadStoredArtifact(id);
+      if (!stored) {
         return undefined;
       }
-      artifact.disabled = true;
-      artifact.moderationState = 'disabled';
-      await persistArtifact(artifact);
-      return artifact;
+      stored.disabled = true;
+      stored.moderationState = 'disabled';
+      await persistArtifact(stored);
+      return loadArtifact(id);
     },
     async saveUploadSession(upload) {
       await ensureSeeded();
@@ -639,35 +723,20 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
     return String(row.version);
   }
 
-  async function advanceCounter(kind: string, owner: string, name: string, version: string): Promise<void> {
+  function advanceCounterStatements(kind: string, owner: string, name: string, version: string): D1Statement[] {
     const numericVersion = Number(version);
     if (!Number.isInteger(numericVersion) || numericVersion < 0) {
-      return;
+      return [];
     }
-    await db
-      .prepare(
-        `INSERT INTO artifact_counters (kind, owner, name, next_version)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(kind, owner, name) DO UPDATE SET next_version = max(next_version, excluded.next_version)`,
-      )
-      .bind(kind, owner, name, numericVersion + 1)
-      .run();
-  }
-
-  async function countRows(table: 'likes' | 'downloads', column: 'artifact_id', value: string): Promise<number> {
-    const row = await db
-      .prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`)
-      .bind(value)
-      .first<{ count: number }>();
-    return Number(row?.count ?? 0);
-  }
-
-  async function persistArtifactCounters(artifact: ArtifactVersion): Promise<void> {
-    await db
-      .prepare('UPDATE versions SET downloads = ?, likes = ? WHERE id = ?')
-      .bind(artifact.downloads, artifact.likes, artifact.id)
-      .run();
-    await kv.put(artifactKey(artifact.id), JSON.stringify(artifact));
+    return [
+      db
+        .prepare(
+          `INSERT INTO artifact_counters (kind, owner, name, next_version)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(kind, owner, name) DO UPDATE SET next_version = max(next_version, excluded.next_version)`,
+        )
+        .bind(kind, owner, name, numericVersion + 1),
+    ];
   }
 
   async function searchStoredArtifacts(
@@ -736,11 +805,7 @@ export function createCloudflareBindingStorage(env: WorkerBindings): RegistrySto
       .bind(...bindings, ...cursorBindings, limit + 1)
       .all<StoredCursorRow>();
     const pageRows = results.slice(0, limit);
-    const artifacts = await Promise.all(
-      pageRows.map(row => {
-        return kv.get(artifactKey(row.id)).then(raw => (raw ? (JSON.parse(raw) as ArtifactVersion) : undefined));
-      }),
-    );
+    const artifacts = await loadArtifacts(pageRows.map(row => row.id));
     return {
       artifacts: artifacts.filter((artifact): artifact is ArtifactVersion => Boolean(artifact)),
       ...(results.length > limit && pageRows.at(-1) ? { nextCursor: encodeStoredCursor(pageRows.at(-1)!) } : {}),
