@@ -31,6 +31,7 @@ export async function gitThreeWayMerge(args: {
     await git(repo, ['config', 'user.name', 'cyanprint']);
     await git(repo, ['config', 'commit.gpgsign', 'false']);
     await git(repo, ['config', 'core.autocrlf', 'false']);
+    await git(repo, ['config', 'core.fileMode', 'true']);
 
     await writeTree(repo, args.base);
     await commitAll(repo, 'base');
