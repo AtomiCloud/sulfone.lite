@@ -14,6 +14,13 @@ builds:
       - linux-x64
       - linux-arm64
       - windows-x64
+    # bun copies the runtime it runs on when the target equals the host, which in
+    # the Nix release shell is a /nix/store-linked bun. Reset the ELF interpreter
+    # and fail the release before any archive/package is created if a Linux
+    # binary is still not portable (see scripts/ci/portable-linux.sh).
+    hooks:
+      post:
+        - cmd: '{{ if eq .Os "linux" }}./scripts/ci/portable-linux.sh "{{ .Path }}"{{ end }}'
 archives:
   - ids: [cyanprint]
     formats: [tar.gz]

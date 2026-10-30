@@ -49,7 +49,7 @@
     "test": "bun run unit && bun run integration",
     "test:all": "bun run test && bun run e2e",
     "sdk:types:emit": "bun run scripts/ci/emit-sdk-types.ts",
-    "unit": "bun test apps/web packages/contracts packages/registry-client",
+    "unit": "bun test apps/web packages/contracts packages/registry-client scripts/ci",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "web:dev": "bun run --filter @cyanprint/web dev",
     "web:e2e": "bun run e2e/web/run-web-e2e.ts",
