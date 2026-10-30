@@ -1,3 +1,23 @@
+## [4.10.0](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.2...v4.10.0) (2026-10-30)
+
+
+### 🐛 Bug Fixes 🐛
+
+* cache, runner, bundler and registry-client concurrency and safety ([#35](https://github.com/AtomiCloud/sulfone.lite/issues/35)) ([8fff3b7](https://github.com/AtomiCloud/sulfone.lite/commit/8fff3b703d7400376a00204bb6d06d4acebb2abb))
+* **core:** keep the executable bit through create and update ([#30](https://github.com/AtomiCloud/sulfone.lite/issues/30)) ([280bfb9](https://github.com/AtomiCloud/sulfone.lite/commit/280bfb9eb3f5a32499c7cc9fa5007dd39aedbf37))
+* **update:** make cyanprint update robust (hard links, local templates, git isolation, state determinism) ([#32](https://github.com/AtomiCloud/sulfone.lite/issues/32)) ([97de5fa](https://github.com/AtomiCloud/sulfone.lite/commit/97de5fae3ba6a2d4b7878b938bcbd10abf6c351d))
+* **worker,web:** make registry storage retry-safe, atomic, bounded; harden web shell ([#34](https://github.com/AtomiCloud/sulfone.lite/issues/34)) ([22f2e1e](https://github.com/AtomiCloud/sulfone.lite/commit/22f2e1ef429fbcf90b1060936ee7455d00895512))
+* **testing:** never rm -rf the user --out dir or a test root ([#29](https://github.com/AtomiCloud/sulfone.lite/issues/29)) ([97575a5](https://github.com/AtomiCloud/sulfone.lite/commit/97575a5881779bb25d01a30f772d55aa37bda477))
+* **probe:** process lifetime, timeouts, determinism and cwd-independent resolution ([#33](https://github.com/AtomiCloud/sulfone.lite/issues/33)) ([bc735d8](https://github.com/AtomiCloud/sulfone.lite/commit/bc735d8c761588c354b0038b212b0c4141cee85a))
+* **release:** ship linux binaries with the standard ELF interpreter ([#36](https://github.com/AtomiCloud/sulfone.lite/issues/36)) ([20ee860](https://github.com/AtomiCloud/sulfone.lite/commit/20ee86056b262f044751195ce3fc6be0e6c6dba3))
+* **release:** stop bun install from breaking semantic-release mid-run ([#39](https://github.com/AtomiCloud/sulfone.lite/issues/39)) ([fdf78cc](https://github.com/AtomiCloud/sulfone.lite/commit/fdf78cc5e1aaf5e2aaeea5a49c58be751b93dd08))
+* **cli:** trust --version, slim push start body, real trust pins, prompt hardening ([#31](https://github.com/AtomiCloud/sulfone.lite/issues/31)) ([ae02e12](https://github.com/AtomiCloud/sulfone.lite/commit/ae02e12fc4df4574f0f333083f34e6e363b6487a))
+
+
+### 🧪 Tests 🧪
+
+* **web:** gate shell e2e on a settled router before navigating ([#37](https://github.com/AtomiCloud/sulfone.lite/issues/37)) ([9425d8c](https://github.com/AtomiCloud/sulfone.lite/commit/9425d8c4ca578176c6dfeb03b8c4c469932a61b9))
+
 ## [4.9.2](https://github.com/AtomiCloud/sulfone.lite/compare/v4.9.1...v4.9.2) (2026-07-25)
 
 
