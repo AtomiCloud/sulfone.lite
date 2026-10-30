@@ -204,8 +204,9 @@ async function runBrowserShellE2e(): Promise<void> {
     await waitForHttpOrExit(baseUrl, web, webLogs);
     browser = await launchBrowser();
     const page = await browser.newPage({ viewport: { width: 390, height: 820 } });
+    await applyCpuThrottle(page);
     await page.goto(baseUrl, { waitUntil: 'networkidle' });
-    await page.waitForFunction(() => document.documentElement.dataset.cyanprintShell === 'ready');
+    await waitForShellReady(page);
     await assertLandingLayout(page, 'initial mobile landing');
 
     const search = page.getByLabel('Search registry');
@@ -213,6 +214,7 @@ async function runBrowserShellE2e(): Promise<void> {
     await search.pressSequentially('resolver');
     await waitForUrlParam(page, 'q', 'resolver');
     await waitForPathname(page, '/search');
+    await waitForShellReady(page);
     await page.getByLabel('Artifact kind filter').click();
     await page.getByRole('menuitem', { name: 'Resolvers' }).click();
     await waitForUrlParam(page, 'kind', 'resolver');
@@ -253,18 +255,22 @@ async function runBrowserShellE2e(): Promise<void> {
       throw new Error('theme switch did not persist light preference.');
     }
     await page.goto(`${baseUrl}?theme=dark`, { waitUntil: 'networkidle' });
+    await waitForShellReady(page);
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
     await waitForUrlParam(page, 'theme', 'dark');
 
     await page.goto(baseUrl, { waitUntil: 'networkidle' });
+    await waitForShellReady(page);
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
     await waitForUrlParam(page, 'theme', 'dark');
     await page.goto(`${baseUrl}/account?theme=dark`, { waitUntil: 'networkidle' });
+    await waitForShellReady(page);
     await waitForPathname(page, '/account');
     await page.waitForFunction(() => document.documentElement.classList.contains('dark'));
     await waitForUrlParam(page, 'theme', 'dark');
 
     await page.goto(`${baseUrl}/artifacts/template`, { waitUntil: 'networkidle' });
+    await waitForShellReady(page);
     await assertNoHorizontalOverflow(page, 'typed catalog route');
     if ((await page.locator('.kind-tabs').count()) !== 0) {
       throw new Error('catalog route still rendered a second artifact filter control.');
@@ -272,6 +278,7 @@ async function runBrowserShellE2e(): Promise<void> {
     await page.getByLabel('Artifact kind filter').click();
     await page.getByRole('menuitem', { name: 'All' }).click();
     await waitForPathname(page, '/search');
+    await waitForShellReady(page);
     const allCatalogText = await page.getByRole('main').textContent();
     if (!allCatalogText?.includes('cyanprint/keep-user')) {
       throw new Error('typed catalog route did not preserve the explicit all-artifacts URL state.');
@@ -280,6 +287,7 @@ async function runBrowserShellE2e(): Promise<void> {
     await page.getByRole('menuitem', { name: 'Resolvers' }).click();
     await waitForUrlParam(page, 'kind', 'resolver');
     await page.goto(`${baseUrl}/search?kind=template&theme=dark`, { waitUntil: 'networkidle' });
+    await waitForShellReady(page);
     await waitForUrlParam(page, 'kind', 'template');
     const templateCards = page.getByTestId('artifact-card');
     try {
@@ -337,7 +345,7 @@ async function assertResponsiveThemeMatrix(page: Page, baseUrl: string): Promise
         if (!response?.ok()) {
           throw new Error(`${viewport.label} ${theme} ${route}: HTTP ${response?.status() ?? 'unknown'}`);
         }
-        await page.waitForFunction(() => document.documentElement.dataset.cyanprintShell === 'ready');
+        await waitForShellReady(page);
         await assertNoHorizontalOverflow(page, `${viewport.label} ${theme} ${route}`);
         await assertThemeApplied(page, theme, `${viewport.label} ${theme} ${route}`);
         await assertReadableText(page, `${viewport.label} ${theme} ${route}`);
@@ -597,8 +605,32 @@ async function waitForMissingUrlParam(page: Page, key: string): Promise<void> {
   }
 }
 
+// The shell reports "ready" once it hydrated, applied the stored theme and has no soft navigation in flight. Interacting
+// earlier lets a theme-sync router.replace supersede (or race a hard navigation with) the navigation under test.
+async function waitForShellReady(page: Page): Promise<void> {
+  try {
+    await page.waitForFunction(() => document.documentElement.dataset.cyanprintShell === 'ready');
+  } catch (error) {
+    throw new Error(`shell never became ready: ${page.url()}; ${String(error)}`);
+  }
+}
+
 async function waitForPathname(page: Page, pathname: string): Promise<void> {
-  await page.waitForFunction(expected => window.location.pathname === expected, pathname);
+  try {
+    await page.waitForFunction(expected => window.location.pathname === expected, pathname);
+  } catch (error) {
+    throw new Error(`pathname did not become ${pathname}: ${page.url()}; ${String(error)}`);
+  }
+}
+
+// Stress knob: CYANPRINT_E2E_CPU_THROTTLE=6 slows the page like a loaded CI runner.
+async function applyCpuThrottle(page: Page): Promise<void> {
+  const rate = Number(process.env.CYANPRINT_E2E_CPU_THROTTLE ?? '1');
+  if (!(rate > 1)) {
+    return;
+  }
+  const session = await page.context().newCDPSession(page);
+  await session.send('Emulation.setCPUThrottlingRate', { rate });
 }
 
 async function launchBrowser(): Promise<Browser> {

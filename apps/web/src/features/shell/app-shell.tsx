@@ -59,7 +59,7 @@ export function AppShell({
     },
     [router],
   );
-  const { pathname, params, update } = useUrlState({
+  const { pathname, params, update, settled } = useUrlState({
     onNavigate: navigateWithoutScroll,
   });
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -75,14 +75,22 @@ export function AppShell({
   const theme = hasThemeParam ? (params.get('theme') === 'dark' ? 'dark' : 'light') : storedTheme;
 
   useEffect(() => {
-    document.documentElement.dataset.cyanprintShell = 'ready';
     return () => {
       if (deferredNavigation.current) {
         clearTimeout(deferredNavigation.current);
       }
-      delete document.documentElement.dataset.cyanprintShell;
     };
   }, []);
+
+  // "ready" means hydrated, theme preference applied and no soft navigation in flight, so automation can interact
+  // without a theme-sync router.replace racing (and superseding) the navigation it triggers.
+  const shellReady = themePreferenceReady && settled;
+  useEffect(() => {
+    document.documentElement.dataset.cyanprintShell = shellReady ? 'ready' : 'pending';
+    return () => {
+      delete document.documentElement.dataset.cyanprintShell;
+    };
+  }, [shellReady]);
 
   useEffect(() => {
     setSearchDraft(params.get('q') ?? '');
