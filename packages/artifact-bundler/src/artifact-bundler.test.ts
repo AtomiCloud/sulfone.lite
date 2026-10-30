@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBundle } from './build-bundle';
@@ -201,6 +201,79 @@ describe('bundled artifact', () => {
       if (result.temporaryDirectory) {
         await rm(result.temporaryDirectory, { recursive: true, force: true });
       }
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects a bundledEntry equal to the source entry and leaves the source untouched', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
+    try {
+      const source = 'export async function processor(input) { await Bun.write(input.outputDir + "/A.txt", "a"); }\n';
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        ['cyanprint: 4', 'kind: processor', 'owner: cyanprint', 'name: same-entry', 'bundledEntry: cyan.ts', ''].join(
+          '\n',
+        ),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Same Entry\n', 'utf8');
+      await writeFile(join(artifactDir, 'cyan.ts'), source, 'utf8');
+
+      await expect(buildBundle({ artifactDir })).rejects.toThrow('bundledEntry');
+      await expect(buildBundle({ artifactDir, dryRun: true })).rejects.toThrow('bundledEntry');
+      expect(await Bun.file(join(artifactDir, 'cyan.ts')).text()).toBe(source);
+    } finally {
+      await rm(artifactDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed rebuild keeps the last good bundle', async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-bundler-test-'));
+    try {
+      await mkdir(join(artifactDir, 'src'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        [
+          'cyanprint: 4',
+          'kind: processor',
+          'owner: cyanprint',
+          'name: keep-good',
+          'entry: src/index.ts',
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'README.md'), '# Keep Good\n', 'utf8');
+      const good = '// last good bundle\nexport async function processor() {}\n';
+      await mkdir(join(artifactDir, 'dist'), { recursive: true });
+      await writeFile(join(artifactDir, 'dist/index.js'), good, 'utf8');
+
+      const manifestWith = (entry: string): string =>
+        [
+          'cyanprint: 4',
+          'kind: processor',
+          'owner: cyanprint',
+          'name: keep-good',
+          `entry: ${entry}`,
+          'bundledEntry: dist/index.js',
+          '',
+        ].join('\n');
+      await writeFile(
+        join(artifactDir, 'src/old-shape.ts'),
+        'export default { process(files) { return files; } };',
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'cyan.yaml'), manifestWith('src/old-shape.ts'), 'utf8');
+      await expect(buildBundle({ artifactDir })).rejects.toThrow('export function processor');
+      expect(await Bun.file(join(artifactDir, 'dist/index.js')).text()).toBe(good);
+
+      await writeFile(join(artifactDir, 'src/broken.ts'), 'export async function processor( { syntax error', 'utf8');
+      await writeFile(join(artifactDir, 'cyan.yaml'), manifestWith('src/broken.ts'), 'utf8');
+      await expect(buildBundle({ artifactDir })).rejects.toThrow();
+      expect(await Bun.file(join(artifactDir, 'dist/index.js')).text()).toBe(good);
+      expect((await readdir(join(artifactDir, 'dist'))).sort()).toEqual(['index.js']);
     } finally {
       await rm(artifactDir, { recursive: true, force: true });
     }

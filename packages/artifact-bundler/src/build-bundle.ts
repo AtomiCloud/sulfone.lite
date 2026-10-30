@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import YAML from 'yaml';
 import { assertRuntimeExportArity, parseCyanManifest } from '@cyanprint/contracts';
@@ -31,6 +31,12 @@ export async function buildBundle(args: {
   const readme = await findReadmePath(args.artifactDir, manifest.readme);
   const entry = join(args.artifactDir, manifest.entry);
   const out = join(args.artifactDir, manifest.bundledEntry);
+  if (requiredRuntimeExportName(manifest.kind) && resolve(entry) === resolve(out)) {
+    throw new Error(
+      `Artifact bundledEntry "${manifest.bundledEntry}" is the same file as entry "${manifest.entry}": the bundle would overwrite your source. ` +
+        'Set bundledEntry to a build output path such as dist/index.js.',
+    );
+  }
   await stat(manifestPath);
   await stat(readme);
   await stat(entry);
@@ -114,9 +120,12 @@ export async function compileRuntimeBundle(args: {
   kind?: string;
   validateExport?: boolean;
 }): Promise<void> {
+  if (resolve(args.entrypoint) === resolve(args.output)) {
+    throw new Error(`Refusing to bundle ${args.entrypoint} over itself: output must differ from the source entry.`);
+  }
   await mkdir(dirname(args.output), { recursive: true });
-  await rm(args.output, { force: true });
   const tempOut = await makeEngineRunDir('cyanprint-bundle');
+  let staged: string | undefined;
   try {
     const result = await Bun.build({
       entrypoints: [args.entrypoint],
@@ -151,12 +160,23 @@ export async function compileRuntimeBundle(args: {
     if (!emittedFile) {
       throw new Error('Artifact build did not emit a JavaScript output.');
     }
-    await copyFile(emittedFile, args.output);
-    await stripSourceMapComments(args.output);
+    // Build and validate beside the output, then rename: a failed build must never delete
+    // or truncate the last good bundle. The unique name also keeps module-cache entries apart.
+    staged = join(
+      dirname(args.output),
+      `.${basename(args.output)}.${randomUUID()}.tmp${extname(args.output) || '.js'}`,
+    );
+    await copyFile(emittedFile, staged);
+    await stripSourceMapComments(staged);
     if (args.kind && args.validateExport !== false) {
-      await assertRequiredRuntimeExport(args.output, args.kind);
+      await assertRequiredRuntimeExport(staged, args.kind);
     }
+    await rename(staged, args.output);
+    staged = undefined;
   } finally {
+    if (staged) {
+      await rm(staged, { force: true });
+    }
     await rm(tempOut, { recursive: true, force: true });
   }
 }
