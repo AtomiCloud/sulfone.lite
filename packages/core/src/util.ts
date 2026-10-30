@@ -278,3 +278,15 @@ export function safeJoin(root: string, child: string): string {
   }
   return resolved;
 }
+
+/** Wall-clock timestamp for `.cyan_state.yaml`; honours SOURCE_DATE_EPOCH (seconds) for reproducible output. */
+export function stateTimestamp(): string {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  if (epoch !== undefined && /^\d+$/.test(epoch)) {
+    const date = new Date(Number(epoch) * 1000);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toISOString();
+    }
+  }
+  return new Date().toISOString();
+}

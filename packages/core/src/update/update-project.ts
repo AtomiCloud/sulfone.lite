@@ -26,7 +26,7 @@ import {
   writeGeneratedState,
 } from '../state/generated-state';
 import { unionFeatureIdentities } from '../probe/features';
-import { stableConfig } from '../util';
+import { stableConfig, stateTimestamp } from '../util';
 import { gitThreeWayMerge } from './git-merge';
 
 export type UpdateProjectResult = {
@@ -212,7 +212,7 @@ export async function updateProject(args: {
       ? await readFinalProjectFiles(args.projectDir, theirsPaths, preCommandFiles)
       : await readProjectFiles(args.projectDir, path => theirsPaths.has(path));
 
-    const time = new Date().toISOString();
+    const time = stateTimestamp();
     let templates = state.templates;
     for (const item of theirsGenerations) {
       // Advance the install's history whenever its regeneration changed (version float OR

@@ -1628,6 +1628,47 @@ describe('tier 2 — dependency tree', () => {
   );
 });
 
+describe('reproducible state timestamps', () => {
+  test(
+    'SOURCE_DATE_EPOCH pins installedAt and time in .cyan_state.yaml, so two generations are byte-identical',
+    async () => {
+      const first = await makeFixture('sde-a');
+      const second = await makeFixture('sde-b');
+      const saved = process.env.SOURCE_DATE_EPOCH;
+      try {
+        process.env.SOURCE_DATE_EPOCH = '1700000000';
+        const files = { 'README.md': '# hi\n' };
+        const stateA = await generateStateText(first, files);
+        await Bun.sleep(1100);
+        const stateB = await generateStateText(second, files);
+        expect(stateA).toContain('2023-11-14T22:13:20.000Z');
+        expect(stateA).toBe(stateB);
+
+        delete process.env.SOURCE_DATE_EPOCH;
+        expect(await generateStateText(first, files)).not.toContain('2023-11-14T22:13:20.000Z');
+      } finally {
+        if (saved === undefined) {
+          delete process.env.SOURCE_DATE_EPOCH;
+        } else {
+          process.env.SOURCE_DATE_EPOCH = saved;
+        }
+        await first.cleanup();
+        await second.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+async function generateStateText(fixture: Fixture, files: Record<string, string>): Promise<string> {
+  await writeVarsProcessor(fixture);
+  const template = await writeTemplate(fixture, { name: 'sde', files });
+  await rm(join(fixture.out, '.cyan_state.yaml'), { force: true });
+  await createProject({ template, outDir: fixture.out, headless: true });
+  const text = await Bun.file(join(fixture.out, '.cyan_state.yaml')).text();
+  return text.replace(/source: .*/g, 'source: <template>');
+}
+
 describe('tier 3 — multi-install (create upserts into an existing project)', () => {
   test(
     'sibling templates layer by installedAt with LWW, user edits survive the merge, and history upserts',

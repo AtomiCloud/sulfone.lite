@@ -53,6 +53,7 @@ import {
   safeJoin,
   sha256,
   stableConfig,
+  stateTimestamp,
   writeVfsFile,
 } from '../util';
 
@@ -135,7 +136,7 @@ async function createFreshProject(options: CreateProjectOptions): Promise<Create
   const finalFiles = await readFinalProjectFiles(options.outDir, generatedPaths, preCommandFiles);
   const commandSources = diffCommandSources(preCommandFiles, finalFiles, generation.ref);
   const provenance = assembleProvenance(generation.decisions, finalFiles, generation.sources, commandSources);
-  const time = new Date().toISOString();
+  const time = stateTimestamp();
   await writeGeneratedState(
     options.outDir,
     buildGeneratedState({
@@ -214,7 +215,7 @@ async function createIntoExistingProject(options: CreateProjectOptions): Promise
   }
   const base = await resolveSiblingTier(sortByInstalledAt(baseGenerations), options);
 
-  const time = new Date().toISOString();
+  const time = stateTimestamp();
   const theirsGenerations = sortByInstalledAt([
     ...otherGenerations,
     {
