@@ -1,3 +1,15 @@
+## [4.10.2](https://github.com/AtomiCloud/sulfone.lite/compare/v4.10.1...v4.10.2) (2026-10-30)
+
+
+### 📜 Documentation 📜
+
+* **skills:** cover the template republish cascade in updating skill ([#27](https://github.com/AtomiCloud/sulfone.lite/issues/27)) ([e796326](https://github.com/AtomiCloud/sulfone.lite/commit/e7963267a4ed44c5d76ddac2e43c1de943420ec7))
+
+
+### 🐛 Bug Fixes 🐛
+
+* **merge:** treat copy-scope text as text for resolvers ([#41](https://github.com/AtomiCloud/sulfone.lite/issues/41)) ([7be384c](https://github.com/AtomiCloud/sulfone.lite/commit/7be384c2f195b42f89601457a8c6b567c5107612))
+
 ## [4.10.1](https://github.com/AtomiCloud/sulfone.lite/compare/v4.10.0...v4.10.1) (2026-10-30)
 
 
