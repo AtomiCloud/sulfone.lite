@@ -8,15 +8,14 @@ permissions:
 
 jobs:
   release:
-    runs-on:
-      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
-      - nscloud-cache-size-50gb
-      - nscloud-cache-tag-atomi-nix-store-cache
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: AtomiCloud/actions.setup-nix@v3
+        with:
+          namespacelabs: 'false'
       - run: nix develop .#ci -c bun install --frozen-lockfile
       - run: nix develop .#ci -c bun run ci:local
       - name: Release packages
