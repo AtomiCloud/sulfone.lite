@@ -6,7 +6,7 @@ import type { ProbeRunReport } from '@cyanprint/contracts';
 import YAML from 'yaml';
 import { writeProbeManifest } from '../probe/manifest';
 import { STATE_FILE } from '../state/generated-state';
-import { readText, writeText } from '../util';
+import { exists, readText, writeText } from '../util';
 import { coverageByProofFailure, runTemplateTest } from './run-template-tests';
 
 // FR8 — the opt-in test-flow probe tier: coverage-by-proof enforcement (every
@@ -309,7 +309,7 @@ describe('test-flow probe tier (FR8)', () => {
       // a repo as "nothing to probe": `declaredFeatureSetForRepo()` returns `[]` directly
       // for a modern repo whose probed install declared zero features, so it is never
       // probed against the template's profile union.
-      const plainState = YAML.parse(await readText(join(outDir, STATE_FILE))) as { features?: unknown };
+      const plainState = YAML.parse(await readText(join(outDir, 'basic', STATE_FILE))) as { features?: unknown };
       expect(plainState.features).toBeUndefined();
 
       // Arrange
@@ -405,4 +405,70 @@ describe('coverage-by-proof identity keying', () => {
     // Assert
     expect(failure).toBeUndefined();
   });
+});
+
+// Destructive-path safety: the engine rm -rf's a per-case output directory and (on
+// --update-snapshots) the `expected` tree, both named by user-controlled input.
+describe('test output / expected path safety', () => {
+  async function sentinelDir(name: string): Promise<string> {
+    const dir = join(workRoot, name);
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'precious.txt'), 'keep me\n', 'utf8');
+    return dir;
+  }
+
+  test(
+    'a single-case run never wipes the user --out directory itself',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-single-out', {
+        features: [],
+        cases: [{ name: 'basic', expected: 'expected' }],
+      });
+      const outDir = await sentinelDir('out-single-precious');
+      // Act
+      const report = await runTemplateTest({ template: dir, outDir });
+      // Assert
+      expect(report).toMatchObject({ passed: 1, failed: 0 });
+      expect(await readText(join(outDir, 'precious.txt'))).toBe('keep me\n');
+    },
+    T,
+  );
+
+  test(
+    'a case named "." is rejected before it can wipe the shared out directory',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-dot-case', {
+        features: [],
+        cases: [
+          { name: 'basic', expected: 'expected' },
+          { name: '.', expected: 'expected' },
+        ],
+      });
+      const outDir = await sentinelDir('out-dot-case-precious');
+      // Act / Assert
+      await expect(runTemplateTest({ template: dir, outDir })).rejects.toThrow('resolves to the output directory');
+      expect(await readText(join(outDir, 'precious.txt'))).toBe('keep me\n');
+    },
+    T,
+  );
+
+  test(
+    'expected: . is rejected so --update-snapshots cannot wipe the template directory',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-dot-expected', {
+        features: [],
+        cases: [{ name: 'basic', expected: '.' }],
+      });
+      // Act / Assert
+      await expect(
+        runTemplateTest({ template: dir, outDir: join(workRoot, 'out-dot-expected'), updateSnapshots: true }),
+      ).rejects.toThrow('resolves to the template directory');
+      expect(await exists(join(dir, 'cyan.yaml'))).toBe(true);
+    },
+    T,
+  );
 });

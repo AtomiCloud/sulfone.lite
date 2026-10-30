@@ -12,7 +12,17 @@ import {
 import type { ArtifactKind, CyanManifest, FileOrigin, VfsFile } from '@cyanprint/contracts';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { loadManifest } from '../manifest/load-manifest';
-import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, sha256, writeText } from '../util';
+import {
+  comparePaths,
+  exists,
+  isRecord,
+  mapWithConcurrency,
+  readText,
+  safeJoin,
+  safeJoinBelow,
+  sha256,
+  writeText,
+} from '../util';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
 type ArtifactTestCase = {
@@ -224,7 +234,7 @@ function readKetoneExpectedPath(root: string, value: unknown, label: string): st
   if (!nested || typeof nested !== 'object') {
     throw new Error(`${label}.value must be a mapping.`);
   }
-  return readOptionalPath(root, (nested as Record<string, unknown>).path);
+  return readExpectedPath(root, (nested as Record<string, unknown>).path);
 }
 
 function readResolverVariation(root: string, value: unknown, label: string): ResolverVariation {
@@ -289,7 +299,7 @@ function parseManifestCase(
     return {
       name,
       variations,
-      expected: readOptionalPath(artifactDir, record.expected),
+      expected: readExpectedPath(artifactDir, record.expected),
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),
       validations,
@@ -298,7 +308,7 @@ function parseManifestCase(
   return {
     name,
     input: readOptionalPath(artifactDir, record.input) ?? safeJoin(artifactDir, `tests/${name}/input`),
-    expected: readOptionalPath(artifactDir, record.expected),
+    expected: readExpectedPath(artifactDir, record.expected),
     config: record.config,
     configFile: readOptionalPath(artifactDir, record.configFile),
     validations,
@@ -326,6 +336,12 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
     throw new Error('Test paths must be non-empty strings.');
   }
   return safeJoin(root, value);
+}
+
+// `expected` is rm -rf'd on --update-snapshots, so it must not be the artifact directory itself.
+function readExpectedPath(root: string, value: unknown): string | undefined {
+  const path = readOptionalPath(root, value);
+  return path === undefined ? undefined : safeJoinBelow(root, value as string, 'artifact directory');
 }
 
 async function artifactBundle(manifest: CyanManifest, runtimeFile: string): Promise<ArtifactBundleRef> {

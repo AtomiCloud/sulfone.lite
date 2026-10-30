@@ -3426,6 +3426,34 @@ describe('artifact tests (runArtifactTests)', () => {
   });
 
   test(
+    'rejects expected: . so updating artifact snapshots cannot wipe the artifact directory',
+    async () => {
+      const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-root-expected-'));
+      try {
+        await writeStandaloneArtifact(artifactDir, {
+          kind: 'processor',
+          name: 'root-expected',
+          runtime: 'export async function processor(input) {}\n',
+        });
+        await mkdir(join(artifactDir, 'tests/basic/input'), { recursive: true });
+        await writeFile(join(artifactDir, 'tests/basic/input/README.md'), '# Input\n', 'utf8');
+        await writeFile(
+          join(artifactDir, 'cyan.test.yaml'),
+          YAML.stringify({ cases: [{ name: 'basic', input: 'tests/basic/input', expected: '.' }] }),
+          'utf8',
+        );
+        await expect(runArtifactTests({ artifactDir, updateSnapshots: true })).rejects.toThrow(
+          'resolves to the artifact directory',
+        );
+        expect(await Bun.file(join(artifactDir, 'cyan.yaml')).exists()).toBe(true);
+      } finally {
+        await rm(artifactDir, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
     'rejects escaping processor output when updating artifact snapshots',
     async () => {
       const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-artifact-escape-'));

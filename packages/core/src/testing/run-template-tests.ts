@@ -8,7 +8,16 @@ import { checkProbeManifestDrift } from '../probe/manifest';
 import { summarizeProbeReport, type ProbeReportSummary } from '../probe/report';
 import { runProbeMatrix } from '../probe/run-probes';
 import { STATE_FILE, loadGeneratedState } from '../state/generated-state';
-import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoin, writeText } from '../util';
+import {
+  comparePaths,
+  exists,
+  isRecord,
+  mapWithConcurrency,
+  readText,
+  safeJoin,
+  safeJoinBelow,
+  writeText,
+} from '../util';
 import { parseGitignore } from './gitignore';
 import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
 
@@ -127,6 +136,8 @@ async function runTemplateManifestTests(args: {
       throw new Error(`cyan.test.yaml has duplicate case name: ${testCase.name}`);
     }
     seenNames.add(testCase.name);
+    // Fail before any case runs: a name resolving to the out dir would wipe it mid-run.
+    safeJoinBelow(args.outDir, testCase.name, 'output directory');
   }
   const perCase = await mapWithConcurrency(args.cases, args.concurrency ?? 1, testCase =>
     runTemplateCase(args, testCase),
@@ -230,9 +241,9 @@ async function runTemplateCase(
   features: ProbeFeatureIdentity[];
   probe: boolean;
 }> {
-  // safeJoin: the case name comes from cyan.test.yaml and is immediately rm -rf'd — a name
-  // like "../../x" must never resolve outside the test output directory.
-  const outDir = args.cases.length === 1 ? args.outDir : safeJoin(args.outDir, testCase.name);
+  // Always a per-case subdirectory: `--out` is the user's directory and must never be rm -rf'd
+  // itself. The case name comes from cyan.test.yaml, so it must stay strictly inside it.
+  const outDir = safeJoinBelow(args.outDir, testCase.name, 'output directory');
   let features: ProbeFeatureIdentity[] = [];
   const finish = (
     entry: TemplateTestReport['cases'][number],
@@ -533,7 +544,8 @@ function readOptionalPath(root: string, value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error('Test paths must be non-empty strings.');
   }
-  return safeJoin(root, value);
+  // `expected` is rm -rf'd on --update-snapshots, so it must not be the template directory itself.
+  return safeJoinBelow(root, value, 'template directory');
 }
 
 function readOptionalPathOrRecord(
