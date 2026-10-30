@@ -2379,6 +2379,25 @@ describe('resolveLayers identical variations', () => {
     expect(result.decisions.map(decision => decision.decision)).toEqual(['lww-override']);
   });
 
+  test('same bytes with a different mode skips the nominated resolver: the later layer wins', async () => {
+    const resolver = { ref: 'cyanprint/cat', version: 1, config: {}, files: ['**/*'] } as never;
+    const result = await resolveLayers({
+      layers: [
+        { template: 'cyanprint/a@1', files: [{ path: 'run.sh', content: 'echo\n' }], resolvers: [resolver] },
+        {
+          template: 'cyanprint/b@1',
+          files: [{ path: 'run.sh', content: 'echo\n', mode: 0o755 }],
+          resolvers: [resolver],
+        },
+      ],
+      segment: 'sibling',
+      invokeResolver: failingInvoker,
+    });
+
+    expect(result.files).toEqual([{ path: 'run.sh', content: 'echo\n', mode: 0o755 }]);
+    expect(result.decisions.map(decision => decision.decision)).toEqual(['lww-override']);
+  });
+
   test('identical binary variations pass through; differing content still records lww-override', async () => {
     const result = await resolveLayers({
       layers: [

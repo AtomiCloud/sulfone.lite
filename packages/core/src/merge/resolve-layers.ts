@@ -80,7 +80,11 @@ export async function resolveLayers(args: {
     const agreed = agreedNomination(nominations);
     const binary = variations.some(variation => variation.file.bytesBase64 !== undefined);
 
-    if (agreed && !binary) {
+    // Same bytes, different mode: nothing for a content resolver to merge, so the later layer wins
+    // (and keeps its mode) without invoking it.
+    const contentIdentical = variations.every(variation => sameBytes(variation.file, first.file));
+
+    if (agreed && !binary && !contentIdentical) {
       const content = await args.invokeResolver({
         resolver: agreed,
         path,
@@ -115,8 +119,12 @@ export async function resolveLayers(args: {
   return { files: output.sort((left, right) => comparePaths(left.path, right.path)), decisions };
 }
 
+function sameBytes(left: VfsFile, right: VfsFile): boolean {
+  return left.content === right.content && left.bytesBase64 === right.bytesBase64;
+}
+
 function sameFileContent(left: VfsFile, right: VfsFile): boolean {
-  return left.content === right.content && left.bytesBase64 === right.bytesBase64 && left.mode === right.mode;
+  return sameBytes(left, right) && left.mode === right.mode;
 }
 
 /** First `resolvers:` entry whose `files:` globs match the path — per template, per path. */
