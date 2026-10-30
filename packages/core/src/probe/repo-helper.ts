@@ -1,11 +1,10 @@
-import { readFile, rm } from 'node:fs/promises';
+import { lstat, readFile, rm } from 'node:fs/promises';
 import type { ProbeExecResult, ProbeRepo } from '@cyanprint/contracts';
 import {
   assertRootSafeDelete,
   assertRootSafeRead,
   assertRootSafeWrite,
   comparePaths,
-  exists,
   safeJoin,
   writeText,
 } from '../util';
@@ -86,7 +85,14 @@ export function createProbeRepo(
         // A missing target is a loud failure: the sabotage (or cleanup) the author
         // asked for cannot be applied, which must surface as `invalid`, not as a
         // silently "successful" mutation.
-        if (!(await exists(target))) {
+        // `lstat`, not `stat`: a dangling symlink exists (it is the thing being removed)
+        // even though its target does not.
+        if (
+          !(await lstat(target).then(
+            () => true,
+            () => false,
+          ))
+        ) {
           throw new Error('path does not exist in the sandbox');
         }
         await rm(target, { recursive: true, force: true });
