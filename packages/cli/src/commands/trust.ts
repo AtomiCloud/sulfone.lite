@@ -55,13 +55,24 @@ export async function trustCommand(argv: string[]): Promise<void> {
   let fingerprint = flagString(flags, 'pins-fingerprint');
   const registry = flagString(flags, 'registry');
   if (scope === 'version' && registry && name && version && (!integrity || fingerprint === undefined)) {
-    const resolved = await new RegistryClient(registry).batchResolve({ refs: [{ kind, owner, name, version }] });
+    const resolved = await new RegistryClient(registry)
+      .batchResolve({ refs: [{ kind, owner, name, version }] })
+      .catch((error: unknown) => {
+        throw new Error(
+          `Could not reach registry ${registry} to resolve ${owner}/${name}@${version}: ${error instanceof Error ? error.message : String(error)}. To approve offline, pass both --integrity and --pins-fingerprint.`,
+        );
+      });
     const artifact = resolved.resolved[0];
     if (!artifact) {
       throw new Error(`Registry artifact not found: ${owner}/${name}@${version}`);
     }
     integrity ??= artifactIntegrity(artifact);
     fingerprint ??= pinsFingerprint(artifact.resolvedPins);
+  }
+  if (scope === 'version' && fingerprint === undefined) {
+    console.error(
+      'warning: no --pins-fingerprint and no --registry, so the dependency pins are recorded as empty; this will not match a template with dependencies. Pass --registry or --pins-fingerprint.',
+    );
   }
   const store = await approveTrust(
     {

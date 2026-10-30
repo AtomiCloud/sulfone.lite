@@ -501,6 +501,65 @@ describe('commander cli shell', () => {
     }
   });
 
+  test('trust approve version --registry offline error names the URL and the offline route', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-offline-'));
+    try {
+      await expect(
+        createProgram().parseAsync(
+          [
+            'trust',
+            'approve',
+            'version',
+            'cyanprint/hello',
+            '--version',
+            '3',
+            '--registry',
+            'http://127.0.0.1:1',
+            '--trust-dir',
+            tempRoot,
+          ],
+          { from: 'user' },
+        ),
+      ).rejects.toThrow(/http:\/\/127\.0\.0\.1:1.*--integrity.*--pins-fingerprint/s);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('trust approve version without --registry or --pins-fingerprint warns that pins are recorded as empty', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-nopins-'));
+    const warnings: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    try {
+      console.log = () => {};
+      console.error = (message?: unknown) => {
+        warnings.push(String(message));
+      };
+      await createProgram().parseAsync(
+        [
+          'trust',
+          'approve',
+          'version',
+          'cyanprint/hello',
+          '--version',
+          '3',
+          '--integrity',
+          'sha256:abc',
+          '--trust-dir',
+          tempRoot,
+          '--json',
+        ],
+        { from: 'user' },
+      );
+      expect(warnings.join('\n')).toContain('--pins-fingerprint');
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test('trust approve version --registry records the real integrity and pins fingerprint', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-trust-registry-'));
     const logs: string[] = [];
@@ -1745,6 +1804,79 @@ describe('registry template input', () => {
       );
     } finally {
       process.chdir(original);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a real registry ref is not shadowed by a same-named local directory', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-shadow-'));
+    const original = process.cwd();
+    const artifact = {
+      id: 'template__acme__web__1',
+      kind: 'template',
+      owner: 'acme',
+      name: 'web',
+      version: '1',
+      object: { sha256: 'abc', size: 1, key: 'k' },
+      resolvedPins: [],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      await mkdir(join(tempRoot, 'acme', 'web'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(
+        resolveTemplateInput({
+          template: 'acme/web',
+          registry: server.url.toString().replace(/\/$/, ''),
+          trustDir: join(tempRoot, 'trust'),
+        }),
+      ).rejects.toThrow('trust approve version acme/web');
+    } finally {
+      process.chdir(original);
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('the untrusted hint carries --kind so template-group artifacts can be approved', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-kind-hint-'));
+    const artifact = {
+      id: 'template-group__acme__grp__1',
+      kind: 'template-group',
+      owner: 'acme',
+      name: 'grp',
+      version: '1',
+      object: { sha256: 'abc', size: 1, key: 'k' },
+      resolvedPins: [],
+    };
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [artifact], missing: [] }) });
+    try {
+      await expect(
+        resolveTemplateInput({
+          template: 'acme/grp',
+          registry: server.url.toString().replace(/\/$/, ''),
+          trustDir: join(tempRoot, 'trust'),
+        }),
+      ).rejects.toThrow('--kind template-group');
+    } finally {
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a registry miss for an existing local directory explains the missing cyan.yaml', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-miss-'));
+    const original = process.cwd();
+    const server = Bun.serve({ port: 0, fetch: () => Response.json({ resolved: [], missing: [] }) });
+    try {
+      await mkdir(join(tempRoot, 'acme', 'web'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(
+        resolveTemplateInput({ template: 'acme/web', registry: server.url.toString().replace(/\/$/, '') }),
+      ).rejects.toThrow('without a cyan.yaml');
+    } finally {
+      process.chdir(original);
+      server.stop(true);
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

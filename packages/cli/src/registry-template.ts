@@ -75,30 +75,26 @@ export async function resolveTemplateInput(args: {
   ) {
     return { templateDir: args.template, cacheHydrated: false, registryHydrated: false };
   }
-  if (
-    await stat(args.template).then(
-      entry => entry.isDirectory(),
-      () => false,
-    )
-  ) {
-    throw new Error(
-      `${args.template} is a local directory without a cyan.yaml; prefix it with ./ to use it as a path or run from the template root.`,
-    );
-  }
   const [owner, nameWithVersion] = args.template.split('/');
   const [name, version] = nameWithVersion?.split('@') ?? [];
   if (!owner || !name) {
     throw new Error(`Invalid registry template reference: ${args.template}`);
   }
   const client = new RegistryClient(args.registry);
-  const resolved = await client.batchResolve({
-    refs: [
-      { kind: 'template', owner, name, version },
-      { kind: 'template-group', owner, name, version },
-    ],
-  });
+  const resolved = await client
+    .batchResolve({
+      refs: [
+        { kind: 'template', owner, name, version },
+        { kind: 'template-group', owner, name, version },
+      ],
+    })
+    .catch(async (error: unknown) => {
+      await throwIfLocalDirectory(args.template);
+      throw error;
+    });
   const artifact = resolved.resolved.find(item => item.kind === 'template') ?? resolved.resolved[0];
   if (!artifact) {
+    await throwIfLocalDirectory(args.template);
     throw new Error(`Registry template not found: ${args.template}`);
   }
   if (!args.trusted && args.trustFixture !== 'local-registry') {
@@ -107,7 +103,7 @@ export async function resolveTemplateInput(args: {
       throw new Error(
         `${decision.reason} Run cyanprint trust approve before local execution.` +
           ` To trust this exact version: cyanprint trust approve version ${artifact.owner}/${artifact.name}` +
-          ` --version ${artifact.version} --integrity ${artifactIntegrity(artifact)}` +
+          ` --kind ${artifact.kind} --version ${artifact.version} --integrity ${artifactIntegrity(artifact)}` +
           ` --pins-fingerprint '${pinsFingerprint(artifact.resolvedPins)}'`,
       );
     }
@@ -115,6 +111,18 @@ export async function resolveTemplateInput(args: {
   const cacheDir = resolveCyanCacheDir(args.cacheDir);
   const cachePath = await hydrateRegistryArtifactWithPins(client, artifact, cacheDir, args.bypassCache, new Set());
   return { templateDir: cachePath, cacheHydrated: true, registryHydrated: true, version: artifact.version };
+}
+
+async function throwIfLocalDirectory(template: string): Promise<void> {
+  const isDirectory = await stat(template).then(
+    entry => entry.isDirectory(),
+    () => false,
+  );
+  if (isDirectory) {
+    throw new Error(
+      `${template} is a local directory without a cyan.yaml; prefix it with ./ to use it as a path or run from the template root.`,
+    );
+  }
 }
 
 type ArtifactBundleIndexEntry = {
