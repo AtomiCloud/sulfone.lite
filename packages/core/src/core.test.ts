@@ -3770,6 +3770,40 @@ describe('artifact tests (runArtifactTests)', () => {
   );
 
   test(
+    'convention resolver variations layer by input number (input-10 after input-2) and single files meet in one call',
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-input-order-'));
+      try {
+        const dirCase = join(tempRoot, 'dirs');
+        await writeStandaloneArtifact(dirCase, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        for (const [name, text] of [
+          ['input-1', 'a\n'],
+          ['input-2', 'b\n'],
+          ['input-10', 'c\n'],
+        ] as const) {
+          await mkdir(join(dirCase, 'tests/basic', name), { recursive: true });
+          await writeFile(join(dirCase, 'tests/basic', name, 'data.txt'), text, 'utf8');
+        }
+        await mkdir(join(dirCase, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(dirCase, 'tests/basic/expected/data.txt'), 'a\nb\nc\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: dirCase })).toMatchObject({ passed: 1, failed: 0 });
+
+        const fileCase = join(tempRoot, 'files');
+        await writeStandaloneArtifact(fileCase, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        await mkdir(join(fileCase, 'tests/basic'), { recursive: true });
+        await writeFile(join(fileCase, 'tests/basic/input-1.txt'), 'a\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/input-2.txt'), 'b\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/input-10.txt'), 'c\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/expected'), 'a\nb\nc\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: fileCase })).toMatchObject({ passed: 1, failed: 0 });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
     'resolver manifest cases use the global variations shape with origins (including processor origins)',
     async () => {
       const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-variations-'));
