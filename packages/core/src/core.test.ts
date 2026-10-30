@@ -1843,6 +1843,78 @@ describe('tier 3 — multi-install (create upserts into an existing project)', (
   );
 });
 
+/** Run git for test setup/inspection with a clean env (no inherited GIT_*). */
+function testGit(cwd: string, args: string[]): string {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const proc = Bun.spawnSync(['git', '-C', cwd, ...args], { env, stdout: 'pipe', stderr: 'pipe' });
+  if (proc.exitCode !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${proc.stderr.toString()}`);
+  }
+  return proc.stdout.toString();
+}
+
+describe('gitThreeWayMerge isolation', () => {
+  test('ignores inherited GIT_* env and global git config, and never touches the caller repo', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cyanprint-git-isolation-'));
+    const otherRepo = join(scratch, 'other');
+    const hooks = join(scratch, 'hooks');
+    const marker = join(scratch, 'hook-ran');
+    try {
+      await mkdir(otherRepo, { recursive: true });
+      await mkdir(hooks, { recursive: true });
+      testGit(otherRepo, ['init', '-q', '-b', 'main']);
+      await writeFile(join(otherRepo, 'keep.txt'), 'mine\n', 'utf8');
+      testGit(otherRepo, ['add', '-A']);
+      testGit(otherRepo, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'real work']);
+      const before = {
+        commits: testGit(otherRepo, ['rev-list', '--all', '--count']),
+        refs: testGit(otherRepo, ['for-each-ref']),
+        tracked: testGit(otherRepo, ['ls-files']),
+      };
+      for (const hook of ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-merge']) {
+        await writeFile(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+      }
+      const globalConfig = join(scratch, 'gitconfig');
+      await writeFile(globalConfig, `[merge]\n\tconflictStyle = diff3\n[core]\n\thooksPath = ${hooks}\n`, 'utf8');
+
+      // As if run from a git hook (GIT_DIR/GIT_INDEX_FILE point at the user's REAL repo) on a
+      // machine whose global config uses diff3 conflict markers and global hooks. Bun.spawn
+      // ignores runtime process.env edits, so the hostile env must be set on a child process.
+      const script = `import { gitThreeWayMerge } from ${JSON.stringify(join(import.meta.dir, 'update/git-merge.ts'))};
+        console.log(JSON.stringify(await gitThreeWayMerge({
+          base: [{ path: 'f.txt', content: 'a\\n' }],
+          ours: [{ path: 'f.txt', content: 'b\\n' }],
+          theirs: [{ path: 'f.txt', content: 'c\\n' }],
+        })));`;
+      const child = Bun.spawnSync([process.execPath, '-e', script], {
+        env: {
+          ...process.env,
+          GIT_DIR: join(otherRepo, '.git'),
+          GIT_WORK_TREE: otherRepo,
+          GIT_INDEX_FILE: join(otherRepo, '.git', 'index'),
+          GIT_CONFIG_GLOBAL: globalConfig,
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      expect(child.stderr.toString()).toBe('');
+      const merge = JSON.parse(child.stdout.toString()) as Awaited<ReturnType<typeof gitThreeWayMerge>>;
+
+      expect(merge.conflicts).toEqual(['f.txt']);
+      expect(merge.files.find(file => file.path === 'f.txt')?.content).toBe(
+        '<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> incoming\n',
+      );
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(testGit(otherRepo, ['rev-list', '--all', '--count'])).toBe(before.commits);
+      expect(testGit(otherRepo, ['for-each-ref'])).toBe(before.refs);
+      expect(testGit(otherRepo, ['ls-files'])).toBe(before.tracked);
+      expect(testGit(otherRepo, ['status', '--porcelain'])).toBe('');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('applyMergedTree', () => {
   test('applies deletions before writes so a merge can replace a file with a directory', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));

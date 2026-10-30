@@ -26,7 +26,7 @@ export async function gitThreeWayMerge(args: {
 }): Promise<GitThreeWayMergeResult> {
   const repo = await makeEngineRunDir('cyanprint-merge');
   try {
-    await git(repo, ['init', '-q', '-b', 'base']);
+    await git(repo, ['init', '-q', '--template=', '-b', 'base']);
     await git(repo, ['config', 'user.email', 'cyanprint@localhost']);
     await git(repo, ['config', 'user.name', 'cyanprint']);
     await git(repo, ['config', 'commit.gpgsign', 'false']);
@@ -45,7 +45,7 @@ export async function gitThreeWayMerge(args: {
     await commitAll(repo, 'current');
     const oursTracked = new Set(await listTrackedFiles(repo));
 
-    const merge = await git(repo, ['merge', '-q', '--no-edit', '-X', 'find-renames=50%', 'incoming'], {
+    const merge = await git(repo, ['merge', '-q', '--no-verify', '--no-edit', '-X', 'find-renames=50%', 'incoming'], {
       allowFailure: true,
     });
     const conflicts = merge.exitCode === 0 ? [] : await listConflictedFiles(repo);
@@ -83,7 +83,7 @@ async function commitAll(repo: string, message: string): Promise<void> {
   // -f: the generated tree may contain a .gitignore that matches its own generated
   // files; a plain `add -A` would honor it and silently drop those files from the merge.
   await git(repo, ['add', '-A', '-f']);
-  await git(repo, ['commit', '-q', '--allow-empty', '-m', message]);
+  await git(repo, ['commit', '-q', '--no-verify', '--allow-empty', '-m', message]);
 }
 
 async function listTrackedFiles(repo: string): Promise<string[]> {
@@ -111,12 +111,38 @@ async function readTree(repo: string): Promise<VfsFile[]> {
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }
 
+// Per-machine git config must not change merge output or run hooks in the temp repo.
+const ISOLATION_CONFIG = ['-c', 'core.hooksPath=/dev/null', '-c', 'merge.conflictStyle=merge'];
+const FIXED_GIT_DATE = '2000-01-01T00:00:00Z';
+
+function isolatedGitEnv(): Record<string, string> {
+  // Inherited GIT_DIR/GIT_INDEX_FILE (e.g. when run from a git hook) would point git at the caller's real repo.
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !key.startsWith('GIT_')) {
+      env[key] = value;
+    }
+  }
+  return {
+    ...env,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_AUTHOR_DATE: FIXED_GIT_DATE,
+    GIT_COMMITTER_DATE: FIXED_GIT_DATE,
+  };
+}
+
 async function git(
   repo: string,
   args: string[],
   options: { allowFailure?: boolean } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(['git', ...args], { cwd: repo, stdout: 'pipe', stderr: 'pipe' });
+  const proc = Bun.spawn(['git', ...ISOLATION_CONFIG, ...args], {
+    cwd: repo,
+    env: isolatedGitEnv(),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
