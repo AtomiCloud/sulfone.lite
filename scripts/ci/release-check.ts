@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { assertPortableLinuxBinary } from './portable-elf';
+import { assertPortableLinuxBinary, standardLoaderStatus } from './portable-elf';
 import { assertGoreleaserConfig, loadGoreleaserConfig } from './release-config';
 
 await mkdir('.tmp/release', { recursive: true });
@@ -56,10 +56,20 @@ if (linuxTarget) {
       `goreleaser linux snapshot build failed: ${snapshot.stdout.toString()}${snapshot.stderr.toString()}`,
     );
   }
-  await assertPortableLinuxBinary(releaseBinary);
-  const portableRun = Bun.spawnSync([releaseBinary, '--version'], { env: {} });
-  if (!portableRun.success || portableRun.stdout.toString().trim() !== `cyanprint ${expectedVersion}`) {
-    throw new Error('goreleaser linux binary did not run with an empty environment.');
+  const maxGlibc = await assertPortableLinuxBinary(releaseBinary);
+  console.log(`goreleaser linux binary max GLIBC required: ${maxGlibc ?? 'none'}`);
+  // Hosts without the standard loader (NixOS without nix-ld) cannot execute a portable
+  // binary, so skip the run with a warning; the ELF check above already ran.
+  const loader = await standardLoaderStatus(releaseBinary);
+  if (loader.runnable) {
+    const portableRun = Bun.spawnSync([releaseBinary, '--version'], { env: {} });
+    if (!portableRun.success || portableRun.stdout.toString().trim() !== `cyanprint ${expectedVersion}`) {
+      throw new Error('goreleaser linux binary did not run with an empty environment.');
+    }
+  } else {
+    console.warn(
+      `WARNING: ${loader.loader} is missing on this host (NixOS without nix-ld?); skipping execution of the goreleaser linux binary. The ELF portability check still ran.`,
+    );
   }
 }
 const installDocs = await Bun.file('docs/user/install.md').text();

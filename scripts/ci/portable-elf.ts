@@ -7,11 +7,19 @@
 // not found" on every non-Nix Linux. This module reads the ELF headers directly
 // (no readelf/binutils dependency) to expose the interpreter and RPATH/RUNPATH,
 // names the standard interpreter for each machine type, and fails a binary that
-// would not start on a plain distro.
+// would not start on a plain distro. It also reads the required glibc symbol
+// versions (DT_VERNEED, entries for libc.so.6) and fails a binary that needs a
+// newer glibc than the ceiling (default 2.28, override with PORTABLE_MAX_GLIBC), so
+// "portable" also means "runs on older distros", not just "no Nix paths".
+//
+// Static binaries (no PT_INTERP) are rejected on purpose: the release targets are
+// dynamically linked glibc builds whose interpreter we reset, so a binary with no
+// interpreter means the build changed shape and needs a human look.
 //
 // CLI (used by scripts/ci/portable-linux.sh and the release hooks):
 //   bun run scripts/ci/portable-elf.ts interpreter <binary>   print the standard interpreter
 //   bun run scripts/ci/portable-elf.ts check <binary...>       fail on a non-portable binary
+//                                                               (prints the max GLIBC_x.y required)
 
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
@@ -20,8 +28,14 @@ const PT_DYNAMIC = 2;
 const PT_INTERP = 3;
 const DT_NULL = 0;
 const DT_STRTAB = 5;
+const DT_VERNEED = 0x6ffffffe;
+const DT_VERNEEDNUM = 0x6fffffff;
 const DT_RPATH = 15;
 const DT_RUNPATH = 29;
+
+/** Highest GLIBC_x.y a release binary may require; override with PORTABLE_MAX_GLIBC. */
+export const DEFAULT_MAX_GLIBC = '2.28';
+const LIBC_SONAME = 'libc.so.6';
 
 export const STANDARD_INTERPRETERS: Record<number, string> = {
   [EM_X86_64]: '/lib64/ld-linux-x86-64.so.2',
@@ -33,11 +47,15 @@ export type ElfInfo = {
   interpreter: string | undefined;
   rpath: string[];
   runpath: string[];
+  /** RPATH/RUNPATH entries exist but there is no string table to read them from. */
+  unreadablePaths: boolean;
+  /** Version names (e.g. GLIBC_2.17) required from libc.so.6 via DT_VERNEED. */
+  glibcVersions: string[];
 };
 
 export function readElf(bytes: Uint8Array): ElfInfo {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const isElf = bytes.length > 64 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46;
+  const isElf = bytes.length >= 64 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46;
   if (!isElf) {
     throw new Error('not an ELF file.');
   }
@@ -66,12 +84,16 @@ export function readElf(bytes: Uint8Array): ElfInfo {
   const rpathOffsets: number[] = [];
   const runpathOffsets: number[] = [];
   let strtab: number | undefined;
+  let verneed: number | undefined;
+  let verneedNum = 0;
   if (dynamic) {
     for (let at = dynamic.offset; at + 16 <= dynamic.offset + dynamic.filesz; at += 16) {
       const tag = Number(view.getBigInt64(at, true));
       const value = Number(view.getBigUint64(at + 8, true));
       if (tag === DT_NULL) break;
       if (tag === DT_STRTAB) strtab = value;
+      if (tag === DT_VERNEED) verneed = value;
+      if (tag === DT_VERNEEDNUM) verneedNum = value;
       if (tag === DT_RPATH) rpathOffsets.push(value);
       if (tag === DT_RUNPATH) runpathOffsets.push(value);
     }
@@ -86,7 +108,77 @@ export function readElf(bytes: Uint8Array): ElfInfo {
             .split(':')
             .filter(Boolean),
     );
-  return { machine, interpreter, rpath: readPaths(rpathOffsets), runpath: readPaths(runpathOffsets) };
+  const glibcVersions =
+    strtabOffset === undefined || verneed === undefined
+      ? []
+      : readLibcVersions(bytes, view, strtabOffset, vaddrToOffset(loads, verneed), verneedNum);
+  return {
+    machine,
+    interpreter,
+    rpath: readPaths(rpathOffsets),
+    runpath: readPaths(runpathOffsets),
+    unreadablePaths: strtabOffset === undefined && rpathOffsets.length + runpathOffsets.length > 0,
+    glibcVersions,
+  };
+}
+
+// Walks the Elf64_Verneed chain (16 bytes each: version, cnt, file, aux, next) and each
+// entry's Elf64_Vernaux chain (16 bytes: hash, flags, other, name, next).
+function readLibcVersions(
+  bytes: Uint8Array,
+  view: DataView,
+  strtabOffset: number,
+  verneedOffset: number,
+  count: number,
+): string[] {
+  const versions: string[] = [];
+  let entry = verneedOffset;
+  for (let index = 0; index < count; index++) {
+    const auxCount = view.getUint16(entry + 2, true);
+    const file = readCString(bytes, strtabOffset + view.getUint32(entry + 4, true));
+    let aux = entry + view.getUint32(entry + 8, true);
+    for (let auxIndex = 0; auxIndex < auxCount; auxIndex++) {
+      if (file === LIBC_SONAME) versions.push(readCString(bytes, strtabOffset + view.getUint32(aux + 8, true)));
+      aux += view.getUint32(aux + 12, true);
+    }
+    const next = view.getUint32(entry + 12, true);
+    if (next === 0) break;
+    entry += next;
+  }
+  return versions;
+}
+
+function parseGlibc(name: string): number[] | undefined {
+  const match = /^GLIBC_(\d+(?:\.\d+)*)$/.exec(name);
+  return match ? (match[1] as string).split('.').map(Number) : undefined;
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const diff = (a[index] ?? 0) - (b[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/** Highest numeric GLIBC_x.y required (e.g. "2.17"), or undefined if none. GLIBC_PRIVATE is ignored. */
+export function maxGlibcVersion(info: ElfInfo): string | undefined {
+  let max: number[] | undefined;
+  for (const name of info.glibcVersions) {
+    const version = parseGlibc(name);
+    if (version && (max === undefined || compareVersions(version, max) > 0)) max = version;
+  }
+  return max?.join('.');
+}
+
+/** The glibc ceiling: PORTABLE_MAX_GLIBC when set, else the default. */
+export function glibcCeiling(env: Record<string, string | undefined> = process.env): string {
+  const value = env.PORTABLE_MAX_GLIBC?.trim();
+  if (!value) return DEFAULT_MAX_GLIBC;
+  if (!/^\d+(\.\d+)+$/.test(value)) {
+    throw new Error(`PORTABLE_MAX_GLIBC must look like 2.28, got "${value}".`);
+  }
+  return value;
 }
 
 export function standardInterpreter(info: ElfInfo): string {
@@ -98,7 +190,7 @@ export function standardInterpreter(info: ElfInfo): string {
 }
 
 /** Problems that stop a Linux binary from starting on a distro without Nix. Empty when portable. */
-export function portabilityProblems(info: ElfInfo): string[] {
+export function portabilityProblems(info: ElfInfo, maxGlibc: string = DEFAULT_MAX_GLIBC): string[] {
   const problems: string[] = [];
   const standard = standardInterpreter(info);
   if (info.interpreter === undefined) {
@@ -115,19 +207,47 @@ export function portabilityProblems(info: ElfInfo): string[] {
     const nix = paths.filter(path => path.startsWith('/nix/store'));
     if (nix.length > 0) problems.push(`${kind} points into the Nix store (${nix.join(':')}).`);
   }
+  if (info.unreadablePaths) {
+    problems.push('has RPATH/RUNPATH entries but no dynamic string table to read them from.');
+  }
+  const ceiling = parseGlibc(`GLIBC_${maxGlibc}`);
+  if (!ceiling) throw new Error(`invalid glibc ceiling "${maxGlibc}".`);
+  const tooNew = [...new Set(info.glibcVersions)]
+    .filter(name => {
+      const version = parseGlibc(name);
+      return version !== undefined && compareVersions(version, ceiling) > 0;
+    })
+    .sort((a, b) => compareVersions(parseGlibc(a) as number[], parseGlibc(b) as number[]));
+  if (tooNew.length > 0) {
+    problems.push(`requires glibc newer than ${maxGlibc} (${tooNew.join(', ')}); build on an older glibc.`);
+  }
   return problems;
 }
 
-export async function assertPortableLinuxBinary(path: string): Promise<void> {
+/** Throws when the binary is not portable; otherwise returns the max GLIBC_x.y it requires (if any). */
+export async function assertPortableLinuxBinary(path: string): Promise<string | undefined> {
   let problems: string[];
+  let info: ElfInfo;
   try {
-    problems = portabilityProblems(readElf(await Bun.file(path).bytes()));
+    info = readElf(await Bun.file(path).bytes());
+    problems = portabilityProblems(info, glibcCeiling());
   } catch (error) {
     throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (problems.length > 0) {
     throw new Error(`${path} is not portable to non-Nix Linux:\n- ${problems.join('\n- ')}`);
   }
+  return maxGlibcVersion(info);
+}
+
+/**
+ * Whether this host has the standard loader the (portable) binary asks for. A
+ * NixOS host without nix-ld has no /lib64/ld-linux-x86-64.so.2, so a correctly
+ * portable binary cannot be executed there even though the ELF check passes.
+ */
+export async function standardLoaderStatus(path: string): Promise<{ runnable: boolean; loader: string }> {
+  const loader = standardInterpreter(readElf(await Bun.file(path).bytes()));
+  return { runnable: await Bun.file(loader).exists(), loader };
 }
 
 function vaddrToOffset(loads: Array<{ vaddr: number; offset: number; filesz: number }>, vaddr: number): number {
@@ -151,8 +271,8 @@ async function main(args: string[]): Promise<number> {
   }
   if (command === 'check' && paths.length > 0) {
     for (const path of paths) {
-      await assertPortableLinuxBinary(path);
-      console.log(`portable linux binary: ${path}`);
+      const max = await assertPortableLinuxBinary(path);
+      console.log(`portable linux binary: ${path} (max GLIBC required: ${max ?? 'none'}, ceiling ${glibcCeiling()})`);
     }
     return 0;
   }

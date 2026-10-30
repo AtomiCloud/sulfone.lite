@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sha256 } from '@cyanprint/core';
-import { assertPortableLinuxBinary } from './portable-elf';
+import { assertPortableLinuxBinary, standardLoaderStatus } from './portable-elf';
 import { assertGoreleaserConfig, loadGoreleaserConfig } from './release-config';
 import { VENDORED_CONTRACTS, VENDORED_ROOTS } from './vendored-contracts';
 
@@ -86,48 +86,60 @@ if (portableLinux) {
       `packaged linux binary is not portable: ${portable.stdout.toString()}${portable.stderr.toString()}`,
     );
   }
-  await assertPortableLinuxBinary(binaryPath);
+  const maxGlibc = await assertPortableLinuxBinary(binaryPath);
+  console.log(`portable linux binary max GLIBC required: ${maxGlibc ?? 'none'}`);
 }
-const versionRun = Bun.spawnSync([binaryPath, '--version']);
-if (!versionRun.success || versionRun.stdout.toString().trim() !== `cyanprint ${version}`) {
-  throw new Error('packaged cyanprint binary did not report the exact package version without user-installed bun');
-}
-
-// Probe execution must survive compilation (FR12/FR13). The probe runner spawns
-// an isolated child; under `bun build --compile` `process.execPath` is THIS
-// binary, so the runner is re-entered through the hidden subcommand instead of an
-// embedded .ts path (see probe-process.ts). A `--version`-only smoke never
-// exercises that spawn, so it once shipped a binary whose every probe reported
-// `broken`. Drive a real probe end-to-end through the packaged binary and assert
-// clean verdicts so the packaging gate now catches that regression class.
-const probeRepo = '.tmp/package/probe-repo';
-const gatedFixture = 'examples/templates/probe-fixture-gated';
-const created = Bun.spawnSync([binaryPath, 'create', gatedFixture, '--out', probeRepo, '--headless', '--json']);
-if (!created.success) {
-  throw new Error(`packaged binary failed to materialize the probe fixture: ${created.stderr.toString()}`);
-}
-const featuresFile = '.tmp/package/probe-features.json';
-await writeFile(featuresFile, JSON.stringify(['tests', 'coverage', 'lint', 'ci']), 'utf8');
-const probeRun = Bun.spawnSync([
-  binaryPath,
-  'probe',
-  probeRepo,
-  '--probes',
-  gatedFixture,
-  '--features',
-  featuresFile,
-  '--json',
-]);
-if (!probeRun.success) {
-  throw new Error(`packaged cyanprint binary could not execute probes: ${probeRun.stderr.toString()}`);
-}
-const probeCounts = (JSON.parse(probeRun.stdout.toString()) as { counts: Record<string, number> }).counts;
-if (probeCounts.broken !== 0 || probeCounts.missed !== 0 || probeCounts.proven === 0 || probeCounts.caught === 0) {
-  throw new Error(
-    `packaged cyanprint binary produced degenerate probe verdicts (compiled runner spawn broken?): ${JSON.stringify(
-      probeCounts,
-    )}`,
+// The portable binary needs the standard loader (e.g. /lib64/ld-linux-x86-64.so.2). Hosts
+// without it (NixOS without nix-ld) cannot execute it, so skip every run, keep the ELF check.
+const loader = portableLinux ? await standardLoaderStatus(binaryPath) : { runnable: true, loader: '' };
+const binaryExecuted = loader.runnable;
+if (!binaryExecuted) {
+  console.warn(
+    `WARNING: ${loader.loader} is missing on this host (NixOS without nix-ld?); skipping execution of the packaged binary. The ELF portability check still ran.`,
   );
+}
+if (binaryExecuted) {
+  const versionRun = Bun.spawnSync([binaryPath, '--version']);
+  if (!versionRun.success || versionRun.stdout.toString().trim() !== `cyanprint ${version}`) {
+    throw new Error('packaged cyanprint binary did not report the exact package version without user-installed bun');
+  }
+
+  // Probe execution must survive compilation (FR12/FR13). The probe runner spawns
+  // an isolated child; under `bun build --compile` `process.execPath` is THIS
+  // binary, so the runner is re-entered through the hidden subcommand instead of an
+  // embedded .ts path (see probe-process.ts). A `--version`-only smoke never
+  // exercises that spawn, so it once shipped a binary whose every probe reported
+  // `broken`. Drive a real probe end-to-end through the packaged binary and assert
+  // clean verdicts so the packaging gate now catches that regression class.
+  const probeRepo = '.tmp/package/probe-repo';
+  const gatedFixture = 'examples/templates/probe-fixture-gated';
+  const created = Bun.spawnSync([binaryPath, 'create', gatedFixture, '--out', probeRepo, '--headless', '--json']);
+  if (!created.success) {
+    throw new Error(`packaged binary failed to materialize the probe fixture: ${created.stderr.toString()}`);
+  }
+  const featuresFile = '.tmp/package/probe-features.json';
+  await writeFile(featuresFile, JSON.stringify(['tests', 'coverage', 'lint', 'ci']), 'utf8');
+  const probeRun = Bun.spawnSync([
+    binaryPath,
+    'probe',
+    probeRepo,
+    '--probes',
+    gatedFixture,
+    '--features',
+    featuresFile,
+    '--json',
+  ]);
+  if (!probeRun.success) {
+    throw new Error(`packaged cyanprint binary could not execute probes: ${probeRun.stderr.toString()}`);
+  }
+  const probeCounts = (JSON.parse(probeRun.stdout.toString()) as { counts: Record<string, number> }).counts;
+  if (probeCounts.broken !== 0 || probeCounts.missed !== 0 || probeCounts.proven === 0 || probeCounts.caught === 0) {
+    throw new Error(
+      `packaged cyanprint binary produced degenerate probe verdicts (compiled runner spawn broken?): ${JSON.stringify(
+        probeCounts,
+      )}`,
+    );
+  }
 }
 const binaryBytes = await Bun.file(binaryPath).bytes();
 const checksum = sha256(binaryBytes);
@@ -145,8 +157,8 @@ console.log(
     embeddedBun: true,
     portableLinuxBinary: portableLinux,
     name: packageJson.name,
-    binaryExecuted: true,
-    probeExecuted: true,
+    binaryExecuted,
+    probeExecuted: binaryExecuted,
     checksums: true,
   }),
 );
