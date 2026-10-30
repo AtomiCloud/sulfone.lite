@@ -102,7 +102,7 @@ describe('registry client retry', () => {
       hit < 2 ? new Response('boom', { status: 500 }) : Response.json({ artifacts: [] }),
     );
     const client = new RegistryClient(server.url, undefined, undefined, fast);
-    await client.batchResolve({} as never);
+    await client.batchResolve({ refs: [] });
     expect(server.hits()).toBe(2);
   });
 
