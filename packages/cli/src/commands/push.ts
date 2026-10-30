@@ -142,10 +142,10 @@ export async function pushCommand(argv: string[]): Promise<void> {
       owner: manifest.owner,
       name: manifest.name,
       objects: {
-        manifest: manifestObject,
-        ...(readmeObject ? { readme: readmeObject } : {}),
-        bundle: bundleObject,
-        ...(archiveObject ? { archive: archiveObject } : {}),
+        manifest: objectSpec(manifestObject),
+        ...(readmeObject ? { readme: objectSpec(readmeObject) } : {}),
+        bundle: objectSpec(bundleObject),
+        ...(archiveObject ? { archive: objectSpec(archiveObject) } : {}),
       },
     });
     await client.putUploadObject(upload.urls.manifest, manifestObject.payload);
@@ -231,4 +231,8 @@ async function findReadmePath(artifactDir: string, declaredReadme: string): Prom
   }
   const match = (await readdir(artifactDir)).find(name => /^readme(?:\.[a-z0-9]+)?$/i.test(name));
   return match ? join(artifactDir, match) : undefined;
+}
+
+function objectSpec(object: { sha256: string; size: number }): { sha256: string; size: number } {
+  return { sha256: object.sha256, size: object.size };
 }

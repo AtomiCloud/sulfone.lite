@@ -1615,6 +1615,72 @@ describe('registry template hydration', () => {
 });
 
 describe('push command', () => {
+  test('upload start request carries only sha256 and size, never payload bytes', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-push-start-'));
+    const artifactDir = join(tempRoot, 'template');
+    let startBody: unknown;
+    const putBodies: Record<string, number> = {};
+    const originalToken = process.env.CYANPRINT_TOKEN;
+    const originalLog = console.log;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === '/batch-resolve') {
+          return Response.json({ resolved: [], missing: [] });
+        }
+        if (url.pathname === '/uploads/start') {
+          startBody = await request.json();
+          return Response.json({
+            uploadId: 'upload-1',
+            objects: {},
+            urls: { manifest: '/put/manifest', bundle: '/put/bundle', readme: '/put/readme', archive: '/put/archive' },
+          });
+        }
+        if (url.pathname.startsWith('/put/')) {
+          putBodies[url.pathname] = (await request.arrayBuffer()).byteLength;
+          return Response.json({ ok: true });
+        }
+        if (url.pathname === '/uploads/finalize') {
+          return Response.json({ artifact: {} });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      await mkdir(join(artifactDir, 'template'), { recursive: true });
+      await writeFile(
+        join(artifactDir, 'cyan.yaml'),
+        ['cyanprint: 4', 'kind: template', 'owner: cyanprint', 'name: start-body', 'bundledEntry: cyan.ts', ''].join(
+          '\n',
+        ),
+        'utf8',
+      );
+      await writeFile(join(artifactDir, 'cyan.ts'), 'export default async () => ({});\n', 'utf8');
+      await writeFile(join(artifactDir, 'template', 'a.txt'), 'archive payload\n', 'utf8');
+      process.env.CYANPRINT_TOKEN = 'test-token';
+      console.log = () => {};
+
+      await pushCommand([artifactDir, '--registry', server.url.toString().replace(/\/$/, ''), '--json']);
+
+      const objects = (startBody as { objects: Record<string, Record<string, unknown>> }).objects;
+      expect(Object.keys(objects).sort()).toEqual(['archive', 'bundle', 'manifest']);
+      for (const object of Object.values(objects)) {
+        expect(Object.keys(object).sort()).toEqual(['sha256', 'size']);
+      }
+      expect(putBodies['/put/archive']).toBe(objects.archive?.size as number);
+    } finally {
+      console.log = originalLog;
+      if (originalToken === undefined) {
+        delete process.env.CYANPRINT_TOKEN;
+      } else {
+        process.env.CYANPRINT_TOKEN = originalToken;
+      }
+      server.stop(true);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test('normalizes ownerless dependency refs to the publishing owner before registry resolve', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-push-owner-'));
     const artifactDir = join(tempRoot, 'template');
