@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, readlink, rm, stat, symlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import {
   invokePlugin,
@@ -1412,7 +1412,12 @@ export async function readFinalProjectFiles(
  * path. This is the reference the post-command reconcile restores the surface to, so any
  * probe path a command touches — regardless of the filesystem operation — is fully undone.
  */
-type ProbeSurfaceSnapshot = { files: Map<string, Buffer>; dirs: Set<string> };
+type ProbeSurfaceSnapshot = {
+  files: Map<string, Buffer>;
+  dirs: Set<string>;
+  /** Symlinks / special files that already existed: `link:<target>` or `special`. */
+  others: Map<string, string>;
+};
 
 /**
  * What a probe path currently resolves to on disk. Files (and symlinks, which `walkOutputFiles`
@@ -1432,39 +1437,48 @@ async function walkProbeSurface(
   if (!info?.isDirectory()) {
     return;
   }
-  const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.name === '.git') {
-        continue;
-      }
-      const abs = join(dir, entry.name);
-      const rel = relative(projectDir, abs)
-        .split(/[\\/]+/)
-        .join('/');
-      const isProbe = isTemplateProbePath(rel);
-      if (entry.isDirectory()) {
-        if (isProbe) {
-          visit.onDir(rel);
+  const walk = async (
+    abs: string,
+    rel: string,
+    entry: { isDirectory(): boolean; isFile(): boolean },
+  ): Promise<void> => {
+    if (entry.isDirectory()) {
+      visit.onDir(rel);
+      for (const child of await readdir(abs, { withFileTypes: true })) {
+        if (child.name !== '.git') {
+          await walk(join(abs, child.name), `${rel}/${child.name}`, child);
         }
-        await walk(abs);
-      } else if (entry.isFile()) {
-        if (isProbe) {
-          await visit.onFile(rel, abs);
-        }
-      } else if (isProbe) {
-        // A symlink / special file at a probe path: never a regular file, so the snapshot
-        // never captures it as user content — the reconcile removes it as command output.
-        await visit.onOther?.(rel, abs);
       }
+    } else if (entry.isFile()) {
+      await visit.onFile(rel, abs);
+    } else {
+      // A symlink / special file at a probe path: never a regular file, so it is tracked
+      // separately from user file content (see `describeProbeOther`).
+      await visit.onOther?.(rel, abs);
     }
   };
-  await walk(projectDir);
+  // The probe surface is only ever the ROOT `probes` entry and `probes.yaml`
+  // (`isTemplateProbePath`), so walk just those instead of the whole project.
+  for (const rel of ['probes.yaml', 'probes']) {
+    const abs = join(projectDir, rel);
+    const entry = await lstat(abs).catch(() => undefined);
+    if (entry) {
+      await walk(abs, rel, entry);
+    }
+  }
+}
+
+/** Identity of a symlink (its target) or special file at a probe path. */
+async function describeProbeOther(abs: string): Promise<string> {
+  const info = await lstat(abs);
+  return info.isSymbolicLink() ? `link:${await readlink(abs)}` : 'special';
 }
 
 /** Capture every probe file's bytes and every probe directory currently on disk. */
 async function snapshotProbeSurface(projectDir: string): Promise<ProbeSurfaceSnapshot> {
   const files = new Map<string, Buffer>();
   const dirs = new Set<string>();
+  const others = new Map<string, string>();
   await walkProbeSurface(projectDir, {
     onFile: async (rel, abs) => {
       files.set(rel, await readFile(abs));
@@ -1472,8 +1486,11 @@ async function snapshotProbeSurface(projectDir: string): Promise<ProbeSurfaceSna
     onDir: rel => {
       dirs.add(rel);
     },
+    onOther: async (rel, abs) => {
+      others.set(rel, await describeProbeOther(abs));
+    },
   });
-  return { files, dirs };
+  return { files, dirs, others };
 }
 
 /**
@@ -1508,8 +1525,12 @@ async function reconcileProbeSurface(
     onDir: rel => {
       currentDirs.add(rel);
     },
-    onOther: async rel => {
-      // Symlink / special file at a probe path — never legitimate output; remove it.
+    onOther: async (rel, abs) => {
+      // A symlink / special file that was already there and is unchanged is the user's own
+      // (e.g. `probes -> ../shared/probes`) and stays; anything else is command output.
+      if (before.others.get(rel) === (await describeProbeOther(abs))) {
+        return;
+      }
       await removeEntry(rel);
       touched.push(rel);
     },
@@ -1566,6 +1587,17 @@ async function reconcileProbeSurface(
     await mkdir(safeJoin(projectDir, dir), { recursive: true });
   }
 
+  // 5. Restore pre-existing symlinks a command deleted or retargeted (the retargeted one was
+  //    removed during the walk above, so it is simply absent here). Special files cannot be
+  //    recreated; they are only ever left alone.
+  for (const [rel, identity] of before.others) {
+    if (identity.startsWith('link:') && !(await lstat(safeJoin(projectDir, rel)).catch(() => undefined))) {
+      await mkdir(dirname(safeJoin(projectDir, rel)), { recursive: true });
+      await symlink(identity.slice('link:'.length), safeJoin(projectDir, rel));
+      touched.push(rel);
+    }
+  }
+
   await assertProbeSurfaceRestored(projectDir, before);
 
   if (touched.length > 0) {
@@ -1601,11 +1633,17 @@ async function assertProbeSurfaceRestored(projectDir: string, before: ProbeSurfa
         drift.push(rel);
       }
     },
-    onOther: async rel => {
-      drift.push(rel);
+    onOther: async (rel, abs) => {
+      seen.add(rel);
+      if (before.others.get(rel) !== (await describeProbeOther(abs))) {
+        drift.push(rel);
+      }
     },
   });
-  for (const rel of before.files.keys()) {
+  for (const rel of [
+    ...before.files.keys(),
+    ...[...before.others].filter(([, id]) => id !== 'special').map(([r]) => r),
+  ]) {
     if (!seen.has(rel)) {
       drift.push(rel);
     }
