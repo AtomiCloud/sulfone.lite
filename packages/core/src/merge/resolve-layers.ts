@@ -1,5 +1,5 @@
 import type { FileOrigin, Provenance, ProvenanceSegment, ResolverDeclaration, VfsFile } from '@cyanprint/contracts';
-import { comparePaths, stableConfig } from '../util';
+import { comparePaths, decodeText, stableConfig } from '../util';
 
 /**
  * One layer in a resolution scope: a contributing template's full file set plus the
@@ -78,7 +78,8 @@ export async function resolveLayers(args: {
     const winner = variations[variations.length - 1] ?? first;
     const nominations = variations.map(variation => nominateResolver(variation.layer.resolvers, path));
     const agreed = agreedNomination(nominations);
-    const binary = variations.some(variation => variation.file.bytesBase64 !== undefined);
+    const texts = variations.map(variation => fileText(variation.file));
+    const binary = texts.some(text => text === undefined);
 
     // Same bytes, different mode: nothing for a content resolver to merge, so the later layer wins
     // (and keeps its mode) without invoking it.
@@ -90,7 +91,7 @@ export async function resolveLayers(args: {
         path,
         files: variations.map((variation, index) => ({
           path,
-          content: variation.file.content ?? '',
+          content: texts[index] ?? '',
           origin: contributors[index] as FileOrigin,
         })),
       });
@@ -119,8 +120,27 @@ export async function resolveLayers(args: {
   return { files: output.sort((left, right) => comparePaths(left.path, right.path)), decisions };
 }
 
+function fileBytes(file: VfsFile): Buffer {
+  return file.bytesBase64 !== undefined
+    ? Buffer.from(file.bytesBase64, 'base64')
+    : Buffer.from(file.content ?? '', 'utf8');
+}
+
+/**
+ * Text view of a file, or undefined for a true binary. `content` is text by construction; `bytesBase64`
+ * is text only when it decodes as UTF-8 without NUL — Copy scopes emit every file (text included) as
+ * `bytesBase64`, so the carrying field says nothing about whether the file is binary.
+ */
+function fileText(file: VfsFile): string | undefined {
+  if (file.bytesBase64 === undefined) {
+    return file.content ?? '';
+  }
+  return decodeText(fileBytes(file));
+}
+
+/** Same bytes regardless of which field carries them (Copy text arrives as `bytesBase64`). */
 function sameBytes(left: VfsFile, right: VfsFile): boolean {
-  return left.content === right.content && left.bytesBase64 === right.bytesBase64;
+  return fileBytes(left).equals(fileBytes(right));
 }
 
 function sameFileContent(left: VfsFile, right: VfsFile): boolean {

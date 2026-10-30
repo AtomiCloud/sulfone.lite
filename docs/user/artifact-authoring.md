@@ -76,6 +76,8 @@ export default async function cyan(prompt, ctx) {
 
 Use `type: 'Copy'` for binary assets or files that should not be rendered as text. Use `type: 'Template'` when files need prompt data.
 
+A `Copy` scope is not "binary" for merging: when several layers emit the same path, each file is classified by its bytes (valid UTF-8 without NUL is text), not by its scope type. Copy-scope text files compare equal to identical Template-scope content, reach a nominated resolver as `content`, and are written back byte-exact when no resolver runs; only true binaries (images, archives, ...) are always last-writer-wins.
+
 ## Write Runtime Artifacts
 
 Each artifact imports the types it uses from `@cyanprint/sdk` (type-only — erased at bundle; the runtime injects the helper) and annotates its parameters:

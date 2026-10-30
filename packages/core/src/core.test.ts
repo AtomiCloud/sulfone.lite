@@ -1214,6 +1214,49 @@ describe('tier 1 — processor outputs', () => {
   );
 
   test(
+    'a Copy-scope text file is resolver-eligible: a Copy and a Template invocation merge through the resolver',
+    async () => {
+      const fixture = await makeFixture('tier1-copy-text');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'append', runtime: appendProcessorRuntime });
+        await writeArtifact(fixture, { kind: 'resolver', name: 'origins', runtime: originResolverRuntime });
+        const template = await writeTemplate(fixture, {
+          name: 'tier1copy',
+          files: { 'docs/note.md': 'start' },
+          processors: ['cyanprint/append'],
+          resolvers: [{ ref: 'cyanprint/origins', config: {}, files: ['docs/**'] }],
+          cyanTs: [
+            'export default async function cyan() {',
+            '  return {',
+            '    processors: [',
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Copy' }] },",
+            "      { name: 'cyanprint/append', files: [{ root: 'template', glob: 'docs/**/*', type: 'Template' }], config: { suffix: 'B' } },",
+            '    ],',
+            '  };',
+            '}',
+            '',
+          ].join('\n'),
+        });
+
+        await createProject({ template, outDir: fixture.out, headless: true });
+
+        // Copy emits the file as bytesBase64, but it is text: the resolver ran instead of silent LWW.
+        expect(await readOut(fixture.out, 'docs/note.md')).toBe(
+          'cyanprint/tier1copy@local:0:cyanprint/append#0\ncyanprint/tier1copy@local:1:cyanprint/append#1\n',
+        );
+        const state = await loadGeneratedState(fixture.out);
+        const decision = state.provenance.find(entry => entry.path === 'docs/note.md');
+        expect(decision?.decision).toBe('resolver-merged');
+        expect(decision?.resolver).toBe('cyanprint/origins');
+        expect(lwwEntries(state.provenance)).toBe(0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
     'merges renamed scoped processor output beside independent processor output',
     async () => {
       const fixture = await makeFixture('tier1-rename');
@@ -2470,6 +2513,105 @@ describe('resolveLayers identical variations', () => {
     ]);
     expect(result.files.find(file => file.path === 'shared.txt')?.content).toBe('from b\n');
     expect(result.files.find(file => file.path === 'logo.bin')?.bytesBase64).toBe('AAE=');
+  });
+});
+
+describe('resolveLayers copy-scope text', () => {
+  const b64 = (text: string | Uint8Array): string => Buffer.from(text).toString('base64');
+  const jsonResolver = { owner: 'cyanprint', name: 'json', version: '1', config: {}, files: ['**/*.json'] } as never;
+  const failingInvoker = async (): Promise<string> => {
+    throw new Error('resolver must not be invoked');
+  };
+
+  test('identical LICENSE from a Copy scope (bytesBase64) and a Template scope (content) records no decision', async () => {
+    const result = await resolveLayers({
+      layers: [
+        { template: 'cyanprint/a@1', files: [{ path: 'LICENSE', bytesBase64: b64('MIT\r\n﻿x\n') }], resolvers: [] },
+        { template: 'cyanprint/b@1', files: [{ path: 'LICENSE', content: 'MIT\r\n﻿x\n' }], resolvers: [] },
+      ],
+      segment: 'dependency',
+      invokeResolver: failingInvoker,
+    });
+
+    expect(result.decisions).toEqual([]);
+    // Output keeps the first variation's representation, byte-exact (no newline/BOM changes).
+    expect(result.files).toEqual([{ path: 'LICENSE', bytesBase64: b64('MIT\r\n﻿x\n') }]);
+  });
+
+  test('package.json from two Copy scopes reaches the agreed json resolver as text content', async () => {
+    const seen: string[][] = [];
+    const result = await resolveLayers({
+      layers: [
+        {
+          template: 'cyanprint/a@1',
+          files: [{ path: 'package.json', bytesBase64: b64('{"a":1}\n') }],
+          resolvers: [jsonResolver],
+        },
+        {
+          template: 'cyanprint/b@1',
+          files: [{ path: 'package.json', bytesBase64: b64('{"b":2}\n') }],
+          resolvers: [jsonResolver],
+        },
+      ],
+      segment: 'dependency',
+      invokeResolver: async ({ files }) => {
+        seen.push(files.map(file => file.content));
+        return '{"a":1,"b":2}\n';
+      },
+    });
+
+    expect(seen).toEqual([['{"a":1}\n', '{"b":2}\n']]);
+    expect(result.files).toEqual([{ path: 'package.json', content: '{"a":1,"b":2}\n' }]);
+    expect(result.decisions.map(decision => decision.decision)).toEqual(['resolver-merged']);
+    expect(result.decisions[0]?.resolver).toBe('cyanprint/json@1');
+  });
+
+  test('a Copy scope text file and a Template scope variation merge through the resolver', async () => {
+    const result = await resolveLayers({
+      layers: [
+        {
+          template: 'cyanprint/a@1',
+          files: [{ path: 'x.json', bytesBase64: b64('{"a":1}') }],
+          resolvers: [jsonResolver],
+        },
+        { template: 'cyanprint/b@1', files: [{ path: 'x.json', content: '{"b":2}' }], resolvers: [jsonResolver] },
+      ],
+      segment: 'sibling',
+      invokeResolver: async ({ files }) => files.map(file => file.content).join('+'),
+    });
+
+    expect(result.files).toEqual([{ path: 'x.json', content: '{"a":1}+{"b":2}' }]);
+  });
+
+  test('a real binary (PNG bytes) stays last-writer-wins and keeps bytesBase64', async () => {
+    const png = (tail: number): Uint8Array =>
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, tail]);
+    const resolver = { owner: 'cyanprint', name: 'json', version: '1', config: {}, files: ['**/*'] } as never;
+    const result = await resolveLayers({
+      layers: [
+        { template: 'cyanprint/a@1', files: [{ path: 'logo.png', bytesBase64: b64(png(1)) }], resolvers: [resolver] },
+        { template: 'cyanprint/b@1', files: [{ path: 'logo.png', bytesBase64: b64(png(2)) }], resolvers: [resolver] },
+      ],
+      segment: 'dependency',
+      invokeResolver: failingInvoker,
+    });
+
+    expect(result.files).toEqual([{ path: 'logo.png', bytesBase64: b64(png(2)) }]);
+    expect(result.decisions.map(decision => decision.decision)).toEqual(['lww-override']);
+  });
+
+  test('differing Copy text without a nominated resolver is last-writer-wins and stays byte-exact', async () => {
+    const result = await resolveLayers({
+      layers: [
+        { template: 'cyanprint/a@1', files: [{ path: 'n.txt', bytesBase64: b64('a\r\n') }], resolvers: [] },
+        { template: 'cyanprint/b@1', files: [{ path: 'n.txt', bytesBase64: b64('﻿b') }], resolvers: [] },
+      ],
+      segment: 'dependency',
+      invokeResolver: failingInvoker,
+    });
+
+    expect(result.files).toEqual([{ path: 'n.txt', bytesBase64: b64('﻿b') }]);
+    expect(result.decisions.map(decision => decision.decision)).toEqual(['lww-override']);
   });
 });
 
