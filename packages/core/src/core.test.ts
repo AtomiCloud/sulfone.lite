@@ -26,8 +26,6 @@ import {
   readProjectFiles,
   processorCacheKey,
   processorCacheDir,
-  readProcessorCache,
-  writeProcessorCache,
   migrateGeneratedState,
   readProcessorCache,
   resolveCyanCacheDir,
@@ -4119,7 +4117,7 @@ describe('processor output cache', () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'cyanprint-pcache-unwritable-'));
     try {
       // A regular file where the cache root should be makes every mkdir/write fail.
-      await writeFile(join(cacheDir, 'processor-output'), 'not a directory');
+      await writeFile(join(cacheDir, 'processor-output-v2'), 'not a directory');
       await expect(
         writeProcessorCache({ key: 'k1', files: [{ path: 'a.txt', content: 'a' }], cacheDir }),
       ).resolves.toBeUndefined();

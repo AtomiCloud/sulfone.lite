@@ -1966,6 +1966,7 @@ describe('cache command', () => {
       await mkdir(join(root, 'template', `cyanprint-entry-${'a'.repeat(24)}`), { recursive: true });
       await writeFile(join(root, 'template', `cyanprint-corrupt-${'b'.repeat(24)}`), 'bad', 'utf8');
       await mkdir(join(root, 'processor-output', 'c'.repeat(64)), { recursive: true });
+      await mkdir(join(root, 'processor-output-v2', 'd'.repeat(64)), { recursive: true });
 
       await captureCache(['clean', '--cache-dir', root]);
       expect(await readdir(root)).toEqual([]);

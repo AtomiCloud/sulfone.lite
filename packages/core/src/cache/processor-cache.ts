@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { VfsFile } from '@cyanprint/contracts';
 import { sha256, stableConfig } from '../util';
-import { claimCacheRoot, resolveCyanCacheDir } from './cache-paths';
+import { PROCESSOR_OUTPUT_DIR, claimCacheRoot, resolveCyanCacheDir } from './cache-paths';
 
 /**
  * Content-addressed cache of hermetic processor outputs. A processor's output is a pure
@@ -26,12 +26,8 @@ export function processorCacheKey(args: { integrity: string; config: unknown; in
   return sha256(parts.join(''));
 }
 
-// Bumped to v2 when entries started carrying the executable bit (`mode`): v1 entries lack it, and a
-// mode-free input keeps the same key, so a warm v1 cache would otherwise hand back +x-less output.
-const PROCESSOR_CACHE_DIRNAME = 'processor-output-v2';
-
 export function processorCacheDir(cacheDirOverride?: string): string {
-  return join(resolveCyanCacheDir(cacheDirOverride), PROCESSOR_CACHE_DIRNAME);
+  return join(resolveCyanCacheDir(cacheDirOverride), PROCESSOR_OUTPUT_DIR);
 }
 
 function entryPath(root: string, key: string): string {
