@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Answers, CompatibilityWarning, InstalledTemplate, PromptAdapter } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
 import {
@@ -13,6 +15,7 @@ import {
   resolveSiblingTier,
   runPostGenerationCommands,
   sortByInstalledAt,
+  TEMPLATE_SOURCE_KIND,
   type GenerationProgressEvent,
   type TemplateSourceResolver,
   type TreeGeneration,
@@ -102,6 +105,7 @@ export async function updateProject(args: {
       generation: await regenerateInstalledTemplate(entry, resolveSource, generationOptions),
     });
   }
+  await assertLocalTemplatesUnchanged(baseGenerations);
 
   // Theirs: targets execute their new versions, reusing saved answers (only new
   // questions prompt; prior values as defaults). Untouched templates reuse their base
@@ -296,4 +300,42 @@ export async function updateProject(args: {
 function matchesTemplateFilter(entry: InstalledTemplate, filter: string): boolean {
   const bare = filter.split('@')[0] ?? filter;
   return bare === `${entry.owner}/${entry.name}` || bare === entry.name;
+}
+
+/**
+ * A local-path install's base is regenerated from the template as it is on disk NOW, so any
+ * change to that template since install makes base == theirs and every upstream change would
+ * be silently dropped. The old content cannot be reconstructed, so refuse instead of
+ * reporting a success that lost changes. Unchanged templates (same recorded fingerprint)
+ * are genuinely up to date and proceed.
+ */
+async function assertLocalTemplatesUnchanged(
+  baseGenerations: Array<{ entry: InstalledTemplate; generation: TreeGeneration }>,
+): Promise<void> {
+  for (const { entry, generation } of baseGenerations) {
+    if (!(await stat(join(entry.source, 'cyan.yaml')).catch(() => undefined))) {
+      continue;
+    }
+    const current = new Map(
+      generation.artifacts.filter(item => item.kind === TEMPLATE_SOURCE_KIND).map(item => [item.name, item.integrity]),
+    );
+    const recorded = entry.artifacts.filter(item => item.kind === TEMPLATE_SOURCE_KIND);
+    const unchanged = recorded.length > 0 && recorded.every(item => current.get(item.name) === item.integrity);
+    if (!unchanged) {
+      throw new CyanError(
+        problem(
+          'validation',
+          'local_template_not_updatable',
+          `Cannot update ${entry.owner}/${entry.name}: it was installed from the local path ${entry.source}, ` +
+            (recorded.length === 0
+              ? 'and the project state has no record of its content to compare against.'
+              : 'and that template has changed since it was installed.') +
+            ' A local-path install cannot be updated because its original (base) content cannot be reproduced, ' +
+            'so the update would silently drop your changes. Publish the template to a registry and install it from ' +
+            'there, or re-create the project from the local template.',
+          { template: `${entry.owner}/${entry.name}`, source: entry.source },
+        ),
+      );
+    }
+  }
 }

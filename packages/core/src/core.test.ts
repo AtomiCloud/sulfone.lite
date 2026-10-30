@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { CyanError } from '@cyanprint/contracts';
 import { resolveCyanRunDir } from '@cyanprint/contracts/run-dir';
 import YAML from 'yaml';
 import {
@@ -2398,7 +2399,7 @@ describe('update', () => {
   );
 
   test(
-    'update of an unversioned local source is a no-op by design',
+    'update of an unchanged local source is genuinely up to date',
     async () => {
       const fixture = await makeFixture('update-local');
       try {
@@ -2412,6 +2413,52 @@ describe('update', () => {
         expect(update.updated).toEqual([]);
         const state = await loadGeneratedState(fixture.out);
         expect(state.templates[0]?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update refuses a local source that changed since install instead of silently dropping the change',
+    async () => {
+      const fixture = await makeFixture('update-local-changed');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'local-edit', files: { 'README.md': 'v1\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        await writeFile(join(template, 'template', 'README.md'), 'v2\n', 'utf8');
+
+        const failure = await updateProject({ projectDir: fixture.out, headless: true }).catch(error => error);
+
+        expect(failure).toBeInstanceOf(CyanError);
+        expect((failure as CyanError).problem.code).toBe('local_template_not_updatable');
+        expect((failure as CyanError).message).toContain('cannot be updated');
+        expect(await readOut(fixture.out, 'README.md')).toBe('v1\n');
+        expect((await loadGeneratedState(fixture.out)).templates[0]?.history.length).toBe(1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'update refuses a local install whose state has no recorded template fingerprint',
+    async () => {
+      const fixture = await makeFixture('update-local-legacy');
+      try {
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'local-legacy', files: { 'README.md': 'v1\n' } });
+        await createProject({ template, outDir: fixture.out, headless: true });
+        const state = await loadGeneratedState(fixture.out);
+        for (const entry of state.templates) {
+          entry.artifacts = entry.artifacts.filter(item => item.kind !== 'template-source');
+        }
+        await writeGeneratedState(fixture.out, state);
+
+        await expect(updateProject({ projectDir: fixture.out, headless: true })).rejects.toThrow('no record');
       } finally {
         await fixture.cleanup();
       }

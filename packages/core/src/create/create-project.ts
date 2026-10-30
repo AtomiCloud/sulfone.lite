@@ -54,6 +54,7 @@ import {
   sha256,
   stableConfig,
   stateTimestamp,
+  templateDirIntegrity,
   writeVfsFile,
 } from '../util';
 
@@ -409,6 +410,7 @@ type GenerationContext = {
   deterministicState: Record<string, unknown>;
   interactive: boolean;
   bundles: Map<string, ArtifactBundleRef>;
+  templateSources: Map<string, InstalledTemplate['artifacts'][number]>;
   warnings: CompatibilityWarning[];
   features: ProbeFeatureIdentity[];
   localFallback?: boolean;
@@ -442,6 +444,7 @@ export async function generateTemplateTree(options: {
     deterministicState,
     interactive: options.headless === false,
     bundles: new Map(),
+    templateSources: new Map(),
     warnings: [],
     features: [],
     localFallback: options.localFallback,
@@ -471,13 +474,16 @@ export async function generateTemplateTree(options: {
     commands: generated.commands,
     decisions: context.decisions,
     sources: context.sources,
-    artifacts: [...context.bundles.values()].map(bundle => ({
-      kind: bundle.dependency.kind,
-      owner: bundle.dependency.owner ?? generated.manifest.owner,
-      name: bundle.dependency.name,
-      version: bundle.dependency.version ?? 'local',
-      integrity: bundle.integrity ?? '',
-    })),
+    artifacts: [
+      ...[...context.bundles.values()].map(bundle => ({
+        kind: bundle.dependency.kind,
+        owner: bundle.dependency.owner ?? generated.manifest.owner,
+        name: bundle.dependency.name,
+        version: bundle.dependency.version ?? 'local',
+        integrity: bundle.integrity ?? '',
+      })),
+      ...context.templateSources.values(),
+    ],
     bundles: [...context.bundles.values()],
     answers: context.answers,
     deterministicState: context.deterministicState,
@@ -546,6 +552,13 @@ async function generateTemplateLayers(
 
   const templateBundle = await templateBundleRef(templateDir, manifest);
   context.bundles.set(bundleKey(manifest.kind, templateBundle.dependency), templateBundle);
+  context.templateSources.set(selfRef, {
+    kind: TEMPLATE_SOURCE_KIND,
+    owner: manifest.owner,
+    name: manifest.name,
+    version: manifest.version ?? 'local',
+    integrity: await templateDirIntegrity(templateDir),
+  });
 
   const commands: CyanCommandIntent[] = [];
 
@@ -1520,6 +1533,9 @@ async function walkOutputFiles(root: string, visit: (path: string) => Promise<vo
     }
   }
 }
+
+/** `artifacts` kind of a template dir's content fingerprint; lets update detect a changed local-path template. */
+export const TEMPLATE_SOURCE_KIND = 'template-source';
 
 export function bundleKey(kind: ArtifactKind, dependency: ArtifactDependency): string {
   return `${kind}|${dependency.owner ?? 'local'}:${dependency.name}:${dependency.version ?? ''}`;

@@ -290,3 +290,19 @@ export function stateTimestamp(): string {
   }
   return new Date().toISOString();
 }
+
+/**
+ * Content fingerprint of a template directory (sorted relative paths + bytes, ignoring
+ * node_modules and .git): recorded at install so update can tell whether a local-path
+ * template changed since, which its on-disk-only base regeneration cannot reveal.
+ */
+export async function templateDirIntegrity(dir: string): Promise<string> {
+  const hash = createHash('sha256');
+  const paths = (await Array.fromAsync(new Bun.Glob('**/*').scan({ cwd: dir, onlyFiles: true, dot: true })))
+    .filter(path => !/(^|\/)(node_modules|\.git)(\/|$)/.test(path))
+    .sort(comparePaths);
+  for (const path of paths) {
+    hash.update(`${path}\0${sha256(new Uint8Array(await Bun.file(join(dir, path)).arrayBuffer()))}\0`);
+  }
+  return hash.digest('hex');
+}
