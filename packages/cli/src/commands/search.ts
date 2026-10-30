@@ -1,4 +1,4 @@
-import { artifactKinds, RegistryClient } from '@cyanprint/registry-client';
+import { artifactKinds, RegistryClient, registryClientOptionsFromEnv } from '@cyanprint/registry-client';
 import { parseFlags, flagBool, flagString } from '../args';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { info, kv, pathLabel, printJson, printSection, success } from '../ui';
@@ -22,7 +22,11 @@ export async function searchCommand(argv: string[]): Promise<void> {
   if (!json) {
     console.log(info(`searching ${pathLabel(registry)}`));
   }
-  const result = await new RegistryClient(registry).search({ kind, query, limit });
+  const result = await new RegistryClient(registry, undefined, undefined, registryClientOptionsFromEnv()).search({
+    kind,
+    query,
+    limit,
+  });
   const artifacts = result.artifacts;
   const report = { query, kind: kind ?? 'all', registry, artifacts };
 

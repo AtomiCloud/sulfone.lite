@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadManifest, runArtifactTests, runTemplateTest, safeJoin } from '@cyanprint/core';
-import { RegistryClient } from '@cyanprint/registry-client';
+import { RegistryClient, registryClientOptionsFromEnv } from '@cyanprint/registry-client';
 import {
   artifactIntegrity,
   type ArtifactPublish,
@@ -62,7 +62,9 @@ export async function pushCommand(argv: string[]): Promise<void> {
     ...withKind('resolver', manifest.resolvers),
   ];
   const registry = flagString(flags, 'registry') ?? (flagBool(flags, 'dry-run') ? undefined : defaultRegistryUrl());
-  const bootstrapClient = registry ? new RegistryClient(registry) : undefined;
+  const bootstrapClient = registry
+    ? new RegistryClient(registry, undefined, undefined, registryClientOptionsFromEnv())
+    : undefined;
   const resolvedPins: ResolvedDependencyPin[] = bootstrapClient
     ? (await bootstrapClient.batchResolve({ refs })).resolved.map(artifact => ({
         kind: artifact.kind,
@@ -125,7 +127,8 @@ export async function pushCommand(argv: string[]): Promise<void> {
   let published = false;
   let committedArtifact;
   if (!flagBool(flags, 'dry-run') && registry) {
-    const bootstrap = bootstrapClient ?? new RegistryClient(registry);
+    const bootstrap =
+      bootstrapClient ?? new RegistryClient(registry, undefined, undefined, registryClientOptionsFromEnv());
     const minted = process.env.CYANPRINT_TOKEN
       ? { token: process.env.CYANPRINT_TOKEN }
       : process.env.CYANPRINT_LOCAL_AUTH === '1'
@@ -136,7 +139,7 @@ export async function pushCommand(argv: string[]): Promise<void> {
         'Publishing requires CYANPRINT_TOKEN. Set CYANPRINT_LOCAL_AUTH=1 only for local registry fixtures.',
       );
     }
-    const client = new RegistryClient(registry, minted.token);
+    const client = new RegistryClient(registry, minted.token, undefined, registryClientOptionsFromEnv());
     const upload = await client.startUpload({
       kind: manifest.kind,
       owner: manifest.owner,

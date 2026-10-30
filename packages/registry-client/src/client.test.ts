@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ObjectRef } from '@cyanprint/contracts';
-import { RegistryClient } from './client';
+import { RegistryClient, registryClientOptionsFromEnv } from './client';
 
 type Handler = (request: Request, hit: number) => Response | Promise<Response>;
 
@@ -120,5 +120,95 @@ describe('registry client retry', () => {
     const client = new RegistryClient(server.url, undefined, undefined, fast);
     await expect(client.publishArtifact({} as never)).rejects.toThrow('HTTP 503');
     expect(server.hits()).toBe(1);
+  });
+});
+
+describe('registry client transfers', () => {
+  const later = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+  // Headers arrive at once; the body trickles in after `delay` ms.
+  const slowBody = (delay: number, bytes: number[]) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await later(delay);
+          controller.enqueue(new Uint8Array(bytes));
+          controller.close();
+        },
+      }),
+    );
+
+  test('the short request timeout does not apply to a slow archive download body', async () => {
+    const server = serve(() => slowBody(400, [1, 2, 3]));
+    const client = new RegistryClient(server.url, undefined, undefined, {
+      timeoutMs: 100,
+      transferTimeoutMs: 5000,
+      ...fast,
+    });
+    expect([...(await client.downloadObjectBytes(ref))]).toEqual([1, 2, 3]);
+  });
+
+  test('a download body that is cut off mid-read is retried', async () => {
+    // Raw socket: promises 10 bytes, sends 3 and hangs up, which is what a dropped connection looks like.
+    let connections = 0;
+    const listener = Bun.listen({
+      hostname: '127.0.0.1',
+      port: 0,
+      socket: {
+        data(socket) {
+          connections += 1;
+          const head = 'HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\nconnection: close\r\n';
+          if (connections < 2) {
+            socket.write(`${head}content-length: 10\r\n\r\nabc`);
+          } else {
+            socket.write(`${head}content-length: 3\r\n\r\n\x01\x02\x03`);
+          }
+          socket.end();
+        },
+      },
+    });
+    servers.push(listener);
+    const client = new RegistryClient(`http://127.0.0.1:${listener.port}`, undefined, undefined, fast);
+    expect([...(await client.downloadObjectBytes(ref))]).toEqual([1, 2, 3]);
+    expect(connections).toBe(2);
+  });
+
+  test('a slow upload is not cut off by the short request timeout', async () => {
+    const server = serve(async () => {
+      await later(400);
+      return new Response('ok');
+    });
+    const client = new RegistryClient(server.url, undefined, undefined, {
+      timeoutMs: 100,
+      transferTimeoutMs: 5000,
+      ...fast,
+    });
+    await client.putUploadObject('/upload/x', new Uint8Array([1, 2, 3]));
+    expect(server.hits()).toBe(1);
+  });
+
+  test('timeout errors name the method and URL without leaking the query string', async () => {
+    const server = serve(hang);
+    const client = new RegistryClient(server.url, undefined, undefined, { timeoutMs: 50, retries: 0 });
+    const error = await client.search({ query: 'secret-term' }).then(
+      () => undefined,
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain('GET');
+    expect(error?.message).toContain(`${server.url}/artifacts`);
+    expect(error?.message).toContain('50ms');
+    expect(error?.message).not.toContain('secret-term');
+  });
+});
+
+describe('registryClientOptionsFromEnv', () => {
+  test('reads CYANPRINT_REGISTRY_TIMEOUT_MS and rejects garbage', () => {
+    expect(registryClientOptionsFromEnv({})).toEqual({});
+    expect(registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TIMEOUT_MS: '120000' })).toEqual({ timeoutMs: 120000 });
+    expect(() => registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TIMEOUT_MS: 'soon' })).toThrow(
+      'CYANPRINT_REGISTRY_TIMEOUT_MS',
+    );
+    expect(() => registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TIMEOUT_MS: '0' })).toThrow(
+      'CYANPRINT_REGISTRY_TIMEOUT_MS',
+    );
   });
 });
