@@ -188,6 +188,11 @@ async function createTestCloudflareBindings(
       prepare(sql: string) {
         return createD1Statement(db, sql);
       },
+      async batch(statements) {
+        return db.transaction(() =>
+          statements.map(statement => (statement as unknown as { runSync(): unknown }).runSync()),
+        )();
+      },
     },
     R2: {
       async get(key: string) {
@@ -214,6 +219,9 @@ async function createTestCloudflareBindings(
       async put(key: string, value: string) {
         kv.set(key, value);
       },
+      async delete(key: string) {
+        kv.delete(key);
+      },
     },
     close() {
       db.close();
@@ -239,6 +247,12 @@ function createD1Statement(db: Database, sql: string) {
       return { results: db.query(sql).all(...bindings) as T[] };
     },
     async run(): Promise<unknown> {
+      return this.runSync();
+    },
+    runSync(): unknown {
+      if (/\bRETURNING\b/i.test(sql)) {
+        return { results: db.query(sql).all(...bindings), meta: {} };
+      }
       const result = db.query(sql).run(...bindings);
       return { meta: { changes: result.changes } };
     },
@@ -402,7 +416,7 @@ describe('tokens user profile session admin permission artifact registry batch r
         {
           method: 'PATCH',
           headers: { 'x-cyanprint-session': session },
-          body: JSON.stringify({ handle: 'local' }),
+          body: JSON.stringify({ handle: 'member' }),
         },
         env,
       );
@@ -1998,5 +2012,400 @@ describe('tokens user profile session admin permission artifact registry batch r
     const listed = await second.request('/artifacts?kind=template');
     const artifacts = ((await listed.json()) as { artifacts: Array<{ id: string }> }).artifacts;
     expect(artifacts.some(artifact => artifact.id === artifactId('template', 'cyanprint', 'hello', '4'))).toBe(true);
+  });
+});
+
+type KvProbe = {
+  gets: string[];
+  puts: string[];
+  deletes: string[];
+  failPut?: (key: string) => boolean;
+  missGet?: (key: string) => boolean;
+  clear(key: string): Promise<void>;
+};
+
+function probeKv(bindings: WorkerBindings): KvProbe {
+  const inner = bindings.KV!;
+  const probe: KvProbe = {
+    gets: [],
+    puts: [],
+    deletes: [],
+    async clear(key) {
+      await inner.put(key, '');
+    },
+  };
+  bindings.KV = {
+    async get(key: string) {
+      probe.gets.push(key);
+      return probe.missGet?.(key) ? null : inner.get(key);
+    },
+    async put(key: string, value: string) {
+      if (probe.failPut?.(key)) {
+        throw new Error(`KV put failed: ${key}`);
+      }
+      probe.puts.push(key);
+      await inner.put(key, value);
+    },
+    async delete(key: string) {
+      probe.deletes.push(key);
+      await inner.delete(key);
+    },
+  };
+  return probe;
+}
+
+function storedArtifact(name: string, version: string, owner = 'cyanprint') {
+  return {
+    id: artifactVersionId('template', owner, name, version),
+    kind: 'template' as const,
+    owner,
+    name,
+    version,
+    readme: '',
+    dependencies: [],
+    resolvedPins: [],
+    object: {
+      bucket: 'cyanprint-local-r2',
+      key: `template/${owner}/${name}/${version}/template.json`,
+      sha256: sha256(`${owner}/${name}@${version}`),
+      size: 1,
+    },
+    disabled: false,
+    moderationState: 'active' as const,
+    downloads: 0,
+    likes: 0,
+  };
+}
+
+describe('worker + registry robustness', () => {
+  test('a failed seed is retried on the next request instead of being memoized forever', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      bindings.CYANPRINT_DEFAULT_TOKEN_HASH = sha256('cp4_retry_seed');
+      const realDb = bindings.DB!;
+      let failures = 1;
+      bindings.DB = {
+        prepare(sql: string) {
+          if (failures > 0 && sql.includes('INSERT INTO users')) {
+            failures -= 1;
+            throw new Error('D1 transient failure');
+          }
+          return realDb.prepare(sql);
+        },
+        batch: statements => realDb.batch(statements),
+      };
+      const storage = createCloudflareBindingStorage(bindings);
+      await expect(storage.getUser('svc:cyan')).rejects.toThrow('D1 transient failure');
+      expect(await storage.getUser('svc:cyan')).toMatchObject({ handle: 'cyan' });
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('a claimed default handle does not take the whole registry down', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      await bindings
+        .DB!.prepare('INSERT INTO users (id, handle, login, admin) VALUES (?, ?, ?, ?)')
+        .bind('github:1', 'cyan', 'cyan', 0)
+        .run();
+      bindings.CYANPRINT_DEFAULT_TOKEN_HASH = sha256('cp4_claimed_handle');
+      const storage = createCloudflareBindingStorage(bindings);
+      expect(await storage.getUser('github:1')).toMatchObject({ handle: 'cyan' });
+      expect(await storage.findTokenByHash(sha256('cp4_claimed_handle'))).toBeUndefined();
+      const response = await createApp(storage).request('/artifacts', {}, bindings);
+      expect(response.status).toBe(200);
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('downloads and likes never rewrite the KV artifact body and cannot un-disable an artifact', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      const artifact = storedArtifact('counted', '2');
+      await storage.addArtifact(artifact);
+      probe.puts.length = 0;
+
+      const first = await storage.recordDownload(artifact.object);
+      await storage.recordDownload(artifact.object);
+      expect(first?.downloads).toBe(1);
+      await storage.likeArtifact(artifact.id, 'user_local');
+      expect(probe.puts.filter(key => key.startsWith('artifact:'))).toEqual([]);
+      expect(await storage.getArtifact(artifact.id)).toMatchObject({ downloads: 2, likes: 1 });
+
+      await storage.disableArtifact(artifact.id);
+      expect(await storage.recordDownload(artifact.object)).toBeUndefined();
+      expect(await storage.getArtifact(artifact.id)).toMatchObject({ disabled: true, moderationState: 'disabled' });
+      expect(await storage.getArtifact(artifact.id)).toMatchObject({ downloads: 2, likes: 1 });
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('download and like counters are indexed in D1', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      for (const table of ['downloads', 'likes']) {
+        const row = await bindings
+          .DB!.prepare(`SELECT COUNT(*) AS count FROM pragma_index_list('${table}') WHERE "unique" = 0`)
+          .first<{ count: number }>();
+        expect(row?.count).toBeGreaterThan(0);
+      }
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('a failed KV write leaves no half-committed version behind', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      await storage.addArtifact(storedArtifact('atomic', '2'));
+      probe.failPut = key => key === `artifact:${artifactVersionId('template', 'cyanprint', 'atomic', '3')}`;
+      await expect(storage.addArtifact(storedArtifact('atomic', '3'))).rejects.toThrow('KV put failed');
+      expect(await storage.getArtifactByIdentity('template', 'cyanprint', 'atomic')).toMatchObject({ version: '2' });
+      expect((await storage.listArtifactVersions('template', 'cyanprint', 'atomic')).map(a => a.version)).toEqual([
+        '2',
+      ]);
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('a failed D1 write leaves no half-committed version behind', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const realDb = bindings.DB!;
+      let d1Down = false;
+      bindings.DB = {
+        prepare: sql => realDb.prepare(sql),
+        batch: statements => (d1Down ? Promise.reject(new Error('D1 down')) : realDb.batch(statements)),
+      };
+      const storage = createCloudflareBindingStorage(bindings);
+      await storage.addArtifact(storedArtifact('atomic-d1', '2'));
+      d1Down = true;
+      await expect(storage.addArtifact(storedArtifact('atomic-d1', '3'))).rejects.toThrow('D1 down');
+      expect(await storage.getArtifactByIdentity('template', 'cyanprint', 'atomic-d1')).toMatchObject({ version: '2' });
+      expect((await storage.listArtifactVersions('template', 'cyanprint', 'atomic-d1')).map(a => a.version)).toEqual([
+        '2',
+      ]);
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('a failed D1 batch best-effort deletes the orphan KV body, and ignores delete errors', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const realDb = bindings.DB!;
+      let d1Down = false;
+      bindings.DB = {
+        prepare: sql => realDb.prepare(sql),
+        batch: statements => (d1Down ? Promise.reject(new Error('D1 down')) : realDb.batch(statements)),
+      };
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      const publish = (name: string) => ({
+        kind: 'template' as const,
+        owner: 'cyanprint',
+        name,
+        readme: '',
+        dependencies: [],
+        resolvedPins: [],
+        disabled: false,
+        moderationState: 'active' as const,
+        downloads: 0,
+        likes: 0,
+      });
+      d1Down = true;
+      await expect(storage.commitArtifact(publish('orphan'))).rejects.toThrow('D1 down');
+      const orphanKey = `artifact:${artifactVersionId('template', 'cyanprint', 'orphan', '1')}`;
+      expect(probe.puts).toContain(orphanKey);
+      expect(probe.deletes).toEqual([orphanKey]);
+      expect(await bindings.KV!.get(orphanKey)).toBeNull();
+
+      // A failing delete must not mask the original D1 error.
+      const kv = bindings.KV!;
+      bindings.KV = { ...kv, delete: () => Promise.reject(new Error('KV delete failed')) };
+      await expect(storage.commitArtifact(publish('orphan-2'))).rejects.toThrow('D1 down');
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('a failed D1 batch never deletes the committed KV body of an existing artifact (disable)', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const realDb = bindings.DB!;
+      let d1Down = false;
+      bindings.DB = {
+        prepare: sql => realDb.prepare(sql),
+        batch: statements => (d1Down ? Promise.reject(new Error('D1 down')) : realDb.batch(statements)),
+      };
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      const artifact = storedArtifact('keep', '2');
+      await storage.addArtifact(artifact);
+      d1Down = true;
+      await expect(storage.disableArtifact(artifact.id)).rejects.toThrow('D1 down');
+      expect(probe.deletes).toEqual([]);
+      expect(await bindings.KV!.get(`artifact:${artifact.id}`)).not.toBeNull();
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('recordDownload inserts the download row and bumps the counter in one atomic batch', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const realDb = bindings.DB!;
+      const batches: string[][] = [];
+      let failBatch = false;
+      bindings.DB = {
+        prepare: sql => realDb.prepare(sql),
+        batch: statements => {
+          batches.push(statements.map(() => ''));
+          return failBatch ? Promise.reject(new Error('D1 down')) : realDb.batch(statements);
+        },
+      };
+      const storage = createCloudflareBindingStorage(bindings);
+      const artifact = storedArtifact('batched-download', '2');
+      await storage.addArtifact(artifact);
+      batches.length = 0;
+      expect((await storage.recordDownload(artifact.object))?.downloads).toBe(1);
+      expect(batches).toEqual([['', '']]);
+
+      failBatch = true;
+      await expect(storage.recordDownload(artifact.object)).rejects.toThrow('D1 down');
+      failBatch = false;
+      const rows = await realDb
+        .prepare('SELECT COUNT(*) AS n FROM downloads WHERE artifact_id = ?')
+        .bind(artifact.id)
+        .first<{ n: number }>();
+      expect(Number(rows?.n)).toBe(1);
+      expect(await storage.getArtifact(artifact.id)).toMatchObject({ downloads: 1 });
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('KV read lag on the newest version falls back to the previous version instead of 404', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      await storage.addArtifact(storedArtifact('lagging', '2'));
+      await storage.addArtifact(storedArtifact('lagging', '3'));
+      probe.missGet = key => key === `artifact:${artifactVersionId('template', 'cyanprint', 'lagging', '3')}`;
+      expect(await storage.getArtifactByIdentity('template', 'cyanprint', 'lagging')).toMatchObject({ version: '2' });
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('batch-resolve, pin checks and object-ref lookups do not scan every version in KV', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const probe = probeKv(bindings);
+      const storage = createCloudflareBindingStorage(bindings);
+      for (let index = 0; index < 40; index += 1) {
+        await storage.addArtifact(storedArtifact(`bulk-${index}`, '2'));
+      }
+      const target = storedArtifact('bulk-7', '2');
+
+      probe.gets.length = 0;
+      const resolved = await storage.batchResolve({
+        refs: [
+          { kind: 'template', owner: 'cyanprint', name: 'bulk-7' },
+          { kind: 'template', owner: 'cyanprint', name: 'bulk-9', version: '2' },
+          { kind: 'template', owner: 'cyanprint', name: 'absent' },
+        ],
+      });
+      expect(resolved.resolved.map(artifact => artifact.name)).toEqual(['bulk-7', 'bulk-9']);
+      expect(resolved.missing).toEqual([{ kind: 'template', owner: 'cyanprint', name: 'absent' }]);
+      expect(probe.gets.length).toBeLessThanOrEqual(3);
+
+      probe.gets.length = 0;
+      expect(
+        await storage.hasVersionPin({
+          kind: 'template',
+          owner: 'cyanprint',
+          name: 'bulk-7',
+          version: '2',
+          integrity: artifactIntegrity(target),
+        }),
+      ).toBe(true);
+      expect(
+        await storage.hasVersionPin({
+          kind: 'template',
+          owner: 'cyanprint',
+          name: 'bulk-7',
+          version: '2',
+          integrity: 'wrong',
+        }),
+      ).toBe(false);
+      expect(probe.gets.length).toBeLessThanOrEqual(2);
+
+      await probe.clear(`object-artifact:${target.object.sha256}:${target.object.key}`);
+      probe.gets.length = 0;
+      expect(await storage.getActiveArtifactByObjectRef(target.object)).toMatchObject({ name: 'bulk-7' });
+      expect(probe.gets.length).toBeLessThanOrEqual(3);
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('batch-resolve rejects oversized requests', async () => {
+    const refs = Array.from({ length: 51 }, (_, index) => ({
+      kind: 'template',
+      owner: 'cyanprint',
+      name: `n${index}`,
+    }));
+    const response = await app.request('/batch-resolve', { method: 'POST', body: JSON.stringify({ refs }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 'invalid_batch_resolve' });
+  });
+
+  test('the reserved handle local cannot be claimed', async () => {
+    const bindings = await createTestCloudflareBindings({ seed: false });
+    try {
+      const storage = createCloudflareBindingStorage(bindings);
+      await storage.upsertUser({ id: 'user_reserved', handle: null, admin: false });
+      await storage.createSession('user_reserved', 'cps_reserved');
+      for (const handle of ['local', 'Local', 'cyan']) {
+        const response = await createApp(storage).request(
+          '/me',
+          { method: 'PATCH', headers: { 'x-cyanprint-session': 'cps_reserved' }, body: JSON.stringify({ handle }) },
+          bindings,
+        );
+        expect(response.status).toBe(400);
+        const body = (await response.json()) as { code: string; message: string };
+        expect(body.code).toBe('invalid_handle');
+        expect(body.message).toContain('"local" and "cyan" are reserved');
+      }
+    } finally {
+      bindings.close();
+    }
+  });
+
+  test('artifact names and owners are validated on upload start', async () => {
+    const { token } = await localToken('name-validation');
+    for (const name of ['../escape', 'has space', 'a/b', '']) {
+      const response = await app.request('/uploads/start', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          kind: 'template',
+          owner: 'cyanprint',
+          name,
+          objects: { manifest: { sha256: 'a'.repeat(64), size: 1 }, bundle: { sha256: 'b'.repeat(64), size: 1 } },
+        }),
+      });
+      expect(response.status).toBe(400);
+    }
   });
 });

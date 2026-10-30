@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { AppShell } from '../features/shell/app-shell';
-import { listLatestRegistryArtifacts } from '../features/registry/registry-data';
+import { loadShellArtifacts } from '../features/shell/shell-data';
 import { getAccountSession } from '../features/account/account-session';
 import '../styles/globals.css';
 
@@ -17,12 +17,17 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const [artifacts, account] = await Promise.all([listLatestRegistryArtifacts(), getAccountSession()]);
+  const [{ artifacts, registryUnavailable }, account] = await Promise.all([loadShellArtifacts(), getAccountSession()]);
   return (
     <html lang="en">
       <body>
         <Suspense>
           <AppShell artifacts={artifacts} user={account?.user}>
+            {registryUnavailable ? (
+              <p className="form-error" role="alert">
+                The registry is temporarily unavailable. Catalog data may be missing; please try again shortly.
+              </p>
+            ) : null}
             {children}
           </AppShell>
         </Suspense>

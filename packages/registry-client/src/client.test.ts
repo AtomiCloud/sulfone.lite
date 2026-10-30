@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { ObjectRef } from '@cyanprint/contracts';
+import { MAX_BATCH_RESOLVE_REFS, type BatchResolveRequest, type ObjectRef } from '@cyanprint/contracts';
 import { RegistryClient, registryClientOptionsFromEnv } from './client';
 
 type Handler = (request: Request, hit: number) => Response | Promise<Response>;
@@ -102,7 +102,7 @@ describe('registry client retry', () => {
       hit < 2 ? new Response('boom', { status: 500 }) : Response.json({ artifacts: [] }),
     );
     const client = new RegistryClient(server.url, undefined, undefined, fast);
-    await client.batchResolve({} as never);
+    await client.batchResolve({ refs: [] });
     expect(server.hits()).toBe(2);
   });
 
@@ -266,6 +266,75 @@ describe('registryClientOptionsFromEnv', () => {
     );
     expect(() => registryClientOptionsFromEnv({ CYANPRINT_REGISTRY_TIMEOUT_MS: '0' })).toThrow(
       'CYANPRINT_REGISTRY_TIMEOUT_MS',
+    );
+  });
+});
+
+describe('registry client batchResolve chunking', () => {
+  const refsOf = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ kind: 'template', owner: 'cyanprint', name: `n${index}` }));
+  const isEven = (name: string) => Number(name.slice(1)) % 2 === 0;
+  // Resolves every even-indexed ref and reports the odd ones as missing.
+  const answer = async (request: Request) => {
+    const { refs } = (await request.json()) as BatchResolveRequest;
+    return Response.json({
+      resolved: refs.filter(item => isEven(item.name)),
+      missing: refs.filter(item => !isEven(item.name)),
+    });
+  };
+
+  test('sends one request when refs fit the server cap', async () => {
+    const server = serve(answer);
+    await new RegistryClient(server.url, undefined, undefined, fast).batchResolve({
+      refs: refsOf(MAX_BATCH_RESOLVE_REFS),
+    });
+    expect(server.hits()).toBe(1);
+  });
+
+  test('chunks larger sets and merges results in order', async () => {
+    const sizes: number[] = [];
+    const server = serve(async request => {
+      sizes.push(((await request.clone().json()) as BatchResolveRequest).refs.length);
+      return answer(request);
+    });
+    const total = MAX_BATCH_RESOLVE_REFS * 2 + 7;
+    const result = await new RegistryClient(server.url, undefined, undefined, fast).batchResolve({
+      refs: refsOf(total),
+    });
+    expect(sizes).toEqual([MAX_BATCH_RESOLVE_REFS, MAX_BATCH_RESOLVE_REFS, 7]);
+    expect(result.resolved.map(item => item.name)).toEqual(
+      refsOf(total)
+        .map(item => item.name)
+        .filter(isEven),
+    );
+    expect(result.missing.length + result.resolved.length).toBe(total);
+  });
+
+  test('retries a failing chunk independently and keeps results order-stable', async () => {
+    const chunkHits = new Map<string, number>();
+    const server = serve(async request => {
+      const { refs } = (await request.clone().json()) as BatchResolveRequest;
+      const first = refs[0]!.name;
+      const seen = (chunkHits.get(first) ?? 0) + 1;
+      chunkHits.set(first, seen);
+      // The second chunk fails once with a 503, then succeeds.
+      if (first === `n${MAX_BATCH_RESOLVE_REFS}` && seen === 1) {
+        return new Response('unavailable', { status: 503 });
+      }
+      return answer(request);
+    });
+    const total = MAX_BATCH_RESOLVE_REFS * 2 + 7;
+    const result = await new RegistryClient(server.url, undefined, undefined, fast).batchResolve({
+      refs: refsOf(total),
+    });
+    expect(server.hits()).toBe(4);
+    expect(chunkHits.get('n0')).toBe(1);
+    expect(chunkHits.get(`n${MAX_BATCH_RESOLVE_REFS}`)).toBe(2);
+    expect(chunkHits.get(`n${MAX_BATCH_RESOLVE_REFS * 2}`)).toBe(1);
+    expect(result.resolved.map(item => item.name)).toEqual(
+      refsOf(total)
+        .map(item => item.name)
+        .filter(isEven),
     );
   });
 });

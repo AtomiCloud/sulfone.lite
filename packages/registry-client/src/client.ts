@@ -1,10 +1,11 @@
-import type {
-  ArtifactObjects,
-  ArtifactPublish,
-  ArtifactVersion,
-  BatchResolveRequest,
-  BatchResolveResponse,
-  ObjectRef,
+import {
+  MAX_BATCH_RESOLVE_REFS,
+  type ArtifactObjects,
+  type ArtifactPublish,
+  type ArtifactVersion,
+  type BatchResolveRequest,
+  type BatchResolveResponse,
+  type ObjectRef,
 } from '@cyanprint/contracts';
 
 type UploadObjectSpec = Pick<ObjectRef, 'sha256' | 'size'> & { payload?: never };
@@ -131,7 +132,22 @@ export class RegistryClient {
   }
 
   async batchResolve(request: BatchResolveRequest): Promise<BatchResolveResponse> {
-    return this.post('/batch-resolve', request, {}, true);
+    // The registry caps refs per call; chunk so a push with many direct dependencies still resolves.
+    if (request.refs.length <= MAX_BATCH_RESOLVE_REFS) {
+      return this.post('/batch-resolve', request, {}, true);
+    }
+    const merged: BatchResolveResponse = { resolved: [], missing: [] };
+    for (let start = 0; start < request.refs.length; start += MAX_BATCH_RESOLVE_REFS) {
+      const part = await this.post<BatchResolveResponse>(
+        '/batch-resolve',
+        { refs: request.refs.slice(start, start + MAX_BATCH_RESOLVE_REFS) },
+        {},
+        true,
+      );
+      merged.resolved.push(...part.resolved);
+      merged.missing.push(...part.missing);
+    }
+    return merged;
   }
 
   async createLocalSession(
