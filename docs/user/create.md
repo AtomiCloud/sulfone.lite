@@ -50,6 +50,14 @@ Running `cyanprint create <template> <dir>` into a directory that already has `.
 
 `create`, `try`, and `update` print each generation step live — the template being generated and every processor, plugin, resolver, and post-generation command as it starts (suppressed with `--json`).
 
+## Post-generation command timeout
+
+Each template's post-generation commands run in the generated project and are killed (the whole process group, children included) if one runs longer than **10 minutes**. A timed-out command fails the run with a "timed out and was killed" message. Set `CYANPRINT_COMMAND_TIMEOUT_MS` (milliseconds) to raise or lower the limit, for example a long `npm install` on a slow network:
+
+```bash
+CYANPRINT_COMMAND_TIMEOUT_MS=1800000 cyanprint create my-template ./out
+```
+
 ## Prompts
 
 Template authors can polish every prompt: a `description` renders as dim help text at the bottom of every prompt kind, a `placeholder` renders as a dim backdrop inside empty free-form inputs (typing replaces it; it is never submitted), a `default` is submitted on plain enter, and select/multiselect options may be objects (`{ value, label, description }`) whose description renders below the list and follows the highlighted option (with the prompt description stacked beneath it).
