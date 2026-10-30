@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { ProbeFeatureIdentity, ProbeResolutionOrigin } from '@cyanprint/contracts';
 import { CyanError, problem } from '@cyanprint/contracts';
@@ -72,7 +73,8 @@ type CollectedOverride = {
  * process cwd.
  */
 async function defaultWorkspaceRoot(templateDir: string): Promise<string> {
-  let current = resolve(templateDir);
+  // Follow symlinks: a linked template dir must search the repo it really lives in.
+  let current = await realpath(resolve(templateDir)).catch(() => resolve(templateDir));
   while (true) {
     if (await exists(join(current, '.git'))) {
       return current;

@@ -803,6 +803,23 @@ describe('probe sandbox — snapshot determinism and unborn git repos', () => {
     }
   });
 
+  test('a committed repo whose HEAD tree object is missing surfaces the git failure, not "no commits"', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+    await gitRun(repo, ['config', 'user.email', 'origin@localhost']);
+    await gitRun(repo, ['config', 'user.name', 'origin']);
+    await gitRun(repo, ['config', 'commit.gpgsign', 'false']);
+    await gitRun(repo, ['add', '-A']);
+    expect((await gitRun(repo, ['commit', '-q', '-m', 'init'])).code).toBe(0);
+    const tree = (await gitRun(repo, ['rev-parse', 'HEAD^{tree}'])).stdout;
+    await rm(join(repo, '.git/objects', tree.slice(0, 2), tree.slice(2)), { force: true });
+
+    const error = await prepareProbeSandboxSource({ repoPath: repo }).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { problem?: { code?: string } }).problem?.code).not.toBe('probe_repo_has_no_commits');
+  });
+
   test('a repo with `git init` but no commit yet fails with a clear, actionable CyanError (auto strategy)', async () => {
     const repo = await makeRepo();
     expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);

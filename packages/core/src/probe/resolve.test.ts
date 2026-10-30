@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -431,5 +431,32 @@ describe('workspace root default', () => {
     } finally {
       process.chdir(previous);
     }
+  });
+
+  test('a symlinked template dir resolves dependencies from the repo it really lives in', async () => {
+    const linkRepo = join(workRoot, 'ws-link-repo');
+    const realRepo = join(workRoot, 'ws-link-real');
+    await mkdir(join(linkRepo, '.git'), { recursive: true });
+    await mkdir(join(realRepo, '.git'), { recursive: true });
+    await mkdir(join(realRepo, 'examples/templates/consumer'), { recursive: true });
+    await mkdir(join(realRepo, 'examples/templates/dep'), { recursive: true });
+    const manifest = (name: string, extra: Record<string, unknown> = {}) =>
+      YAML.stringify({ cyanprint: 4, kind: 'template', owner: 'cyanprint', name, bundledEntry: 'cyan.ts', ...extra });
+    await writeFile(
+      join(realRepo, 'examples/templates/consumer/cyan.yaml'),
+      manifest('ws-link-consumer', { templates: { 'cyanprint/ws-link-dep': null } }),
+      'utf8',
+    );
+    await writeFile(join(realRepo, 'examples/templates/dep/cyan.yaml'), manifest('ws-link-dep'), 'utf8');
+    await symlink(join(realRepo, 'examples/templates/consumer'), join(linkRepo, 'consumer-link'));
+
+    const outcome = await resolveProbesForTemplate({
+      templateDir: join(linkRepo, 'consumer-link'),
+      features: [{ template: 'cyanprint/ws-link-consumer', name: 'gate' }],
+    }).catch(error => error as Error);
+
+    // The dependency lives beside the REAL template; whatever else the resolve
+    // reports, it must not fail to find that child.
+    expect(outcome instanceof Error ? outcome.message : '').not.toMatch(/Unable to resolve child template/);
   });
 });

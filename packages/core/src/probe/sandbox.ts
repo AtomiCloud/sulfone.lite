@@ -364,6 +364,16 @@ async function gitTreeForRepositoryRoot(repoPath: string): Promise<string | unde
   try {
     return await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD^{tree}']);
   } catch (error) {
+    // A HEAD that resolves but whose tree cannot be read is a real git failure
+    // (missing/corrupt object): surface it instead of calling it "no commits".
+    if (
+      await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD']).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      throw error;
+    }
     // Deliberately NOT a fallback to a live working-tree copy: the snapshot must be
     // the committed tree. Fail with an actionable error instead of a raw git one.
     throw new CyanError(
