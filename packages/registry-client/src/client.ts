@@ -9,15 +9,34 @@ import type {
 
 type UploadObjectSpec = Pick<ObjectRef, 'sha256' | 'size'> & { payload?: never };
 
+export interface RegistryClientOptions {
+  /** Per-attempt request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Extra attempts for idempotent calls (GET, batch-resolve, download) after a network error, 5xx or 429. */
+  retries?: number;
+  /** Base backoff in milliseconds; doubles on each retry. */
+  retryDelayMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 250;
+
 export class RegistryClient {
   readonly baseUrl: string;
   readonly token?: string;
   readonly session?: string;
+  private readonly options: Required<RegistryClientOptions>;
 
-  constructor(baseUrl: string, token?: string, session?: string) {
+  constructor(baseUrl: string, token?: string, session?: string, options: RegistryClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.token = token;
     this.session = session;
+    this.options = {
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      retries: options.retries ?? DEFAULT_RETRIES,
+      retryDelayMs: options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+    };
   }
 
   async health(): Promise<{ ok: boolean }> {
@@ -74,7 +93,7 @@ export class RegistryClient {
   }
 
   async batchResolve(request: BatchResolveRequest): Promise<BatchResolveResponse> {
-    return this.post('/batch-resolve', request);
+    return this.post('/batch-resolve', request, {}, true);
   }
 
   async createLocalSession(
@@ -88,7 +107,7 @@ export class RegistryClient {
     if (!session) {
       throw new Error('createToken requires a local authenticated session.');
     }
-    return new RegistryClient(this.baseUrl, this.token, session).post('/tokens', { name });
+    return this.withSession(session).post('/tokens', { name });
   }
 
   async listTokens(
@@ -97,16 +116,16 @@ export class RegistryClient {
     if (!session) {
       throw new Error('listTokens requires a local authenticated session.');
     }
-    return new RegistryClient(this.baseUrl, this.token, session).get('/tokens');
+    return this.withSession(session).get('/tokens');
   }
 
   async revokeToken(id: string, session = this.session): Promise<{ ok: boolean }> {
     if (!session) {
       throw new Error('revokeToken requires a local authenticated session.');
     }
-    const response = await fetch(`${this.baseUrl}/tokens/${id}`, {
+    const response = await this.send(`${this.baseUrl}/tokens/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: new RegistryClient(this.baseUrl, this.token, session).headers(),
+      headers: this.withSession(session).headers(),
     });
     return this.parse<{ ok: boolean }>(response);
   }
@@ -139,7 +158,7 @@ export class RegistryClient {
       typeof payload === 'string'
         ? payload
         : (payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer);
-    const response = await fetch(url, { method: 'PUT', headers: this.headers(), body });
+    const response = await this.send(url, { method: 'PUT', headers: this.headers(), body });
     if (!response.ok) {
       throw new Error(await response.text());
     }
@@ -162,11 +181,15 @@ export class RegistryClient {
   }
 
   async downloadObjectBytes(ref: ObjectRef): Promise<Uint8Array> {
-    const response = await fetch(`${this.baseUrl}/objects/download`, {
-      method: 'POST',
-      headers: { ...this.headers(), 'content-type': 'application/json', accept: 'application/octet-stream' },
-      body: JSON.stringify({ ref }),
-    });
+    const response = await this.send(
+      `${this.baseUrl}/objects/download`,
+      {
+        method: 'POST',
+        headers: { ...this.headers(), 'content-type': 'application/json', accept: 'application/octet-stream' },
+        body: JSON.stringify({ ref }),
+      },
+      true,
+    );
     if (!response.ok) {
       throw new Error(await response.text());
     }
@@ -182,17 +205,49 @@ export class RegistryClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, { headers: this.headers() });
+    const response = await this.send(`${this.baseUrl}${path}`, { headers: this.headers() }, true);
     return this.parse<T>(response);
   }
 
-  private async post<T>(path: string, body: unknown, headers: Record<string, string> = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: { ...this.headers(), ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  private async post<T>(
+    path: string,
+    body: unknown,
+    headers: Record<string, string> = {},
+    idempotent = false,
+  ): Promise<T> {
+    const response = await this.send(
+      `${this.baseUrl}${path}`,
+      {
+        method: 'POST',
+        headers: { ...this.headers(), ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      idempotent,
+    );
     return this.parse<T>(response);
+  }
+
+  private withSession(session: string): RegistryClient {
+    return new RegistryClient(this.baseUrl, this.token, session, this.options);
+  }
+
+  private async send(url: string, init: RequestInit, retry = false): Promise<Response> {
+    const attempts = retry ? this.options.retries + 1 : 1;
+    for (let attempt = 1; ; attempt += 1) {
+      const last = attempt >= attempts;
+      try {
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(this.options.timeoutMs) });
+        if (last || !(response.status >= 500 || response.status === 429)) {
+          return response;
+        }
+        await response.body?.cancel();
+      } catch (error) {
+        if (last) {
+          throw error;
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, this.options.retryDelayMs * 2 ** (attempt - 1)));
+    }
   }
 
   private headers(): Record<string, string> {
