@@ -37,7 +37,7 @@ For this template, when a dependency has published a new version:
 
 Never skip a level. A template that is not republished keeps the old pin, so nothing below it sees the fix — republish it even when its own files did not change.
 
-Local runs (`try`, `test`) do **not** download a dependency from the registry. They find it through the `.cyan_artifact_bundles.json` index of a hydrated template, or in a directory named `examples/templates` (or `examples/template-groups`) found by walking up from the template directory or the current directory, matched by `owner`/`name` — and by `version` when the key is pinned, so the local copy's `cyan.yaml` must then carry that `version:`. The template's own repo root is searched first, then the current directory; two matches are an `Ambiguous child template` error (pin a version or remove the duplicate). Check the dependency out there, at the version you are pinning, before step 2. Probes resolve their dependencies the same way.
+Local runs (`try`, `test`) do **not** download a dependency from the registry. They find it through the `.cyan_artifact_bundles.json` index of a hydrated template, or in a directory named `examples/templates` (or `examples/template-groups`) found by walking up from the template directory or the current directory, matched by `owner`/`name` — and by `version` when the key is pinned, so the local copy's `cyan.yaml` must then carry that `version:`. The template's own repo root is searched first, then the current directory; multiple matches in one searched root are an `Ambiguous child template` error (pin a version or remove the duplicate). Check the dependency out there, at the version you are pinning, before step 2. Probes resolve their dependencies the same way.
 
 ### Projects
 
