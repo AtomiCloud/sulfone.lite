@@ -140,24 +140,26 @@ async function runTemplateManifestTests(args: {
   const seenNames = new Set<string>();
   const seenDirs: Array<{ name: string; dir: string }> = [];
   for (const testCase of args.cases) {
-    if (seenNames.has(testCase.name)) {
+    // Case-fold: on case-insensitive filesystems (macOS, Windows) "Basic" and "basic" are one directory.
+    if (seenNames.has(testCase.name.toLowerCase())) {
       throw new Error(`cyan.test.yaml has duplicate case name: ${testCase.name}`);
     }
-    seenNames.add(testCase.name);
+    seenNames.add(testCase.name.toLowerCase());
     const dir = safeJoinBelow(args.outDir, testCase.name, 'output directory');
+    const folded = dir.toLowerCase();
     // Cases sharing or nesting output directories would rm -rf each other's output under concurrency.
     for (const other of seenDirs) {
-      if (other.dir === dir) {
+      if (other.dir === folded) {
         throw new Error(`cyan.test.yaml cases "${other.name}" and "${testCase.name}" share the same output directory.`);
       }
-      if (dir.startsWith(other.dir + sep) || other.dir.startsWith(dir + sep)) {
-        const [inner, outer] = dir.startsWith(other.dir + sep) ? [testCase, other] : [other, testCase];
+      if (folded.startsWith(other.dir + sep) || other.dir.startsWith(folded + sep)) {
+        const [inner, outer] = folded.startsWith(other.dir + sep) ? [testCase, other] : [other, testCase];
         throw new Error(
           `cyan.test.yaml case "${inner.name}" is inside the output directory of case "${outer.name}"; rename one so they do not nest.`,
         );
       }
     }
-    seenDirs.push({ name: testCase.name, dir });
+    seenDirs.push({ name: testCase.name, dir: folded });
     await assertCaseOutputReplaceable(dir, testCase.name);
   }
   const perCase = await mapWithConcurrency(args.cases, args.concurrency ?? 1, testCase =>

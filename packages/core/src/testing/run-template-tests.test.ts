@@ -522,6 +522,25 @@ describe('test output / expected path safety', () => {
   );
 
   test(
+    'case names that differ only by case are rejected (one directory on macOS/Windows)',
+    async () => {
+      // Arrange
+      const dir = await writeSynthetic('synth-case-fold', {
+        features: [],
+        cases: [
+          { name: 'Basic', expected: 'expected' },
+          { name: 'basic', expected: 'expected' },
+        ],
+      });
+      // Act / Assert
+      await expect(runTemplateTest({ template: dir, outDir: join(workRoot, 'out-case-fold') })).rejects.toThrow(
+        'duplicate case name',
+      );
+    },
+    T,
+  );
+
+  test(
     'a case directory that is an ancestor of another case directory is rejected',
     async () => {
       // Arrange
