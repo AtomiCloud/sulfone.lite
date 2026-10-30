@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { RegistryClient } from '@cyanprint/registry-client';
 import {
@@ -153,10 +153,6 @@ async function hydrateRegistryArtifactWithPins(
   }
   stack.add(stackKey);
   const artifactFingerprint = registryArtifactFingerprint(artifact);
-  if (bypassCache || !(await isCacheValid(cachePath, artifactFingerprint))) {
-    await mkdir(cachePath, { recursive: true });
-    await hydrateRegistryArtifact(client, artifact, cachePath);
-  }
   const bundleIndex: ArtifactBundleIndexEntry[] = [];
   for (const pin of artifact.resolvedPins) {
     const dependencyVersion = await resolvePinnedArtifact(client, pin);
@@ -177,12 +173,26 @@ async function hydrateRegistryArtifactWithPins(
       integrity: sha256(await Bun.file(runtimeFile).text()),
     });
   }
-  await writeFile(
-    join(cachePath, '.cyan_artifact_bundles.json'),
-    JSON.stringify({ bundles: bundleIndex }, null, 2),
-    'utf8',
-  );
-  await writeCacheIntegrity(cachePath, artifactFingerprint);
+  const bundleIndexJson = JSON.stringify({ bundles: bundleIndex }, null, 2);
+  // A hit writes nothing: concurrent creates may be reading or executing from this entry.
+  // A miss hydrates into a staging dir and swaps it in, so the entry is never half-written.
+  const upToDate =
+    !bypassCache &&
+    (await isCacheValid(cachePath, artifactFingerprint)) &&
+    (await readFile(join(cachePath, '.cyan_artifact_bundles.json'), 'utf8').catch(() => undefined)) === bundleIndexJson;
+  if (!upToDate) {
+    const stagingPath = cacheStagingPath(cachePath);
+    try {
+      await mkdir(stagingPath, { recursive: true });
+      await hydrateRegistryArtifact(client, artifact, stagingPath);
+      await writeFile(join(stagingPath, '.cyan_artifact_bundles.json'), bundleIndexJson, 'utf8');
+      await writeCacheIntegrity(stagingPath, artifactFingerprint);
+      await installStagedCache(stagingPath, cachePath, artifactFingerprint, bypassCache);
+    } catch (error) {
+      await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
   stack.delete(stackKey);
   return cachePath;
 }
@@ -208,26 +218,26 @@ function registryArtifactFingerprint(artifact: {
   owner: string;
   name: string;
   version: string;
-  object?: { bucket: string; key: string; sha256: string; size: number };
+  object?: ObjectRef;
   artifactObjects?: ArtifactVersion['artifactObjects'];
   resolvedPins: Array<{ kind: string; owner: string; name: string; version: string; integrity: string }>;
 }): string {
+  // Explicit, ordered fields: the registry's JSON key order must never change the cache key.
+  const objectPart = (ref?: ObjectRef): string[] => (ref ? [ref.bucket, ref.key, ref.sha256, String(ref.size)] : []);
   return sha256(
-    JSON.stringify({
-      kind: artifact.kind,
-      owner: artifact.owner,
-      name: artifact.name,
-      version: artifact.version,
-      object: artifact.object,
-      artifactObjects: artifact.artifactObjects,
-      resolvedPins: artifact.resolvedPins.map(pin => ({
-        kind: pin.kind,
-        owner: pin.owner,
-        name: pin.name,
-        version: pin.version,
-        integrity: pin.integrity,
-      })),
-    }),
+    JSON.stringify([
+      'registry-artifact-v2',
+      artifact.kind,
+      artifact.owner,
+      artifact.name,
+      artifact.version,
+      objectPart(artifact.object),
+      objectPart(artifact.artifactObjects?.manifest),
+      objectPart(artifact.artifactObjects?.readme),
+      objectPart(artifact.artifactObjects?.bundle),
+      objectPart(artifact.artifactObjects?.archive),
+      artifact.resolvedPins.map(pin => [pin.kind, pin.owner, pin.name, pin.version, pin.integrity]),
+    ]),
   );
 }
 
@@ -299,31 +309,74 @@ async function hydrateLocalTemplate(
     integrity,
   });
   if (bypassCache || !(await isCacheValid(cachePath, integrity))) {
-    const stagingPath = `${cachePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    await rm(stagingPath, { recursive: true, force: true });
-    await mkdir(stagingPath, { recursive: true });
-    await cp(templateDir, stagingPath, { recursive: true, force: true, verbatimSymlinks: true });
-    await writeCacheIntegrity(stagingPath, integrity);
-    if (!bypassCache && (await isCacheValid(cachePath, integrity))) {
-      await rm(stagingPath, { recursive: true, force: true });
-    } else {
-      if (bypassCache) {
-        await rm(cachePath, { recursive: true, force: true });
-      }
-      try {
-        await rename(stagingPath, cachePath);
-      } catch (error) {
-        if (!bypassCache && (await isCacheValid(cachePath, integrity))) {
-          await rm(stagingPath, { recursive: true, force: true });
-        } else {
-          throw error;
-        }
-      }
+    const stagingPath = cacheStagingPath(cachePath);
+    try {
+      await mkdir(stagingPath, { recursive: true });
+      await cp(templateDir, stagingPath, { recursive: true, force: true, verbatimSymlinks: true });
+      await writeCacheIntegrity(stagingPath, integrity);
+      await installStagedCache(stagingPath, cachePath, integrity, bypassCache);
+    } catch (error) {
+      await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
     }
   }
   return { templateDir: cachePath, cacheHydrated: true, registryHydrated: false };
 }
 
+function cacheStagingPath(cachePath: string): string {
+  return `${cachePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+/**
+ * Atomically move a fully-written staging dir into place. An existing entry (invalid, or
+ * being force-refreshed) is renamed aside first, because renaming onto a non-empty dir fails
+ * with ENOTEMPTY; a concurrent writer that already installed a valid entry wins.
+ */
+async function installStagedCache(
+  stagingPath: string,
+  cachePath: string,
+  expected: string,
+  force: boolean,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await rename(stagingPath, cachePath);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+    if (!force && (await isCacheValid(cachePath, expected))) {
+      await rm(stagingPath, { recursive: true, force: true });
+      return;
+    }
+    const asidePath = `${stagingPath}.old`;
+    const movedAside = await rename(cachePath, asidePath).then(
+      () => true,
+      () => false,
+    );
+    try {
+      await rename(stagingPath, cachePath);
+      lastError = undefined;
+    } catch (error) {
+      lastError = error;
+    }
+    if (movedAside) {
+      await rm(asidePath, { recursive: true, force: true }).catch(() => undefined);
+    }
+    if (lastError === undefined) {
+      return;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Content fingerprint of a template/cache directory. Symlinks are fingerprinted by their link
+ * target string (never followed — `cp` copies them verbatim, and a dangling or looping link
+ * must not break or hang the walk). A top-level `.git` is ignored: it is VCS state that is
+ * never executed, and git activity in the source template must not change the cache key.
+ */
 async function fingerprintDirectory(root: string): Promise<string> {
   const chunks: string[] = [];
   async function walk(dir: string, prefix: string): Promise<void> {
@@ -335,10 +388,15 @@ async function fingerprintDirectory(root: string): Promise<string> {
       if (entry === '.cyan_cache_content_integrity') {
         continue;
       }
+      if (entry === '.git' && prefix === '') {
+        continue;
+      }
       const path = join(dir, entry);
       const relative = prefix ? `${prefix}/${entry}` : entry;
-      const info = await stat(path);
-      if (info.isDirectory()) {
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) {
+        chunks.push(`${relative}:symlink:${await readlink(path)}`);
+      } else if (info.isDirectory()) {
         await walk(path, relative);
       } else if (info.isFile()) {
         chunks.push(`${relative}:${sha256(await readFile(path))}`);
