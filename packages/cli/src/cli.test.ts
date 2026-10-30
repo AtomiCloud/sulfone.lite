@@ -19,6 +19,7 @@ import {
   unpackTemplateArchivePayload,
 } from './local-object-package';
 import { createProgram, main } from './main';
+import { parseNumberInput } from './described-prompts';
 import { VERSION } from './version';
 import { resolveTemplateInput } from './registry-template';
 
@@ -688,6 +689,36 @@ describe('inquirer prompt adapter', () => {
       select: 'two',
       text: 'text answer',
     });
+  });
+
+  test('number input rejects blank, whitespace and non-finite values', () => {
+    expect(parseNumberInput('   ')).toBeUndefined();
+    expect(parseNumberInput('')).toBeUndefined();
+    expect(parseNumberInput('Infinity')).toBeUndefined();
+    expect(parseNumberInput('abc')).toBeUndefined();
+    expect(parseNumberInput(' 4 ')).toBe(4);
+    expect(parseNumberInput('-2.5')).toBe(-2.5);
+  });
+
+  test('a rejected select answer re-asks instead of aborting', async () => {
+    const picks = ['bad', 'good'];
+    const originalError = console.error;
+    console.error = () => {};
+    const prompts = { select: async () => picks.shift() } as unknown as InquirerPrompts;
+    try {
+      const adapter = inquirerPromptAdapter({}, prompts);
+      const value = await adapter.ask({
+        kind: 'select',
+        name: 'flavor',
+        message: 'Pick',
+        options: ['bad', 'good'],
+        validate: (v: unknown) => (v === 'good' ? true : 'pick good'),
+      });
+      expect(value).toBe('good');
+      expect(picks).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
   });
 
   test('answers named like Object.prototype keys are still prompted', async () => {
