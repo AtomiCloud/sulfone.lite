@@ -28,6 +28,7 @@ import { CyanError, declaredDependencyKeys, problem, vfsModeFromFileMode } from 
 import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
+import { POST_GENERATION_TIMEOUT_ENV } from '../commands/post-generation-command';
 import { processorCacheKey, readProcessorCache, writeProcessorCache } from '../cache/processor-cache';
 import { resolveLayers, type ResolutionLayer, type ResolverInvoker } from '../merge/resolve-layers';
 import { executeCyanScript, globTemplateFiles, isTemplateProbePath } from '../scripts/load-cyan-script';
@@ -1263,9 +1264,14 @@ async function execPostGenerationCommands(
     if (result.exitCode !== 0) {
       // Defer the throw so generated state is still written; without it a later `update` cannot run.
       return new CyanError(
-        problem('execution', 'post_generation_command_failed', `Post-generation command failed: ${command.command}`, {
-          result,
-        }),
+        problem(
+          'execution',
+          'post_generation_command_failed',
+          result.timedOut
+            ? `Post-generation command timed out and was killed: ${command.command} (set ${POST_GENERATION_TIMEOUT_ENV} to change the limit)`
+            : `Post-generation command failed: ${command.command}`,
+          { result },
+        ),
       );
     }
   }
