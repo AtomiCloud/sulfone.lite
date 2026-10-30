@@ -75,6 +75,16 @@ export async function resolveTemplateInput(args: {
   ) {
     return { templateDir: args.template, cacheHydrated: false, registryHydrated: false };
   }
+  if (
+    await stat(args.template).then(
+      entry => entry.isDirectory(),
+      () => false,
+    )
+  ) {
+    throw new Error(
+      `${args.template} is a local directory without a cyan.yaml; prefix it with ./ to use it as a path or run from the template root.`,
+    );
+  }
   const [owner, nameWithVersion] = args.template.split('/');
   const [name, version] = nameWithVersion?.split('@') ?? [];
   if (!owner || !name) {

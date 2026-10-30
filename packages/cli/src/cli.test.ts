@@ -1732,6 +1732,23 @@ describe('registry template hydration', () => {
   });
 });
 
+describe('registry template input', () => {
+  test('a local directory without cyan.yaml is not treated as a registry ref', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-nocyan-'));
+    const original = process.cwd();
+    try {
+      await mkdir(join(tempRoot, 'templates', 'foo'), { recursive: true });
+      process.chdir(tempRoot);
+      await expect(resolveTemplateInput({ template: 'templates/foo', registry: 'http://127.0.0.1:1' })).rejects.toThrow(
+        'without a cyan.yaml',
+      );
+    } finally {
+      process.chdir(original);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('push command', () => {
   test('upload start request carries only sha256 and size, never payload bytes', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-push-start-'));
