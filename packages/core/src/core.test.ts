@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { CyanError, type VfsFile } from '@cyanprint/contracts';
@@ -2006,6 +2006,42 @@ describe('applyMergedTree', () => {
     }
   });
 
+  test('an empty user folder (or only empty subfolders) at a path the update adds as a file is replaced', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      // git does not track empty directories, so the merge never sees these folders.
+      await mkdir(join(dir, 'empty'), { recursive: true });
+      await mkdir(join(dir, 'nested/inner/deeper'), { recursive: true });
+      const merge = await gitThreeWayMerge({
+        base: [],
+        ours: [],
+        theirs: [
+          { path: 'empty', content: 'file\n' },
+          { path: 'nested', content: 'also a file\n' },
+        ],
+      });
+      expect(merge.conflicts).toEqual([]);
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'empty')).text()).toBe('file\n');
+      expect(await Bun.file(join(dir, 'nested')).text()).toBe('also a file\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a folder that still holds user files at a path the update adds as a file is refused untouched', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
+    try {
+      await mkdir(join(dir, 'keepme/sub'), { recursive: true });
+      await writeFile(join(dir, 'keepme/sub/user.txt'), 'mine\n', 'utf8');
+      const merge = await gitThreeWayMerge({ base: [], ours: [], theirs: [{ path: 'keepme', content: 'file\n' }] });
+      await expect(applyMergedTree(dir, merge)).rejects.toThrow(/keepme/);
+      expect(await Bun.file(join(dir, 'keepme/sub/user.txt')).text()).toBe('mine\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('keeps sibling content when pruning emptied directories', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cyanprint-apply-merge-'));
     try {
@@ -3770,6 +3806,40 @@ describe('artifact tests (runArtifactTests)', () => {
   );
 
   test(
+    'convention resolver variations layer by input number (input-10 after input-2) and single files meet in one call',
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-input-order-'));
+      try {
+        const dirCase = join(tempRoot, 'dirs');
+        await writeStandaloneArtifact(dirCase, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        for (const [name, text] of [
+          ['input-1', 'a\n'],
+          ['input-2', 'b\n'],
+          ['input-10', 'c\n'],
+        ] as const) {
+          await mkdir(join(dirCase, 'tests/basic', name), { recursive: true });
+          await writeFile(join(dirCase, 'tests/basic', name, 'data.txt'), text, 'utf8');
+        }
+        await mkdir(join(dirCase, 'tests/basic/expected'), { recursive: true });
+        await writeFile(join(dirCase, 'tests/basic/expected/data.txt'), 'a\nb\nc\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: dirCase })).toMatchObject({ passed: 1, failed: 0 });
+
+        const fileCase = join(tempRoot, 'files');
+        await writeStandaloneArtifact(fileCase, { kind: 'resolver', name: 'concat', runtime: concatResolverRuntime });
+        await mkdir(join(fileCase, 'tests/basic'), { recursive: true });
+        await writeFile(join(fileCase, 'tests/basic/input-1.txt'), 'a\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/input-2.txt'), 'b\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/input-10.txt'), 'c\n', 'utf8');
+        await writeFile(join(fileCase, 'tests/basic/expected'), 'a\nb\nc\n', 'utf8');
+        expect(await runArtifactTests({ artifactDir: fileCase })).toMatchObject({ passed: 1, failed: 0 });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+    LONG,
+  );
+
+  test(
     'resolver manifest cases use the global variations shape with origins (including processor origins)',
     async () => {
       const artifactDir = await mkdtemp(join(tmpdir(), 'cyanprint-test-resolver-variations-'));
@@ -4988,4 +5058,145 @@ describe.skipIf(process.platform === 'win32')('executable file mode', () => {
       await rm(cacheDir, { recursive: true, force: true });
     }
   });
+});
+
+describe('child template resolution root', () => {
+  test(
+    'dependency templates resolve from the template repo root first, then fall back to the cwd',
+    async () => {
+      const repo = await makeFixture('child-root-repo');
+      const elsewhere = await makeFixture('child-root-cwd');
+      const previous = process.cwd();
+      try {
+        await mkdir(join(repo.root, '.git'), { recursive: true });
+        // Only the cwd holds this dependency: the repo-root-first order must not
+        // drop the cwd fallback when the template sits inside a git repo.
+        await writeVarsProcessor(elsewhere);
+        await writeTemplate(elsewhere, { name: 'cwd-only-dep', files: { 'DEP.md': 'from cwd\n' } });
+        await writeVarsProcessor(repo);
+        const consumer = await writeTemplate(repo, {
+          name: 'cwd-fallback-consumer',
+          files: { 'ROOT.md': 'root\n' },
+          templates: { 'cyanprint/cwd-only-dep': null },
+        });
+
+        process.chdir(elsewhere.root);
+        await createProject({ template: consumer, outDir: repo.out, headless: true });
+        expect(await readFile(join(repo.out, 'DEP.md'), 'utf8')).toBe('from cwd\n');
+      } finally {
+        process.chdir(previous);
+        await repo.cleanup();
+        await elsewhere.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'a dependency present in both the template repo and the cwd resolves to the repo copy',
+    async () => {
+      const repo = await makeFixture('child-root-both-repo');
+      const elsewhere = await makeFixture('child-root-both-cwd');
+      const previous = process.cwd();
+      try {
+        await mkdir(join(repo.root, '.git'), { recursive: true });
+        await writeTemplate(elsewhere, { name: 'shared-dep', files: { 'DEP.md': 'from cwd\n' } });
+        await writeTemplate(repo, { name: 'shared-dep', files: { 'DEP.md': 'from repo\n' } });
+        await writeVarsProcessor(repo);
+        const consumer = await writeTemplate(repo, {
+          name: 'both-consumer',
+          files: { 'ROOT.md': 'root\n' },
+          templates: { 'cyanprint/shared-dep': null },
+        });
+
+        process.chdir(elsewhere.root);
+        await createProject({ template: consumer, outDir: repo.out, headless: true });
+        expect(await readFile(join(repo.out, 'DEP.md'), 'utf8')).toBe('from repo\n');
+      } finally {
+        process.chdir(previous);
+        await repo.cleanup();
+        await elsewhere.cleanup();
+      }
+    },
+    LONG,
+  );
+});
+
+describe('dev artifact and template resolution', () => {
+  test(
+    'skips artifact directories without a cyan.yaml instead of crashing resolution',
+    async () => {
+      const fixture = await makeFixture('dev-artifact-scratch');
+      try {
+        await mkdir(join(fixture.artifacts, 'aaa-scratch'), { recursive: true });
+        await writeFile(join(fixture.artifacts, 'aaa-scratch/notes.txt'), 'not an artifact\n', 'utf8');
+        await writeVarsProcessor(fixture);
+        const template = await writeTemplate(fixture, { name: 'scratch-consumer', files: { 'A.md': 'a\n' } });
+
+        const result = await createProject({ template, outDir: fixture.out, headless: true });
+
+        expect(result.status).toBe('done');
+        expect(await readOut(fixture.out, 'A.md')).toBe('a\n');
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'fails on an ambiguous dev artifact instead of taking the first readdir match',
+    async () => {
+      const fixture = await makeFixture('dev-artifact-ambiguous');
+      try {
+        await writeArtifact(fixture, { kind: 'processor', name: 'vars', version: '1', runtime: varsProcessorRuntime });
+        const duplicate = join(fixture.artifacts, 'processor-cyanprint-vars-v2');
+        await mkdir(duplicate, { recursive: true });
+        await writeFile(
+          join(duplicate, 'cyan.yaml'),
+          YAML.stringify({
+            cyanprint: 4,
+            kind: 'processor',
+            owner: 'cyanprint',
+            name: 'vars',
+            version: '2',
+            entry: 'index.ts',
+            bundledEntry: 'index.ts',
+          }),
+          'utf8',
+        );
+        await writeFile(join(duplicate, 'index.ts'), varsProcessorRuntime, 'utf8');
+        const template = await writeTemplate(fixture, { name: 'ambiguous-consumer', files: { 'A.md': 'a\n' } });
+
+        await expect(createProject({ template, outDir: fixture.out, headless: true })).rejects.toThrow(
+          /Ambiguous dev artifact processor cyanprint\/vars/,
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    'fails on an ambiguous child template instead of taking the first readdir match',
+    async () => {
+      const fixture = await makeFixture('dev-template-ambiguous');
+      try {
+        await writeTemplate(fixture, { name: 'dup-child', dir: 'dup-child-a', version: '1' });
+        await writeTemplate(fixture, { name: 'dup-child', dir: 'dup-child-b', version: '2' });
+        const parent = await writeTemplate(fixture, {
+          name: 'ambiguous-parent',
+          templates: { 'cyanprint/dup-child': null },
+        });
+
+        await expect(createProject({ template: parent, outDir: fixture.out, headless: true })).rejects.toThrow(
+          /Ambiguous child template cyanprint\/dup-child/,
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    LONG,
+  );
 });

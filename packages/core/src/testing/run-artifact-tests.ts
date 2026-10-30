@@ -181,11 +181,16 @@ async function conventionResolverVariations(caseDir: string): Promise<ResolverVa
   const inputs = entries
     .map(entry => entry.name)
     .filter(name => /^input-\d+(\.\w+)?$/.test(name))
-    .sort();
+    // By the parsed number, not lexically: input-10 layers after input-2.
+    .sort((left, right) => inputNumber(left) - inputNumber(right) || (left < right ? -1 : left > right ? 1 : 0));
   return inputs.map((name, index) => ({
     path: join(caseDir, name),
     origin: { template: name.replace(/\.\w+$/, ''), layer: index },
   }));
+}
+
+function inputNumber(name: string): number {
+  return Number(/^input-(\d+)/.exec(name)?.[1] ?? 0);
 }
 
 function parseTestManifest(artifactDir: string, kind: ArtifactTestReport['kind'], input: unknown): ArtifactCase[] {
@@ -451,9 +456,16 @@ async function runResolverCase(
     const config = await readCaseConfig(testCase);
     const configRecord = isRecord(config) ? config : {};
     const groups = new Map<string, ResolvedFile[]>();
+    // Single-file variations (e.g. input-1.txt, input-2.json) are contributions to ONE logical
+    // file, so they share the first one's name instead of each landing in its own group.
+    let singleFileName: string | undefined;
     for (const variation of testCase.variations) {
       const files = await readResolverVariationFiles(variation.path);
       for (const file of files) {
+        if (file.single) {
+          singleFileName ??= file.path;
+          file.path = singleFileName;
+        }
         const current = groups.get(file.path) ?? [];
         current.push({ path: file.path, content: file.content ?? '', origin: variation.origin });
         groups.set(file.path, current);
@@ -509,11 +521,11 @@ async function runResolverCase(
   }
 }
 
-async function readResolverVariationFiles(path: string): Promise<VfsFile[]> {
+async function readResolverVariationFiles(path: string): Promise<Array<VfsFile & { single?: boolean }>> {
   if (await isDirectory(path)) {
     return await readFileTree(path);
   }
-  return [{ path: basename(path), content: await readText(path) }];
+  return [{ path: basename(path), content: await readText(path), single: true }];
 }
 
 async function isDirectory(path: string): Promise<boolean> {

@@ -820,6 +820,54 @@ describe('probe sandbox — snapshot determinism and unborn git repos', () => {
     expect((error as { problem?: { code?: string } }).problem?.code).not.toBe('probe_repo_has_no_commits');
   });
 
+  test('an unreadable ref store surfaces the git failure, not "no commits"', async () => {
+    if (process.getuid?.() === 0) {
+      return; // root ignores file modes
+    }
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+    await gitRun(repo, ['config', 'user.email', 'origin@localhost']);
+    await gitRun(repo, ['config', 'user.name', 'origin']);
+    await gitRun(repo, ['config', 'commit.gpgsign', 'false']);
+    await gitRun(repo, ['add', '-A']);
+    expect((await gitRun(repo, ['commit', '-q', '-m', 'init'])).code).toBe(0);
+    expect((await gitRun(repo, ['pack-refs', '--all', '--prune'])).code).toBe(0);
+    await chmod(join(repo, '.git/packed-refs'), 0o000);
+    try {
+      const error = await prepareProbeSandboxSource({ repoPath: repo }).catch(caught => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { problem?: { code?: string } }).problem?.code).not.toBe('probe_repo_has_no_commits');
+    } finally {
+      await chmod(join(repo, '.git/packed-refs'), 0o644);
+    }
+  });
+
+  test('an unborn HEAD is still "no commits" under a non-English git locale (decided by exit status, not message text)', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+    const saved = { LANGUAGE: process.env.LANGUAGE, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+    process.env.LANGUAGE = 'de';
+    process.env.LC_ALL = 'de_DE.UTF-8';
+    process.env.LANG = 'de_DE.UTF-8';
+    try {
+      const error = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } }).catch(
+        caught => caught,
+      );
+
+      expect(error).toBeInstanceOf(CyanError);
+      expect((error as CyanError).problem.code).toBe('probe_repo_has_no_commits');
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
   test('a repo with `git init` but no commit yet fails with a clear, actionable CyanError (auto strategy)', async () => {
     const repo = await makeRepo();
     expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);

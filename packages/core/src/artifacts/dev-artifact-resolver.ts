@@ -32,26 +32,44 @@ export async function resolveDevArtifactBundle(args: {
     args.workspaceRoot,
     dirname(fileURLToPath(import.meta.url)),
   );
-  const entries = await readdir(artifactsRoot, { withFileTypes: true });
+  // Sorted so the result never depends on readdir order; directories without a cyan.yaml
+  // (scratch dirs, build output) are not artifacts and are skipped.
+  const entries = (await readdir(artifactsRoot, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory())
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  const matches: Array<{ artifactDir: string; manifest: ReturnType<typeof parseCyanManifest>['manifest'] }> = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) {
+    const artifactDir = join(artifactsRoot, entry.name);
+    const manifestRaw = await readFile(join(artifactDir, 'cyan.yaml'), 'utf8').catch(() => undefined);
+    if (manifestRaw === undefined) {
       continue;
     }
-    const artifactDir = join(artifactsRoot, entry.name);
-    const manifest = parseCyanManifest(YAML.parse(await readFile(join(artifactDir, 'cyan.yaml'), 'utf8'))).manifest;
+    const manifest = parseCyanManifest(YAML.parse(manifestRaw)).manifest;
     if (
       manifest.kind === args.kind &&
       manifest.name === args.dependency.name &&
       manifest.owner === (args.dependency.owner ?? args.defaultOwner ?? manifest.owner) &&
       (!args.dependency.version || manifest.version === args.dependency.version)
     ) {
-      const runtimeFile = join(artifactDir, manifest.entry);
-      return {
-        dependency: { kind: manifest.kind, owner: manifest.owner, name: manifest.name, version: manifest.version },
-        runtimeFile,
-        integrity: sha256(await readFile(runtimeFile)),
-      };
+      matches.push({ artifactDir, manifest });
     }
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Ambiguous dev artifact ${args.kind} ${args.dependency.owner ?? args.defaultOwner ?? 'local'}/${args.dependency.name}: ` +
+        `${matches.map(match => `${match.artifactDir} (${match.manifest.version ?? 'unversioned'})`).join(', ')}. ` +
+        'Pin a version in the dependency or remove the duplicate.',
+    );
+  }
+  const match = matches[0];
+  if (match) {
+    const { artifactDir, manifest } = match;
+    const runtimeFile = join(artifactDir, manifest.entry);
+    return {
+      dependency: { kind: manifest.kind, owner: manifest.owner, name: manifest.name, version: manifest.version },
+      runtimeFile,
+      integrity: sha256(await readFile(runtimeFile)),
+    };
   }
   throw new Error(
     `Unable to resolve dev artifact bundle for ${args.kind} ${args.dependency.owner ?? 'local'}/${args.dependency.name}`,

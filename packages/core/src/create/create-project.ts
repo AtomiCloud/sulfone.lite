@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, readlink, rm, stat, symlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import {
   invokePlugin,
@@ -28,6 +28,8 @@ import { CyanError, declaredDependencyKeys, problem, vfsModeFromFileMode } from 
 import type { TraceCollector, TraceNode } from '../trace/trace-types';
 import { loadManifest } from '../manifest/load-manifest';
 import { resolveDevArtifactBundle } from '../artifacts/dev-artifact-resolver';
+import { defaultWorkspaceRoots } from '../util/workspace-root';
+import { POST_GENERATION_TIMEOUT_ENV } from '../commands/post-generation-command';
 import { processorCacheKey, readProcessorCache, writeProcessorCache } from '../cache/processor-cache';
 import { resolveLayers, type ResolutionLayer, type ResolverInvoker } from '../merge/resolve-layers';
 import { executeCyanScript, globTemplateFiles, isTemplateProbePath } from '../scripts/load-cyan-script';
@@ -702,7 +704,7 @@ async function executeChildTemplate(
   stack: Set<string>,
 ): Promise<GeneratedTemplate> {
   const childDir = await resolveDevTemplateDir({
-    workspaceRoot: process.cwd(),
+    workspaceRoot: await defaultWorkspaceRoots(parentDir),
     templateDir: parentDir,
     dependency,
     defaultOwner,
@@ -1067,6 +1069,17 @@ export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeRes
     await pruneEmptyDirs(outDir, path);
   }
   for (const file of writes) {
+    // Git does not track empty directories, so a user's empty folder (or a tree of empty
+    // folders) at a path the merge adds as a FILE never shows up as a conflict. Whatever real
+    // content is left was refused by `assertMergeApplicable`; clear the husk so the write
+    // does not fail with EISDIR.
+    const target = safeJoin(outDir, file.path);
+    if (
+      (await lstat(target).catch(() => undefined))?.isDirectory() &&
+      (await survivingEntries(target, file.path, new Set())) === undefined
+    ) {
+      await rm(target, { recursive: true, force: true });
+    }
     // The merge is authoritative for the executable bit: a file it leaves non-executable must lose a
     // stale `+x` still on disk, so an absent mode is written as an explicit non-executable one.
     await writeVfsFile(outDir, file.mode === undefined ? { ...file, mode: 0o644 } : file);
@@ -1263,9 +1276,14 @@ async function execPostGenerationCommands(
     if (result.exitCode !== 0) {
       // Defer the throw so generated state is still written; without it a later `update` cannot run.
       return new CyanError(
-        problem('execution', 'post_generation_command_failed', `Post-generation command failed: ${command.command}`, {
-          result,
-        }),
+        problem(
+          'execution',
+          'post_generation_command_failed',
+          result.timedOut
+            ? `Post-generation command timed out and was killed: ${command.command} (set ${POST_GENERATION_TIMEOUT_ENV} to change the limit)`
+            : `Post-generation command failed: ${command.command}`,
+          { result },
+        ),
       );
     }
   }
@@ -1406,7 +1424,12 @@ export async function readFinalProjectFiles(
  * path. This is the reference the post-command reconcile restores the surface to, so any
  * probe path a command touches — regardless of the filesystem operation — is fully undone.
  */
-type ProbeSurfaceSnapshot = { files: Map<string, Buffer>; dirs: Set<string> };
+type ProbeSurfaceSnapshot = {
+  files: Map<string, Buffer>;
+  dirs: Set<string>;
+  /** Symlinks / special files that already existed: `link:<target>` or `special`. */
+  others: Map<string, string>;
+};
 
 /**
  * What a probe path currently resolves to on disk. Files (and symlinks, which `walkOutputFiles`
@@ -1426,39 +1449,48 @@ async function walkProbeSurface(
   if (!info?.isDirectory()) {
     return;
   }
-  const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.name === '.git') {
-        continue;
-      }
-      const abs = join(dir, entry.name);
-      const rel = relative(projectDir, abs)
-        .split(/[\\/]+/)
-        .join('/');
-      const isProbe = isTemplateProbePath(rel);
-      if (entry.isDirectory()) {
-        if (isProbe) {
-          visit.onDir(rel);
+  const walk = async (
+    abs: string,
+    rel: string,
+    entry: { isDirectory(): boolean; isFile(): boolean },
+  ): Promise<void> => {
+    if (entry.isDirectory()) {
+      visit.onDir(rel);
+      for (const child of await readdir(abs, { withFileTypes: true })) {
+        if (child.name !== '.git') {
+          await walk(join(abs, child.name), `${rel}/${child.name}`, child);
         }
-        await walk(abs);
-      } else if (entry.isFile()) {
-        if (isProbe) {
-          await visit.onFile(rel, abs);
-        }
-      } else if (isProbe) {
-        // A symlink / special file at a probe path: never a regular file, so the snapshot
-        // never captures it as user content — the reconcile removes it as command output.
-        await visit.onOther?.(rel, abs);
       }
+    } else if (entry.isFile()) {
+      await visit.onFile(rel, abs);
+    } else {
+      // A symlink / special file at a probe path: never a regular file, so it is tracked
+      // separately from user file content (see `describeProbeOther`).
+      await visit.onOther?.(rel, abs);
     }
   };
-  await walk(projectDir);
+  // The probe surface is only ever the ROOT `probes` entry and `probes.yaml`
+  // (`isTemplateProbePath`), so walk just those instead of the whole project.
+  for (const rel of ['probes.yaml', 'probes']) {
+    const abs = join(projectDir, rel);
+    const entry = await lstat(abs).catch(() => undefined);
+    if (entry) {
+      await walk(abs, rel, entry);
+    }
+  }
+}
+
+/** Identity of a symlink (its target) or special file at a probe path. */
+async function describeProbeOther(abs: string): Promise<string> {
+  const info = await lstat(abs);
+  return info.isSymbolicLink() ? `link:${await readlink(abs)}` : 'special';
 }
 
 /** Capture every probe file's bytes and every probe directory currently on disk. */
 async function snapshotProbeSurface(projectDir: string): Promise<ProbeSurfaceSnapshot> {
   const files = new Map<string, Buffer>();
   const dirs = new Set<string>();
+  const others = new Map<string, string>();
   await walkProbeSurface(projectDir, {
     onFile: async (rel, abs) => {
       files.set(rel, await readFile(abs));
@@ -1466,8 +1498,11 @@ async function snapshotProbeSurface(projectDir: string): Promise<ProbeSurfaceSna
     onDir: rel => {
       dirs.add(rel);
     },
+    onOther: async (rel, abs) => {
+      others.set(rel, await describeProbeOther(abs));
+    },
   });
-  return { files, dirs };
+  return { files, dirs, others };
 }
 
 /**
@@ -1502,8 +1537,12 @@ async function reconcileProbeSurface(
     onDir: rel => {
       currentDirs.add(rel);
     },
-    onOther: async rel => {
-      // Symlink / special file at a probe path — never legitimate output; remove it.
+    onOther: async (rel, abs) => {
+      // A symlink / special file that was already there and is unchanged is the user's own
+      // (e.g. `probes -> ../shared/probes`) and stays; anything else is command output.
+      if (before.others.get(rel) === (await describeProbeOther(abs))) {
+        return;
+      }
       await removeEntry(rel);
       touched.push(rel);
     },
@@ -1560,6 +1599,17 @@ async function reconcileProbeSurface(
     await mkdir(safeJoin(projectDir, dir), { recursive: true });
   }
 
+  // 5. Restore pre-existing symlinks a command deleted or retargeted (the retargeted one was
+  //    removed during the walk above, so it is simply absent here). Special files cannot be
+  //    recreated; they are only ever left alone.
+  for (const [rel, identity] of before.others) {
+    if (identity.startsWith('link:') && !(await lstat(safeJoin(projectDir, rel)).catch(() => undefined))) {
+      await mkdir(dirname(safeJoin(projectDir, rel)), { recursive: true });
+      await symlink(identity.slice('link:'.length), safeJoin(projectDir, rel));
+      touched.push(rel);
+    }
+  }
+
   await assertProbeSurfaceRestored(projectDir, before);
 
   if (touched.length > 0) {
@@ -1595,11 +1645,17 @@ async function assertProbeSurfaceRestored(projectDir: string, before: ProbeSurfa
         drift.push(rel);
       }
     },
-    onOther: async rel => {
-      drift.push(rel);
+    onOther: async (rel, abs) => {
+      seen.add(rel);
+      if (before.others.get(rel) !== (await describeProbeOther(abs))) {
+        drift.push(rel);
+      }
     },
   });
-  for (const rel of before.files.keys()) {
+  for (const rel of [
+    ...before.files.keys(),
+    ...[...before.others].filter(([, id]) => id !== 'special').map(([r]) => r),
+  ]) {
     if (!seen.has(rel)) {
       drift.push(rel);
     }
@@ -1677,7 +1733,7 @@ export type ResolvedDevTemplate = {
  * walks the same composition graph.
  */
 export async function resolveDevTemplate(args: {
-  workspaceRoot: string;
+  workspaceRoot: string | string[];
   templateDir: string;
   dependency: ArtifactDependency;
   defaultOwner: string;
@@ -1692,12 +1748,13 @@ export async function resolveDevTemplate(args: {
       `Local template fallback is disabled and no cached template was found for ${args.dependency.owner ?? args.defaultOwner}/${args.dependency.name}`,
     );
   }
-  for (const root of await findTemplateRoots(args.templateDir, args.workspaceRoot)) {
-    const entries = await readdir(root, { withFileTypes: true });
+  for (const root of await findTemplateRoots(args.templateDir, ...[args.workspaceRoot].flat())) {
+    // Sorted so the result never depends on readdir order.
+    const entries = (await readdir(root, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory())
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    const matches: Array<{ dir: string; version?: string }> = [];
     for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
       const candidate = join(root, entry.name);
       if (!(await stat(join(candidate, 'cyan.yaml')).catch(() => undefined))) {
         continue;
@@ -1709,8 +1766,18 @@ export async function resolveDevTemplate(args: {
         manifest.name === args.dependency.name &&
         (!args.dependency.version || manifest.version === args.dependency.version)
       ) {
-        return { dir: candidate, fromArtifactCache: false };
+        matches.push({ dir: candidate, version: manifest.version });
       }
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous child template ${args.dependency.owner ?? args.defaultOwner}/${args.dependency.name}: ` +
+          `${matches.map(match => `${match.dir} (${match.version ?? 'unversioned'})`).join(', ')}. ` +
+          'Pin a version in the dependency or remove the duplicate.',
+      );
+    }
+    if (matches[0]) {
+      return { dir: matches[0].dir, fromArtifactCache: false };
     }
   }
   throw new Error(
@@ -1724,7 +1791,7 @@ export async function resolveDevTemplate(args: {
  * {@link resolveDevTemplate} for callers that only need the path.
  */
 export async function resolveDevTemplateDir(args: {
-  workspaceRoot: string;
+  workspaceRoot: string | string[];
   templateDir: string;
   dependency: ArtifactDependency;
   defaultOwner: string;

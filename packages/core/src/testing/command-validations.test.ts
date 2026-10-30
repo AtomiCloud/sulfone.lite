@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCommandValidations } from './command-validations';
+import { findLocalCliInvocation, readValidationTimeoutMs, runCommandValidations } from './command-validations';
 
 const dirs: string[] = [];
 const originalShell = process.env.SHELL;
@@ -69,5 +69,39 @@ describe('runCommandValidations', () => {
     expect(Date.now() - started).toBeLessThan(1_900);
     await Bun.sleep(2_300);
     await expect(readFile(join(root, 'late.txt'), 'utf8')).rejects.toThrow();
+  });
+});
+
+describe('readValidationTimeoutMs', () => {
+  test('accepts positive integers up to the setTimeout limit and rejects overflow', () => {
+    expect(readValidationTimeoutMs(undefined, 'x')).toBeUndefined();
+    expect(readValidationTimeoutMs(1_000, 'x')).toBe(1_000);
+    expect(readValidationTimeoutMs(2_147_483_647, 'x')).toBe(2_147_483_647);
+    expect(() => readValidationTimeoutMs(2_147_483_648, 'x')).toThrow('x must be a positive integer');
+    expect(() => readValidationTimeoutMs(0, 'x')).toThrow();
+    expect(() => readValidationTimeoutMs(1.5, 'x')).toThrow();
+  });
+});
+
+describe('findLocalCliInvocation', () => {
+  test('a compiled binary re-enters itself, never a sulfone checkout found under the cwd', async () => {
+    const root = await tempDir();
+    await mkdir(join(root, 'packages/cli/src'), { recursive: true });
+    await writeFile(join(root, 'packages/cli/src/main.ts'), 'console.log("checkout")\n', 'utf8');
+    const previous = process.cwd();
+    process.chdir(root);
+    try {
+      expect(await findLocalCliInvocation('/$bunfs/root', { compiled: true, execPath: '/opt/cyanprint' })).toEqual([
+        '/opt/cyanprint',
+      ]);
+    } finally {
+      process.chdir(previous);
+    }
+  });
+
+  test('a source run finds the CLI entry beside this package', async () => {
+    const invocation = await findLocalCliInvocation(import.meta.dir, { compiled: false });
+    expect(invocation?.slice(0, 2)).toEqual(['bun', 'run']);
+    expect(invocation?.[2]).toEndWith('packages/cli/src/main.ts');
   });
 });

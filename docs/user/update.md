@@ -46,7 +46,7 @@ Files the merge deletes are cleaned up. New state is persisted only for template
 
 ## Post-generation commands
 
-After a clean merge, the post-generation commands of the templates that **changed version** run over the merged working tree (children's commands first) — the same step [the pipeline](pipeline.md) runs at the end of `create`. This keeps an update's output consistent with a fresh install: if a template installs dependencies or generates a lockfile in a command, that step runs on update too, and any files it produces are recorded in `.cyan_state.yaml`. Templates whose version did not change do not re-run their commands. When the merge has conflicts, commands are skipped (they would run over marker-bearing files) and state is left untouched until you resolve and re-run.
+After a clean merge, the post-generation commands of the templates that **changed version** run over the merged working tree (children's commands first) — the same step [the pipeline](pipeline.md) runs at the end of `create`. This keeps an update's output consistent with a fresh install: if a template installs dependencies or generates a lockfile in a command, that step runs on update too, and any files it produces are recorded in `.cyan_state.yaml`. Templates whose version did not change do not re-run their commands. Commands are killed after 10 minutes by default (the same limit as `create`); set `CYANPRINT_COMMAND_TIMEOUT_MS` (milliseconds) to change it. When the merge has conflicts, commands are skipped (they would run over marker-bearing files) and state is left untouched until you resolve and re-run.
 
 ## Resolvers never run during update
 

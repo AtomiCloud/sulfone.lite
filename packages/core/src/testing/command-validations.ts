@@ -2,6 +2,7 @@ import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
+import { IS_COMPILED_BINARY } from '../probe/probe-process';
 import { runDetachedCommand } from '../probe/spawn';
 import { exists } from '../util';
 
@@ -20,13 +21,16 @@ export type CommandValidation =
       shell: true;
     };
 
+/** Largest delay `setTimeout` honours; anything bigger overflows and fires immediately. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** Read an optional per-case `validationTimeoutMs` (positive integer milliseconds). */
 export function readValidationTimeoutMs(value: unknown, label: string): number | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${label} must be a positive integer (milliseconds).`);
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
+    throw new Error(`${label} must be a positive integer (milliseconds, at most ${MAX_TIMEOUT_MS}).`);
   }
   return value;
 }
@@ -112,19 +116,35 @@ function readRequiredString(value: unknown, label: string): string {
 }
 
 async function createLocalCyanprintBin(): Promise<string | undefined> {
-  const cliPath = await findLocalCliPath(dirname(fileURLToPath(import.meta.url)));
-  if (!(await exists(cliPath))) {
+  const invocation = await findLocalCliInvocation(dirname(fileURLToPath(import.meta.url)));
+  if (!invocation) {
     return undefined;
   }
   const binDir = await makeEngineRunDir('cyanprint-validation-bin');
   const shim = join(binDir, 'cyanprint');
-  await writeFile(shim, `#!/bin/sh\nexec bun run ${shellQuote(cliPath)} "$@"\n`, 'utf8');
+  await writeFile(shim, `#!/bin/sh\nexec ${invocation.map(shellQuote).join(' ')} "$@"\n`, 'utf8');
   await chmod(shim, 0o755);
   return binDir;
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The argv prefix the `cyanprint` validation shim execs. A compiled binary re-enters ITSELF
+ * (never a sulfone checkout that happens to be the cwd); a source run uses the CLI entry found
+ * beside this package.
+ */
+export async function findLocalCliInvocation(
+  start: string,
+  options: { compiled?: boolean; execPath?: string } = {},
+): Promise<string[] | undefined> {
+  if (options.compiled ?? IS_COMPILED_BINARY) {
+    return [options.execPath ?? process.execPath];
+  }
+  const cliPath = await findLocalCliPath(start);
+  return (await exists(cliPath)) ? ['bun', 'run', cliPath] : undefined;
 }
 
 async function findLocalCliPath(start: string): Promise<string> {

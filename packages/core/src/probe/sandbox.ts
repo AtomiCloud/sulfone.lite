@@ -364,14 +364,11 @@ async function gitTreeForRepositoryRoot(repoPath: string): Promise<string | unde
   try {
     return await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD^{tree}']);
   } catch (error) {
-    // A HEAD that resolves but whose tree cannot be read is a real git failure
-    // (missing/corrupt object): surface it instead of calling it "no commits".
-    if (
-      await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD']).then(
-        () => true,
-        () => false,
-      )
-    ) {
+    // Only an unborn HEAD is "no commits". A HEAD that resolves but whose tree cannot be read is a
+    // real git failure (missing/corrupt object), and so is anything else that goes wrong (unreadable
+    // refs, ...): surface those instead. Decided by exit status, never by git's message text, which is
+    // localized (LANG/LC_ALL pass through to git).
+    if ((await gitExitCode(repoPath, ['rev-parse', '-q', '--verify', 'HEAD'])) !== UNBORN_HEAD_EXIT_CODE) {
       throw error;
     }
     // Deliberately NOT a fallback to a live working-tree copy: the snapshot must be
@@ -918,6 +915,19 @@ async function gitOutputRaw(cwd: string, cliArgs: string[]): Promise<string> {
     throw new Error(`git ${cliArgs.join(' ')} failed (${exitCode}): ${stderr || stdout}`);
   }
   return stdout;
+}
+
+/** `git rev-parse -q --verify <ref>` exits 1, silently, when the ref does not exist; real failures exit 128. */
+const UNBORN_HEAD_EXIT_CODE = 1;
+
+async function gitExitCode(cwd: string, cliArgs: string[]): Promise<number> {
+  const proc = Bun.spawn(['git', ...cliArgs], {
+    cwd,
+    env: cleanGitEnvironment(),
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+  return await proc.exited;
 }
 
 async function gitOutputBytes(cwd: string, cliArgs: string[]): Promise<Uint8Array> {
