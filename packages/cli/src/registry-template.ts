@@ -14,6 +14,7 @@ import {
   sha256,
 } from '@cyanprint/core';
 import { artifactIntegrity, type ArtifactVersion, type ObjectRef } from '@cyanprint/contracts';
+import { flagString } from './args';
 import { defaultRegistryUrl } from './registry-defaults';
 import { unpackLocalObjectPayload, unpackTemplateArchivePayload } from './local-object-package';
 
@@ -26,19 +27,15 @@ export function registryTemplateSourceResolver(
   flags: Record<string, string | boolean>,
 ): (args: { source: string; version?: string }) => Promise<string> {
   return async ({ source, version }) => {
-    const flagStr = (name: string): string | undefined => {
-      const value = flags[name];
-      return typeof value === 'string' ? value : undefined;
-    };
     const ref = version && version !== 'local' && !source.includes('@') ? `${source}@${version}` : source;
     const resolved = await resolveTemplateInput({
       template: (await Bun.file(join(source, 'cyan.yaml')).exists()) ? source : ref,
-      registry: flagStr('registry') ?? defaultRegistryUrl(),
-      cacheDir: flagStr('cache-dir'),
+      registry: flagString(flags, 'registry') ?? defaultRegistryUrl(),
+      cacheDir: flagString(flags, 'cache-dir'),
       bypassCache: flags['bypass-cache'] === true,
       trusted: flags.trust === true,
-      trustFixture: flagStr('trust-fixture'),
-      trustDir: flagStr('trust-dir'),
+      trustFixture: flagString(flags, 'trust-fixture'),
+      trustDir: flagString(flags, 'trust-dir'),
     });
     return resolved.templateDir;
   };

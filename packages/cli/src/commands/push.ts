@@ -11,6 +11,7 @@ import {
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
 import { buildBundle } from '@cyanprint/artifact-bundler';
 import { parseFlags, flagBool, flagString } from '../args';
+import { defaultTemplateAnswers } from '../default-answers';
 import { createArtifactTextObject, createTemplateArchivePayload } from '../local-object-package';
 import { defaultRegistryUrl } from '../registry-defaults';
 import { failure, info, kv, pathLabel, printJson, printSection, ReportedCliError, success } from '../ui';
@@ -210,11 +211,6 @@ async function runPushTests(target: string, manifest: CyanManifest): Promise<{ f
     }
   }
   return await runArtifactTests({ artifactDir: target });
-}
-
-async function defaultTemplateAnswers(target: string): Promise<string | undefined> {
-  const answers = join(target, 'answers.json');
-  return (await Bun.file(answers).exists()) ? answers : undefined;
 }
 
 async function hasTests(target: string): Promise<boolean> {

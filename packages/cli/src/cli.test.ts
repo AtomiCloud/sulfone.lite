@@ -14,7 +14,7 @@ import { tryCommand } from './commands/try';
 import { updateCommand } from './commands/update';
 import { inquirerPromptAdapter, type InquirerPrompts } from './inquirer-prompt-adapter';
 import {
-  createLocalObjectPayload,
+  createArtifactTextObject,
   createTemplateArchivePayload,
   unpackLocalObjectPayload,
   unpackTemplateArchivePayload,
@@ -1242,7 +1242,7 @@ describe('local object package safety', () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'cyanprint-object-size-'));
     try {
       await writeFile(join(tempRoot, 'README.md'), '# Café\n', 'utf8');
-      const payload = await createLocalObjectPayload(tempRoot);
+      const payload = await createArtifactTextObject(join(tempRoot, 'README.md'));
       expect(payload.size).toBe(textEncoder.encode(payload.payload).byteLength);
       expect(payload.size).toBeGreaterThan(payload.payload.length);
     } finally {
