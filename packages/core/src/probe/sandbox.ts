@@ -16,7 +16,8 @@ import {
 import { dirname, join } from 'node:path';
 import type { ProbeSandboxConfig, ProbeSetupConfig } from '@cyanprint/contracts';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
-import { assertRootSafeDelete, exists, safeJoin } from '../util';
+import { CyanError, problem } from '@cyanprint/contracts';
+import { assertRootSafeDelete, comparePaths, exists, safeJoin } from '../util';
 import { runDetachedCommand } from './spawn';
 
 const NEUTRAL_GIT_ATTRIBUTES = '** -filter -ident -text -crlf -eol -working-tree-encoding\n';
@@ -360,7 +361,31 @@ async function gitTreeForRepositoryRoot(repoPath: string): Promise<string | unde
   if ((await realpath(topLevel)) !== (await realpath(repoPath))) {
     return undefined;
   }
-  return gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD^{tree}']);
+  try {
+    return await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD^{tree}']);
+  } catch (error) {
+    // A HEAD that resolves but whose tree cannot be read is a real git failure
+    // (missing/corrupt object): surface it instead of calling it "no commits".
+    if (
+      await gitOutput(repoPath, ['rev-parse', '--verify', 'HEAD']).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      throw error;
+    }
+    // Deliberately NOT a fallback to a live working-tree copy: the snapshot must be
+    // the committed tree. Fail with an actionable error instead of a raw git one.
+    throw new CyanError(
+      problem(
+        'validation',
+        'probe_repo_has_no_commits',
+        `Cannot snapshot ${repoPath}: it is a git repository with no commits (unborn HEAD). ` +
+          `Commit the generated project (git add -A && git commit) before probing. ${error instanceof Error ? error.message : String(error)}`,
+        { repoPath },
+      ),
+    );
+  }
 }
 
 async function checkoutIndex(
@@ -785,7 +810,7 @@ function decodeGitPathBytes(bytes: Uint8Array): string {
 function minimalPreserveRoots(paths: string[]): string[] {
   const ordered = [...new Set(paths)].sort((left, right) => {
     const depth = left.split('/').length - right.split('/').length;
-    return depth === 0 ? left.localeCompare(right) : depth;
+    return depth === 0 ? comparePaths(left, right) : depth;
   });
   const roots: string[] = [];
   for (const path of ordered) {
@@ -922,8 +947,16 @@ function cleanGitEnvironment(): Record<string, string> {
   );
 }
 
+/**
+ * Fixed commit timestamp: the snapshot commit hash must depend only on the
+ * snapshot content, never on when the run happened.
+ */
+const SNAPSHOT_COMMIT_DATE = '2000-01-01T00:00:00Z';
+
 function neutralGitEnvironment(): Record<string, string> {
   return {
+    GIT_AUTHOR_DATE: SNAPSHOT_COMMIT_DATE,
+    GIT_COMMITTER_DATE: SNAPSHOT_COMMIT_DATE,
     GIT_ATTR_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_SYSTEM: '/dev/null',

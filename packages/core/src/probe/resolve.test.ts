@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -384,5 +384,79 @@ describe('contract-version skew (AC8)', () => {
       expect((error as CyanError).message).toContain('cyanprint/synth-skew-consumer');
       expect((error as CyanError).message).toContain('99');
     });
+  });
+});
+
+describe('workspace root default', () => {
+  test('dependency lookup does not leak in from the cwd when no workspaceRoot is given', async () => {
+    const repo = join(workRoot, 'ws-default-repo');
+    const elsewhere = join(workRoot, 'ws-default-elsewhere');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await mkdir(join(repo, 'examples/templates/consumer'), { recursive: true });
+    await writeFile(
+      join(repo, 'examples/templates/consumer/cyan.yaml'),
+      YAML.stringify({
+        cyanprint: 4,
+        kind: 'template',
+        owner: 'cyanprint',
+        name: 'ws-default-consumer',
+        bundledEntry: 'cyan.ts',
+        templates: { 'cyanprint/ws-default-dep': null },
+      }),
+      'utf8',
+    );
+    await mkdir(join(elsewhere, 'examples/templates/dep'), { recursive: true });
+    await writeFile(
+      join(elsewhere, 'examples/templates/dep/cyan.yaml'),
+      YAML.stringify({
+        cyanprint: 4,
+        kind: 'template',
+        owner: 'cyanprint',
+        name: 'ws-default-dep',
+        bundledEntry: 'cyan.ts',
+      }),
+      'utf8',
+    );
+    const previous = process.cwd();
+    process.chdir(elsewhere);
+    try {
+      // The dependency only exists under the cwd, not in the template's own repo:
+      // the result must not depend on where the CLI happens to run.
+      await expect(
+        resolveProbesForTemplate({
+          templateDir: join(repo, 'examples/templates/consumer'),
+          features: [{ template: 'cyanprint/ws-default-consumer', name: 'gate' }],
+        }),
+      ).rejects.toThrow(/Unable to resolve child template cyanprint\/ws-default-dep/);
+    } finally {
+      process.chdir(previous);
+    }
+  });
+
+  test('a symlinked template dir resolves dependencies from the repo it really lives in', async () => {
+    const linkRepo = join(workRoot, 'ws-link-repo');
+    const realRepo = join(workRoot, 'ws-link-real');
+    await mkdir(join(linkRepo, '.git'), { recursive: true });
+    await mkdir(join(realRepo, '.git'), { recursive: true });
+    await mkdir(join(realRepo, 'examples/templates/consumer'), { recursive: true });
+    await mkdir(join(realRepo, 'examples/templates/dep'), { recursive: true });
+    const manifest = (name: string, extra: Record<string, unknown> = {}) =>
+      YAML.stringify({ cyanprint: 4, kind: 'template', owner: 'cyanprint', name, bundledEntry: 'cyan.ts', ...extra });
+    await writeFile(
+      join(realRepo, 'examples/templates/consumer/cyan.yaml'),
+      manifest('ws-link-consumer', { templates: { 'cyanprint/ws-link-dep': null } }),
+      'utf8',
+    );
+    await writeFile(join(realRepo, 'examples/templates/dep/cyan.yaml'), manifest('ws-link-dep'), 'utf8');
+    await symlink(join(realRepo, 'examples/templates/consumer'), join(linkRepo, 'consumer-link'));
+
+    const outcome = await resolveProbesForTemplate({
+      templateDir: join(linkRepo, 'consumer-link'),
+      features: [{ template: 'cyanprint/ws-link-consumer', name: 'gate' }],
+    }).catch(error => error as Error);
+
+    // The dependency lives beside the REAL template; whatever else the resolve
+    // reports, it must not fail to find that child.
+    expect(outcome instanceof Error ? outcome.message : '').not.toMatch(/Unable to resolve child template/);
   });
 });

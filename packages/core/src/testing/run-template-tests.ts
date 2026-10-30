@@ -26,7 +26,12 @@ import {
   writeText,
 } from '../util';
 import { parseGitignore } from './gitignore';
-import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
+import {
+  readCommandValidations,
+  readValidationTimeoutMs,
+  runCommandValidations,
+  type CommandValidation,
+} from './command-validations';
 
 /**
  * A probing case's per-verdict counts plus the full run report, attached to the
@@ -120,6 +125,8 @@ export type TemplateCase = {
   /** Escape hatch: accept lww-overrides that are not asserted in merges. Discouraged. */
   allowUnassertedLww: boolean;
   validations: CommandValidation[];
+  /** Per-validation-command timeout in ms (default 5 minutes). */
+  validationTimeoutMs?: number;
   /**
    * Opt-in probe tier (FR8): after validations, run the manifest drift gate and
    * the full probe matrix against this case's generated output. Default false —
@@ -317,7 +324,9 @@ async function runTemplateCase(
         return finish({ name: testCase.name, status: 'failed', message: diff });
       }
     }
-    const validationFailure = await runCommandValidations(outDir, testCase.validations);
+    const validationFailure = await runCommandValidations(outDir, testCase.validations, {
+      timeoutMs: testCase.validationTimeoutMs,
+    });
     if (validationFailure) {
       return finish({ name: testCase.name, status: 'failed', message: validationFailure });
     }
@@ -521,6 +530,7 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
     merges: readMergeAssertions(record.merges, `cases[${index}].merges`),
     allowUnassertedLww: record.allowUnassertedLww === true,
     validations: readCommandValidations(record.validations, `cases[${index}].validations`),
+    validationTimeoutMs: readValidationTimeoutMs(record.validationTimeoutMs, `cases[${index}].validationTimeoutMs`),
     probe: readOptionalBoolean(record.probe, `cases[${index}].probe`),
   };
 }

@@ -23,7 +23,12 @@ import {
   sha256,
   writeText,
 } from '../util';
-import { readCommandValidations, runCommandValidations, type CommandValidation } from './command-validations';
+import {
+  readCommandValidations,
+  readValidationTimeoutMs,
+  runCommandValidations,
+  type CommandValidation,
+} from './command-validations';
 
 type ArtifactTestCase = {
   name: string;
@@ -38,6 +43,7 @@ type FileArtifactCase = {
   config?: unknown;
   configFile?: string;
   validations: CommandValidation[];
+  validationTimeoutMs?: number;
 };
 
 /** A resolver variation: one contributor's file (or folder of files) plus its origin. */
@@ -57,6 +63,7 @@ type ResolverArtifactCase = {
   config?: unknown;
   configFile?: string;
   validations: CommandValidation[];
+  validationTimeoutMs?: number;
 };
 
 type ArtifactCase = FileArtifactCase | ResolverArtifactCase;
@@ -283,6 +290,10 @@ function parseManifestCase(
   rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`);
   const name = readRequiredString(record.name, `cases[${index}].name`);
   const validations = readCommandValidations(record.validations, `cases[${index}].validations`);
+  const validationTimeoutMs = readValidationTimeoutMs(
+    record.validationTimeoutMs,
+    `cases[${index}].validationTimeoutMs`,
+  );
   if (kind === 'resolver') {
     for (const removed of ['prior', 'current', 'target'] as const) {
       if (record[removed] !== undefined) {
@@ -303,6 +314,7 @@ function parseManifestCase(
       config: record.config,
       configFile: readOptionalPath(artifactDir, record.configFile),
       validations,
+      validationTimeoutMs,
     };
   }
   return {
@@ -312,6 +324,7 @@ function parseManifestCase(
     config: record.config,
     configFile: readOptionalPath(artifactDir, record.configFile),
     validations,
+    validationTimeoutMs,
   };
 }
 
@@ -399,7 +412,7 @@ async function runFileArtifactCase(
       }
     }
 
-    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations, testCase.validationTimeoutMs);
     if (validationFailure) {
       return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
     }
@@ -476,7 +489,7 @@ async function runResolverCase(
         }
       }
     }
-    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations);
+    const validationFailure = await runCommandsAgainstFiles(actual, testCase.validations, testCase.validationTimeoutMs);
     if (validationFailure) {
       return { case: { name: testCase.name, status: 'failed', message: validationFailure }, snapshotUpdated: false };
     }
@@ -524,14 +537,18 @@ async function readCaseConfig(testCase: { config?: unknown; configFile?: string 
   return JSON.parse(raw) as unknown;
 }
 
-async function runCommandsAgainstFiles(files: VfsFile[], commands: CommandValidation[]): Promise<string | undefined> {
+async function runCommandsAgainstFiles(
+  files: VfsFile[],
+  commands: CommandValidation[],
+  timeoutMs?: number,
+): Promise<string | undefined> {
   if (commands.length === 0) {
     return undefined;
   }
   const root = await makeEngineRunDir('cyanprint-artifact-command');
   try {
     await writeFileTree(root, files);
-    return await runCommandValidations(root, commands);
+    return await runCommandValidations(root, commands, { timeoutMs });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

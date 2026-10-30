@@ -16,6 +16,22 @@ import {
 /** Engine default per-probe timeout (FR10); per-probe `timeoutMs` overrides it. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 120_000;
 
+/**
+ * Engine default timeout for each `setup.pre`/`setup.post` command. Longer than the
+ * per-probe default: setup is where dependency installs and builds live, and it is
+ * not a probe's gate budget.
+ */
+export const DEFAULT_SETUP_TIMEOUT_MS = 600_000;
+
+/**
+ * Timeout for each setup command: an explicit `setupTimeoutMs`, otherwise the
+ * setup default — raised to the engine `--timeout` when that is longer, so a
+ * user who widened the budget for a slow setup is not capped at the default.
+ */
+export function resolveSetupTimeoutMs(options: ProbeExecutionOptions, defaultTimeoutMs: number): number {
+  return options.setupTimeoutMs ?? Math.max(DEFAULT_SETUP_TIMEOUT_MS, defaultTimeoutMs);
+}
+
 export type ProbeExecutionOptions = {
   /**
    * Concurrent runs. Default = min(number of runs, os.availableParallelism()) —
@@ -26,6 +42,8 @@ export type ProbeExecutionOptions = {
   parallelism?: number;
   /** Engine-level default per-probe timeout override (per-probe values still win). */
   timeoutMs?: number;
+  /** Timeout for each `setup.pre`/`setup.post` command (default: the larger of {@link DEFAULT_SETUP_TIMEOUT_MS} and `timeoutMs`). */
+  setupTimeoutMs?: number;
   /** Retain run sandboxes and the snapshot instead of removing them (NFC3). */
   keepSandboxes?: boolean;
   /** Parent directory for the engine-managed sandbox tree. */
@@ -88,7 +106,7 @@ export async function executeProbeMatrix(args: {
       sandbox: config.sandbox,
       setup: config.setup,
       sandboxRoot: options.sandboxRoot,
-      commandTimeoutMs: defaultTimeoutMs,
+      commandTimeoutMs: resolveSetupTimeoutMs(options, defaultTimeoutMs),
     });
   } catch (error) {
     if (error instanceof ProbeSetupError) {
@@ -116,15 +134,32 @@ export async function executeProbeMatrix(args: {
   // sandboxes under it. Instead, swallow per-run errors into `firstError` so every worker
   // runs to completion (every run settles) before dispose, then surface the first error.
   let firstError: unknown;
+  let failed = false;
+  const baseline = createBaselineLedger();
   try {
     const parallelism = options.parallelism ?? Math.min(runs.length, availableParallelism());
     await mapWithConcurrency(runs, parallelism, async (run, runIndex) => {
       const startedAt = Date.now();
       try {
-        const record = await executeRun({ source, run, runIndex, defaultTimeoutMs, verdicts, reasons, spans, options });
+        const record = await executeRun({
+          source,
+          run,
+          runIndex,
+          defaultTimeoutMs,
+          verdicts,
+          reasons,
+          spans,
+          options,
+          baseline,
+        });
         runRecords.push({ ...record, runIndex, kind: run.kind, startedAt, endedAt: Date.now() });
       } catch (error) {
-        firstError ??= error;
+        // `failed`, not `firstError`'s truthiness: a falsy throw (`throw 0`, `throw undefined`)
+        // is still a failure and must not be swallowed.
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
       }
     });
   } finally {
@@ -137,9 +172,10 @@ export async function executeProbeMatrix(args: {
       await source.dispose();
     }
   }
-  if (firstError) {
+  if (failed) {
     throw firstError;
   }
+  downgradeCaughtAgainstRedBaselines(runs, baseline, verdicts, reasons);
   runRecords.sort((left, right) => left.runIndex - right.runIndex);
   return {
     verdicts,
@@ -159,8 +195,9 @@ async function executeRun(args: {
   reasons: Map<string, ProbeVerdictReason>;
   spans: ProbeExecutionSpan[];
   options: ProbeExecutionOptions;
+  baseline: BaselineLedger;
 }): Promise<{ mutation?: { feature: string; probe: string }; sandboxPath?: string }> {
-  const { run, runIndex, defaultTimeoutMs, verdicts, spans } = args;
+  const { run, runIndex, defaultTimeoutMs, verdicts, spans, baseline } = args;
   const mutationLabel =
     run.kind === 'mutation'
       ? { feature: `${run.mutation.feature.template}#${run.mutation.feature.name}`, probe: run.mutation.probe.name }
@@ -170,6 +207,9 @@ async function executeRun(args: {
   try {
     sandbox = await args.source.createRun();
   } catch (error) {
+    if (run.kind === 'baseline') {
+      baseline.settle();
+    }
     if (error instanceof ProbeSetupError) {
       // setup.post failed: this run is affected — every probe it carries is `broken`.
       for (const planned of plannedProbesOf(run)) {
@@ -191,6 +231,7 @@ async function executeRun(args: {
         verdicts,
         reasons: args.reasons,
         spans,
+        baseline,
       });
     } else {
       await executeMutationRun(run, {
@@ -200,9 +241,13 @@ async function executeRun(args: {
         verdicts,
         reasons: args.reasons,
         spans,
+        baseline,
       });
     }
   } finally {
+    if (run.kind === 'baseline') {
+      baseline.settle();
+    }
     if (!args.options.keepSandboxes) {
       await sandbox.dispose();
     }
@@ -217,7 +262,62 @@ type RunContext = {
   verdicts: Map<string, ProbeVerdict>;
   reasons: Map<string, ProbeVerdictReason>;
   spans: ProbeExecutionSpan[];
+  baseline: BaselineLedger;
 };
+
+/**
+ * What the baseline run observed, shared with the (concurrent) mutation runs. The
+ * baseline run is always run 0, so it is already executing before any mutation run
+ * can ask; `settled` resolves when it ends for ANY reason (so nothing waits forever).
+ */
+type BaselineLedger = {
+  /** Raw outcome of each baseline probe, keyed by `probeKey`. */
+  outcomes: Map<string, ProbeOutcome>;
+  /** Features (`template#name`) with at least one baseline that failed on its own. */
+  redFeatures: Map<string, ProbeVerdictReason>;
+  settled: Promise<void>;
+  settle: () => void;
+};
+
+function createBaselineLedger(): BaselineLedger {
+  let settle!: () => void;
+  const settled = new Promise<void>(resolve => {
+    settle = resolve;
+  });
+  return { outcomes: new Map(), redFeatures: new Map(), settled, settle };
+}
+
+function featureLabel(feature: { template: string; name: string }): string {
+  return `${feature.template}#${feature.name}`;
+}
+
+/**
+ * A mutation that went red proves nothing when the SAME feature's own baseline was
+ * already red: the gate was failing before the sabotage, so `caught` is a false
+ * proof. Land those on `broken` (`baseline_failed`) — a red baseline is a failure
+ * outside the experiment.
+ */
+function downgradeCaughtAgainstRedBaselines(
+  runs: ProbeRunPlan[],
+  baseline: BaselineLedger,
+  verdicts: Map<string, ProbeVerdict>,
+  reasons: Map<string, ProbeVerdictReason>,
+): void {
+  for (const run of runs) {
+    if (run.kind !== 'mutation') {
+      continue;
+    }
+    const key = probeKey(run.mutation.feature, run.mutation.probe.name);
+    const red = baseline.redFeatures.get(featureLabel(run.mutation.feature));
+    if (red && verdicts.get(key) === 'caught') {
+      verdicts.set(key, 'broken');
+      reasons.set(key, {
+        category: 'baseline_failed',
+        message: `its feature's own baseline was already red, so the gate going red proves nothing: ${red.message}`,
+      });
+    }
+  }
+}
 
 /**
  * The baseline run: every feature's baseline probes against the untouched
@@ -232,6 +332,7 @@ async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' 
   for (const planned of run.baselines) {
     const result = await executeProbe(planned, 'baseline', ctx);
     outcomes.set(probeKey(planned.feature, planned.probe.name), { planned, result });
+    ctx.baseline.outcomes.set(probeKey(planned.feature, planned.probe.name), result.outcome);
     if (
       result.outcome === 'author-failed' ||
       result.outcome === 'op-failed' ||
@@ -239,6 +340,10 @@ async function executeBaselineRun(run: Extract<ProbeRunPlan, { kind: 'baseline' 
       result.outcome === 'engine-failed'
     ) {
       failures.push({ planned, result });
+      const label = featureLabel(planned.feature);
+      if (!ctx.baseline.redFeatures.has(label)) {
+        ctx.baseline.redFeatures.set(label, outcomeReason(result, 'baseline_failed'));
+      }
     }
   }
   for (const [key, { result }] of outcomes) {
@@ -293,6 +398,15 @@ async function executeMutationRun(run: Extract<ProbeRunPlan, { kind: 'mutation' 
       const controlResult = await executeProbe(control, 'control', ctx);
       if (controlResult.outcome === 'passed') {
         continue;
+      }
+      if (controlResult.outcome === 'inapplicable') {
+        // A control that was already inapplicable in the (untouched) baseline run
+        // says nothing about this mutation — it never applied. Only an
+        // inapplicability the mutation INTRODUCED is a failure outside the experiment.
+        await ctx.baseline.settled;
+        if (ctx.baseline.outcomes.get(probeKey(control.feature, control.probe.name)) === 'inapplicable') {
+          continue;
+        }
       }
       // Only an author-level red gate is legitimate expected overlap. `timeout`,
       // `op-failed`, `engine-failed`, and `inapplicable` are outside-the-experiment

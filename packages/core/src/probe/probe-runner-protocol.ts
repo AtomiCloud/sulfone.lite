@@ -14,8 +14,9 @@
  * `engine-failed` covers the isolated model's infrastructure faults: a runner that
  * cannot load/locate the probe, or exits unexpectedly, is the engine breaking
  * AROUND the experiment — always `broken`, never a false `caught`/`missed`.
- * `timeout` is never carried by an exit code: the parent detects it when it kills a
- * probe that overran its deadline.
+ * `timeout` is carried by an exit code only for a probe that finished but ran a
+ * `repo.exec` that timed out; a probe that overran its own deadline is detected by
+ * the parent when it kills it.
  */
 export type ProbeOutcome = 'passed' | 'author-failed' | 'op-failed' | 'inapplicable' | 'timeout' | 'engine-failed';
 
@@ -28,6 +29,8 @@ export type ProbeOutcome = 'passed' | 'author-failed' | 'op-failed' | 'inapplica
  * - `11` op-failed     — a `ProbeRepo` sandbox operation failed (`ProbeRepoOpError`).
  * - `12` author-failed — the probe threw anything else (its own assertion fired).
  * - `13` engine-failed — the runner could not load/locate the probe (infra fault).
+ * - `14` exec-timeout — the probe passed or failed an assertion after a `repo.exec`
+ *   command was killed by its timeout; its exit code is not the gate's answer.
  */
 export const RUNNER_EXIT = {
   passed: 0,
@@ -35,6 +38,7 @@ export const RUNNER_EXIT = {
   opFailed: 11,
   authorFailed: 12,
   engineFailed: 13,
+  execTimeout: 14,
 } as const;
 
 /**
@@ -56,4 +60,5 @@ export const OUTCOME_BY_EXIT: Record<number, ProbeOutcome> = {
   [RUNNER_EXIT.opFailed]: 'op-failed',
   [RUNNER_EXIT.authorFailed]: 'author-failed',
   [RUNNER_EXIT.engineFailed]: 'engine-failed',
+  [RUNNER_EXIT.execTimeout]: 'timeout',
 };

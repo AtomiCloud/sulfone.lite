@@ -205,3 +205,28 @@ describe('ProbeRepo command timeout boundary holds even when a descendant escape
     expect(result.exitCode).not.toBe(0);
   }, 20_000);
 });
+
+describe('ProbeRepo remove and exec details', () => {
+  test('remove deletes a dangling symlink (the link exists even though its target does not)', async () => {
+    const { sandbox } = await makeSandbox();
+    await symlink(join(sandbox, 'no-such-target'), join(sandbox, 'dangling'));
+    const repo = createProbeRepo(sandbox);
+
+    await repo.remove('dangling');
+
+    expect(await Bun.file(join(sandbox, 'dangling')).exists()).toBe(false);
+    await expect(repo.remove('dangling')).rejects.toThrow(/does not exist/);
+  });
+
+  test('exec reports timedOut only for a command killed by its timeout', async () => {
+    const { sandbox } = await makeSandbox();
+    const repo = createProbeRepo(sandbox);
+
+    const fast = await repo.exec('true');
+    const slow = await repo.exec('sleep 30', { timeoutMs: 300 });
+
+    expect(fast.timedOut).toBe(false);
+    expect(slow.timedOut).toBe(true);
+    expect(slow.exitCode).not.toBe(0);
+  }, 15_000);
+});

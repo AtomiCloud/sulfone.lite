@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exists } from '../util';
 import { probeKey, type ResolvedFeatureProbes } from './matrix';
-import { executeProbeMatrix } from './executor';
+import { DEFAULT_SETUP_TIMEOUT_MS, executeProbeMatrix, resolveSetupTimeoutMs } from './executor';
 import { resolveProbesFromSource } from './resolve';
 
 // Probes execute in ISOLATED child processes (probe-process.ts / probe-runner.ts),
@@ -495,4 +495,127 @@ describe('setup failures mark affected runs broken', () => {
       message: expect.stringContaining('exit 3'),
     });
   }, 30_000);
+});
+
+describe('a timed-out repo.exec taints the probe (broken, never caught)', () => {
+  test('a mutation whose hung gate was killed by exec timeoutMs and asserted "non-zero exit" lands broken', async () => {
+    // Arrange: the kill artifact (non-zero exit) is indistinguishable from a red gate
+    // unless the engine knows the command timed out.
+    const feature = await inlineFeature(
+      'hung-gate',
+      `[{
+        name: 'hung-gate-looks-red',
+        description: 'Asserts the gate went red; the gate actually hung.',
+        kind: 'mutation',
+        run: async (repo) => {
+          const result = await repo.exec('sleep 30', { timeoutMs: 300 });
+          if (result.exitCode === 0) throw new Error('gate stayed green');
+        },
+      }]`,
+    );
+
+    // Act
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+
+    // Assert
+    expect(verdictOf(execution, 'hung-gate', 'hung-gate-looks-red')).toBe('broken');
+    expect(
+      execution.reasons.get(probeKey({ template: 'local/tpl', name: 'hung-gate' }, 'hung-gate-looks-red')),
+    ).toEqual({ category: 'probe_timeout', message: expect.stringContaining('timed out') });
+  }, 30_000);
+
+  test('repo.exec reports timedOut to the probe', async () => {
+    // Arrange
+    const feature = await inlineFeature(
+      'reports-timeout',
+      `[{
+        name: 'reports-timeout-base',
+        description: 'Reads timedOut off a normal command.',
+        kind: 'baseline',
+        run: async (repo) => {
+          const result = await repo.exec('true');
+          if (result.timedOut !== false) throw new Error('timedOut should be false: ' + result.timedOut);
+        },
+      }]`,
+    );
+
+    // Act
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+
+    // Assert
+    expect(verdictOf(execution, 'reports-timeout', 'reports-timeout-base')).toBe('proven');
+  }, 30_000);
+});
+
+const INAPPLICABLE_BASELINE = (name: string) =>
+  `{ name: '${name}', description: 'never applicable', kind: 'baseline', run: async () => {
+    const error = new Error('not applicable here');
+    Object.defineProperty(error, 'cyanprintProbeInapplicable', { value: true });
+    throw error;
+  } }`;
+
+describe('control and baseline interplay', () => {
+  test('a control that was already inapplicable in the baseline run does not break another feature’s mutation', async () => {
+    // Arrange
+    const inapplicable = await inlineFeature('always-na', `[${INAPPLICABLE_BASELINE('na-base')}]`);
+    const target = await inlineFeature(
+      'ctl-target',
+      `[{ name: 'ctl-mut', description: 'sabotage', kind: 'mutation', run: async () => {} }]`,
+    );
+
+    // Act
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [inapplicable, target] });
+
+    // Assert
+    expect(verdictOf(execution, 'always-na', 'na-base')).toBe('invalid');
+    expect(verdictOf(execution, 'ctl-target', 'ctl-mut')).toBe('caught');
+  }, 30_000);
+
+  test('a red baseline downgrades the same feature’s caught mutation to broken (baseline_failed)', async () => {
+    // Arrange
+    const feature = await inlineFeature(
+      'red-base',
+      `[
+        { name: 'red-base-gate', description: 'gate is red from the start', kind: 'baseline',
+          run: async () => { throw new Error('gate red before any sabotage'); } },
+        { name: 'red-base-mut', description: 'passes (gate red)', kind: 'mutation', run: async () => {} },
+      ]`,
+    );
+
+    // Act
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature] });
+
+    // Assert
+    expect(verdictOf(execution, 'red-base', 'red-base-gate')).toBe('broken');
+    expect(verdictOf(execution, 'red-base', 'red-base-mut')).toBe('broken');
+    expect(execution.reasons.get(probeKey({ template: 'local/tpl', name: 'red-base' }, 'red-base-mut'))).toEqual({
+      category: 'baseline_failed',
+      message: expect.stringContaining('gate red before any sabotage'),
+    });
+  }, 30_000);
+});
+
+describe('setup commands use their own timeout, not the per-probe timeout', () => {
+  test('a slow setup.pre survives a short per-probe timeout', async () => {
+    // Arrange
+    const feature = await inlineFeature(
+      'slow-setup',
+      `[{ name: 'slow-setup-base', description: 'trivial', kind: 'baseline', run: async () => {} }]`,
+    );
+    feature.definition.setup = { pre: ['sleep 2'] };
+
+    // Act
+    const execution = await executeProbeMatrix({ repoPath: repo, features: [feature], options: { timeoutMs: 1_000 } });
+
+    // Assert
+    expect(verdictOf(execution, 'slow-setup', 'slow-setup-base')).toBe('proven');
+  }, 30_000);
+});
+
+describe('resolveSetupTimeoutMs', () => {
+  test('defaults to the setup default, follows a larger --timeout, and honours an explicit setupTimeoutMs', () => {
+    expect(resolveSetupTimeoutMs({}, 300_000)).toBe(DEFAULT_SETUP_TIMEOUT_MS);
+    expect(resolveSetupTimeoutMs({ timeoutMs: 1_800_000 }, 1_800_000)).toBe(1_800_000);
+    expect(resolveSetupTimeoutMs({ setupTimeoutMs: 5_000 }, 1_800_000)).toBe(5_000);
+  });
 });

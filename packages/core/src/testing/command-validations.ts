@@ -2,7 +2,11 @@ import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeEngineRunDir } from '@cyanprint/contracts/run-dir';
+import { runDetachedCommand } from '../probe/spawn';
 import { exists } from '../util';
+
+/** Upper bound for one validation command; a hung gate must not hang the run. */
+export const DEFAULT_VALIDATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type CommandValidation =
   | {
@@ -15,6 +19,17 @@ export type CommandValidation =
       args: [];
       shell: true;
     };
+
+/** Read an optional per-case `validationTimeoutMs` (positive integer milliseconds). */
+export function readValidationTimeoutMs(value: unknown, label: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer (milliseconds).`);
+  }
+  return value;
+}
 
 export function readCommandValidations(value: unknown, label: string): CommandValidation[] {
   if (value === undefined) {
@@ -43,33 +58,38 @@ export function readCommandValidations(value: unknown, label: string): CommandVa
   });
 }
 
-export async function runCommandValidations(root: string, commands: CommandValidation[]): Promise<string | undefined> {
+export async function runCommandValidations(
+  root: string,
+  commands: CommandValidation[],
+  options: { timeoutMs?: number } = {},
+): Promise<string | undefined> {
   if (commands.length === 0) {
     return undefined;
   }
+  const timeoutMs = options.timeoutMs ?? DEFAULT_VALIDATION_TIMEOUT_MS;
   const localBin = await createLocalCyanprintBin();
   try {
     for (const validation of commands) {
-      const invocation = validation.shell
-        ? [process.env.SHELL || 'sh', '-lc', validation.command]
-        : [validation.command, ...validation.args];
-      const proc = Bun.spawn(invocation, {
+      // Always `sh -c` (never the caller's login shell + profile, which makes the
+      // result machine-dependent); structured commands are quoted into one line.
+      const command = validation.shell
+        ? validation.command
+        : [validation.command, ...validation.args].map(shellQuote).join(' ');
+      const result = await runDetachedCommand({
+        command,
         cwd: root,
-        stdout: 'pipe',
-        stderr: 'pipe',
+        timeoutMs,
         env: {
           ...process.env,
           PATH: localBin ? `${localBin}:${process.env.PATH ?? ''}` : process.env.PATH,
           PWD: root,
         },
       });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      if (exitCode !== 0) {
-        return `Command failed (${formatCommand(validation)}): ${stderr || stdout}`;
+      if (result.timedOut) {
+        return `Command failed (${formatCommand(validation)}): timed out after ${timeoutMs}ms`;
+      }
+      if (result.exitCode !== 0) {
+        return `Command failed (${formatCommand(validation)}): ${result.stderr || result.stdout}`;
       }
     }
     return undefined;

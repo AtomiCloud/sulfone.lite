@@ -36,6 +36,28 @@ type ProbeRunnerPayload = {
   timeoutMs: number;
 };
 
+/**
+ * Slack past the probe's own timeout before the runner gives up on itself. The
+ * parent kills the group at `timeoutMs`; this backstop only matters when the
+ * parent is gone (SIGKILLed, crashed) and nobody is left to enforce the deadline.
+ */
+const SELF_DEADLINE_SLACK_MS = 10_000;
+
+function armSelfDeadline(timeoutMs: number): void {
+  const timer = setTimeout(() => {
+    console.error(`probe-runner: exceeded its own deadline (${timeoutMs}ms + ${SELF_DEADLINE_SLACK_MS}ms); exiting`);
+    try {
+      // The runner leads its own group when the parent spawned it; take its gate
+      // commands down with it. Not a leader (run by hand) → ESRCH, ignored.
+      process.kill(-process.pid, 'SIGKILL');
+    } catch {
+      // not a group leader
+    }
+    process.exit(RUNNER_EXIT.engineFailed);
+  }, timeoutMs + SELF_DEADLINE_SLACK_MS);
+  timer.unref();
+}
+
 async function loadProbe(payload: ProbeRunnerPayload): Promise<Probe> {
   const definition: ProbeDefinition | undefined =
     payload.source.kind === 'file'
@@ -80,6 +102,10 @@ export async function runProbeRunner(raw: string | undefined): Promise<number> {
     return RUNNER_EXIT.engineFailed;
   }
 
+  if (Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0) {
+    armSelfDeadline(payload.timeoutMs);
+  }
+
   // exec children inherit THIS process's group (detached: false), so the parent's
   // single group-kill sweeps the probe and every command it spawns as one tree.
   // No inner default timeout is imposed: a command with no explicit `timeoutMs` is
@@ -87,14 +113,31 @@ export async function runProbeRunner(raw: string | undefined): Promise<number> {
   // from the parent). An inner default equal to the probe budget would only race
   // that outer kill; an EXPLICIT per-command `timeoutMs` still fires and now takes
   // the command's whole subtree with it (see `runDetachedCommand`).
-  const repo = createProbeRepo(payload.sandboxPath, { detached: false });
+  let execTimeouts = 0;
+  const repo = createProbeRepo(payload.sandboxPath, {
+    detached: false,
+    onExecTimeout: () => {
+      execTimeouts += 1;
+    },
+  });
+  // A command killed by its timeout reports a kill-artifact exit code, which a
+  // probe cannot tell from the gate going red: a hung gate would grade a mutation
+  // `caught`. Whatever the probe concluded, its evidence is tainted — report a
+  // timeout (`broken`) instead, unless the sandbox/probe itself was already invalid.
+  const execTimeoutOr = (exitCode: number): number => {
+    if (execTimeouts === 0) {
+      return exitCode;
+    }
+    console.error(`probe-runner: ${execTimeouts} repo.exec command(s) timed out; the probe's result cannot be trusted`);
+    return RUNNER_EXIT.execTimeout;
+  };
   try {
     await probe.run(repo, {
       feature: payload.feature,
       sandboxPath: payload.sandboxPath,
       timeoutMs: payload.timeoutMs,
     });
-    return RUNNER_EXIT.passed;
+    return execTimeoutOr(RUNNER_EXIT.passed);
   } catch (error) {
     if (isProbeInapplicable(error)) {
       console.error(error instanceof Error ? error.message : String(error));
@@ -107,7 +150,7 @@ export async function runProbeRunner(raw: string | undefined): Promise<number> {
     if (error instanceof Error && error.stack) {
       console.error(error.stack);
     }
-    return RUNNER_EXIT.authorFailed;
+    return execTimeoutOr(RUNNER_EXIT.authorFailed);
   }
 }
 

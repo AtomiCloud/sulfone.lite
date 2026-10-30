@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { ProbeFeatureIdentity } from '@cyanprint/contracts';
 import { OUTCOME_BY_EXIT, PROBE_RUNNER_SUBCOMMAND, type ProbeOutcome } from './probe-runner-protocol';
-import { collectPipe, drainPipe, killProcessTree } from './spawn';
+import { collectPipe, drainPipe, killProcessTree, trackProcessGroup } from './spawn';
 import type { ProbeSource } from './matrix';
 
 // The outcome vocabulary and exit-code mapping live in `probe-runner-protocol.ts`,
@@ -84,6 +84,7 @@ export async function runProbeInSubprocess(args: {
     detached: true,
   });
 
+  const release = trackProcessGroup(proc.pid);
   const stderrPipe = collectPipe(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -123,6 +124,7 @@ export async function runProbeInSubprocess(args: {
     } catch {
       // group already gone
     }
+    release();
   }
 
   if (timedOut) {

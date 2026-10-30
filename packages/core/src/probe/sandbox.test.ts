@@ -3,6 +3,7 @@ import * as fsPromises from 'node:fs/promises';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CyanError } from '@cyanprint/contracts';
 import { ProbeSetupError, prepareProbeSandboxSource } from './sandbox';
 
 /** Run a git command in `cwd`, returning its exit code and trimmed stdout. */
@@ -384,7 +385,7 @@ describe('probe sandbox — snapshot/restore (AC1)', () => {
     expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
 
     await expect(prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } })).rejects.toThrow(
-      /rev-parse --verify HEAD\^\{tree\} failed/,
+      /git repository with no commits/,
     );
   });
 
@@ -764,5 +765,69 @@ describe('probe sandbox — two-phase setup (AC3)', () => {
         setup: { pre: ['echo doomed >&2; exit 7'] },
       }),
     ).rejects.toThrow(ProbeSetupError);
+  });
+});
+
+describe('probe sandbox — setup background children', () => {
+  test('a background child left by setup.pre cannot write into the frozen snapshot after the command exits', async () => {
+    const repo = await makeRepo();
+    const source = await prepareProbeSandboxSource({
+      repoPath: repo,
+      setup: { pre: ['(sleep 1; echo late > late.txt) &'] },
+    });
+    try {
+      await Bun.sleep(1_600);
+
+      expect(await Bun.file(join(source.snapshotPath, 'late.txt')).exists()).toBe(false);
+    } finally {
+      await source.dispose();
+    }
+  });
+});
+
+describe('probe sandbox — snapshot determinism and unborn git repos', () => {
+  test('git strategy: the same repo content freezes to the same snapshot commit hash on every run', async () => {
+    const repo = await makeRepo();
+    const first = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } });
+    const firstHead = await gitRun(first.snapshotPath, ['rev-parse', 'HEAD']);
+    await first.dispose();
+    await Bun.sleep(1_100);
+    const second = await prepareProbeSandboxSource({ repoPath: repo, sandbox: { snapshot: 'git' } });
+    try {
+      const secondHead = await gitRun(second.snapshotPath, ['rev-parse', 'HEAD']);
+
+      expect(firstHead.code).toBe(0);
+      expect(secondHead.stdout).toBe(firstHead.stdout);
+    } finally {
+      await second.dispose();
+    }
+  });
+
+  test('a committed repo whose HEAD tree object is missing surfaces the git failure, not "no commits"', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+    await gitRun(repo, ['config', 'user.email', 'origin@localhost']);
+    await gitRun(repo, ['config', 'user.name', 'origin']);
+    await gitRun(repo, ['config', 'commit.gpgsign', 'false']);
+    await gitRun(repo, ['add', '-A']);
+    expect((await gitRun(repo, ['commit', '-q', '-m', 'init'])).code).toBe(0);
+    const tree = (await gitRun(repo, ['rev-parse', 'HEAD^{tree}'])).stdout;
+    await rm(join(repo, '.git/objects', tree.slice(0, 2), tree.slice(2)), { force: true });
+
+    const error = await prepareProbeSandboxSource({ repoPath: repo }).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { problem?: { code?: string } }).problem?.code).not.toBe('probe_repo_has_no_commits');
+  });
+
+  test('a repo with `git init` but no commit yet fails with a clear, actionable CyanError (auto strategy)', async () => {
+    const repo = await makeRepo();
+    expect((await gitRun(repo, ['init', '-q'])).code).toBe(0);
+
+    const error = await prepareProbeSandboxSource({ repoPath: repo }).catch(caught => caught);
+
+    expect(error).toBeInstanceOf(CyanError);
+    expect((error as CyanError).problem.code).toBe('probe_repo_has_no_commits');
+    expect((error as CyanError).message).toContain('Commit the generated project');
   });
 });
