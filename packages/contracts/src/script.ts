@@ -176,7 +176,7 @@ export function makePromptContext(
     deterministic: {
       get: key => (Object.hasOwn(deterministicState, key) ? deterministicState[key] : undefined) as never,
       set: (key, value) => {
-        deterministicState[key] = value;
+        deterministicState[key] = toStateValue(key, value);
       },
       load: async (key, produce) => {
         // Object.hasOwn: `key in state` would also match inherited Object.prototype
@@ -184,12 +184,44 @@ export function makePromptContext(
         if (Object.hasOwn(deterministicState, key)) {
           return deterministicState[key] as never;
         }
-        const value = await produce();
+        const value = toStateValue(key, await produce());
         deterministicState[key] = value;
-        return value;
+        return value as never;
       },
     },
   };
+}
+
+/**
+ * Deterministic state is persisted as YAML and reloaded by update's base regeneration, so a
+ * value must be exactly what a reload yields: Dates, undefined, NaN etc. would otherwise
+ * differ between create and update (phantom diffs). Normalize through JSON and reject what
+ * JSON cannot carry faithfully.
+ */
+function toStateValue(key: string, value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    const json = JSON.stringify(value, (_name, item: unknown) => {
+      if (item instanceof Map || item instanceof Set || typeof item === 'function' || typeof item === 'symbol') {
+        throw new TypeError(
+          `unsupported ${item instanceof Map || item instanceof Set ? item.constructor.name : typeof item}`,
+        );
+      }
+      return item;
+    });
+    return json === undefined ? null : JSON.parse(json);
+  } catch (error) {
+    throw new CyanError(
+      problem(
+        'validation',
+        'invalid_deterministic_value',
+        `Deterministic state "${key}" must be JSON-serializable (string, number, boolean, null, array, plain object): ${error instanceof Error ? error.message : String(error)}`,
+        { key },
+      ),
+    );
+  }
 }
 
 function assertValidAnswer(request: PromptRequest, value: unknown): void {

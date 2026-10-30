@@ -208,7 +208,7 @@ describe('deterministic state hermetic gateway', () => {
     expect(state.repoList).toEqual(['sulfone.lite', 'sulfone.iridium']);
   });
 
-  test('a pinned undefined value is replayed, not recomputed', async () => {
+  test('a pinned undefined value is stored as null, replayed, not recomputed', async () => {
     const state: Record<string, unknown> = {};
     let calls = 0;
     const ctx = makePromptContext(adapter, {}, state);
@@ -220,8 +220,34 @@ describe('deterministic state hermetic gateway', () => {
       calls += 1;
       return 'recomputed';
     });
-    expect(replayed).toBeUndefined();
+    expect(replayed).toBeNull();
     expect(calls).toBe(1);
+  });
+
+  test('load and set return exactly what a YAML reload sees, so create matches update', async () => {
+    const state: Record<string, unknown> = {};
+    const ctx = makePromptContext(adapter, {}, state);
+    const created: unknown = await ctx.deterministic.load('when', () => new Date('2024-05-06T07:08:09.000Z'));
+    expect(created).toBe('2024-05-06T07:08:09.000Z');
+    ctx.deterministic.set('nested', {
+      at: new Date('2024-01-01T00:00:00.000Z'),
+      skipped: undefined,
+      ratio: Number.NaN,
+    });
+    expect(state.nested).toEqual({ at: '2024-01-01T00:00:00.000Z', ratio: null });
+    expect(JSON.parse(JSON.stringify(state))).toEqual(state);
+  });
+
+  test('values JSON cannot carry (Map, Set, function, bigint, cycles) are rejected with a clear error', async () => {
+    const state: Record<string, unknown> = {};
+    const ctx = makePromptContext(adapter, {}, state);
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    for (const bad of [new Map([['a', 1]]), new Set([1]), () => 1, 10n, cycle]) {
+      expect(() => ctx.deterministic.set('bad', bad)).toThrow('JSON-serializable');
+    }
+    await expect(ctx.deterministic.load('bad', () => new Map())).rejects.toThrow('JSON-serializable');
+    expect('bad' in state).toBe(false);
   });
 
   test('keys shadowing Object.prototype properties compute instead of returning inherited values', async () => {
