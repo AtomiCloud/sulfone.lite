@@ -118,7 +118,7 @@ All composition is declared in `cyan.yaml`'s `templates:` dictionary. Keys are `
 ```yaml
 templates:
   cyanprint/tri-a@5: {} # pinned to version 5, no config
-  cyanprint/tri-b: # unpinned: floats while authoring; cyanprint push pins it
+  cyanprint/tri-b: # unpinned: authoring uses the first matching local or cached copy; cyanprint push pins the registry's latest
     answers:
       flavor: batteries
     deterministicState:
