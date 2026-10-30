@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir, rm } from 'node:fs/promises';
-import { dirname, join, sep } from 'node:path';
+import { join, sep } from 'node:path';
 import {
   CyanError,
   problem,
@@ -15,23 +15,24 @@ import { checkProbeManifestDrift } from '../probe/manifest';
 import { summarizeProbeReport, type ProbeReportSummary } from '../probe/report';
 import { runProbeMatrix } from '../probe/run-probes';
 import { STATE_FILE, loadGeneratedState } from '../state/generated-state';
-import {
-  comparePaths,
-  exists,
-  isRecord,
-  mapWithConcurrency,
-  readText,
-  safeJoin,
-  safeJoinBelow,
-  writeText,
-} from '../util';
+import { comparePaths, exists, isRecord, mapWithConcurrency, readText, safeJoinBelow, writeText } from '../util';
 import { parseGitignore } from './gitignore';
+import {
+  compareBytesTrees,
+  readOptionalPath,
+  readRequiredString,
+  rejectRemovedTestField,
+  writeBytesTree,
+  type BytesFile,
+} from './test-support';
 import {
   readCommandValidations,
   readValidationTimeoutMs,
   runCommandValidations,
   type CommandValidation,
 } from './command-validations';
+
+const TEMPLATE_REMOVED_FIELD_GUIDANCE = 'Use validations with an expected output directory.';
 
 /**
  * A probing case's per-verdict counts plus the full run report, attached to the
@@ -169,8 +170,12 @@ async function runTemplateManifestTests(args: {
     seenDirs.push({ name: testCase.name, dir: folded });
     await assertCaseOutputReplaceable(dir, testCase.name);
   }
+  // The drift gate depends only on the template, not the case: run it once and share the outcome
+  // (a rejection is replayed to every probing case, exactly as a per-case check would have thrown).
+  let manifestDrift: Promise<void> | undefined;
+  const checkManifestDrift = (): Promise<void> => (manifestDrift ??= checkProbeManifestDrift(args.template));
   const perCase = await mapWithConcurrency(args.cases, args.concurrency ?? 1, testCase =>
-    runTemplateCase(args, testCase),
+    runTemplateCase(args, testCase, checkManifestDrift),
   );
   const results = perCase.map(entry => entry.case);
   const coverageFailure = coverageByProofFailure(perCase);
@@ -264,6 +269,7 @@ function featureIsProven(report: ProbeRunReport | undefined, key: string): boole
 async function runTemplateCase(
   args: { template: string; answers?: string; outDir: string; updateSnapshots?: boolean; cases: TemplateCase[] },
   testCase: TemplateCase,
+  checkManifestDrift: () => Promise<void>,
 ): Promise<{
   case: TemplateTestReport['cases'][number];
   snapshotUpdated: boolean;
@@ -319,7 +325,7 @@ async function runTemplateCase(
     const excluded = await buildExclusionFilter(outDir, testCase.ignore);
     const actual = await readFileTree(outDir, excluded);
     if (!args.updateSnapshots) {
-      const diff = compareFileTrees(await readFileTree(testCase.expected, excluded), actual);
+      const diff = compareBytesTrees(await readFileTree(testCase.expected, excluded), actual);
       if (diff) {
         return finish({ name: testCase.name, status: 'failed', message: diff });
       }
@@ -332,14 +338,14 @@ async function runTemplateCase(
     }
     let probeOutcome: TemplateCaseProbeOutcome | undefined;
     if (testCase.probe) {
-      const tier = await runProbeTierForCase(args.template, outDir, features);
+      const tier = await runProbeTierForCase(args.template, checkManifestDrift, outDir, features);
       probeOutcome = tier.outcome;
       if (tier.failure) {
         return finish({ name: testCase.name, status: 'failed', message: tier.failure, probes: probeOutcome });
       }
     }
     if (args.updateSnapshots) {
-      await writeFileTree(testCase.expected, actual);
+      await writeBytesTree(testCase.expected, actual);
       return finish({ name: testCase.name, status: 'passed', probes: probeOutcome }, true);
     }
     return finish({ name: testCase.name, status: 'passed', probes: probeOutcome });
@@ -391,6 +397,7 @@ async function assertCaseOutputReplaceable(dir: string, caseName: string): Promi
  */
 async function runProbeTierForCase(
   template: string,
+  checkManifestDrift: () => Promise<void>,
   outDir: string,
   features: ProbeFeatureIdentity[],
 ): Promise<{ failure?: string; outcome?: TemplateCaseProbeOutcome }> {
@@ -400,7 +407,7 @@ async function runProbeTierForCase(
   }
   // Throws with the drift diff on a drifted or missing manifest; runTemplateCase's
   // catch turns that into the case failure (FR6's "fails the gate").
-  await checkProbeManifestDrift(template);
+  await checkManifestDrift();
   const { report } = await runProbeMatrix({
     repoPath: outDir,
     probeSources: { mode: 'declaration', templateDir: template },
@@ -515,8 +522,8 @@ function parseTemplateCase(template: string, rawCase: unknown, index: number): T
     throw new Error(`cyan.test.yaml case ${index + 1} must be a mapping.`);
   }
   const record = rawCase as Record<string, unknown>;
-  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`);
-  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`);
+  rejectRemovedTestField(record, 'commands', `cases[${index}].commands`, TEMPLATE_REMOVED_FIELD_GUIDANCE);
+  rejectRemovedTestField(record, 'snapshot', `cases[${index}].snapshot`, TEMPLATE_REMOVED_FIELD_GUIDANCE);
   return {
     name: readRequiredString(record.name, `cases[${index}].name`),
     answers: readOptionalPathOrRecord(template, record.answers, `cases[${index}].answers`),
@@ -591,29 +598,6 @@ function readMergeAssertions(value: unknown, label: string): MergeAssertion[] {
   });
 }
 
-function rejectRemovedTestField(record: Record<string, unknown>, field: string, label: string): void {
-  if (record[field] !== undefined) {
-    throw new Error(`${label} is no longer supported. Use validations with an expected output directory.`);
-  }
-}
-
-function readRequiredString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value;
-}
-
-function readOptionalPath(root: string, value: unknown): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('Test paths must be non-empty strings.');
-  }
-  return safeJoin(root, value);
-}
-
 // `expected` is rm -rf'd on --update-snapshots, so it must not be the template directory itself.
 function readExpectedPath(root: string, value: unknown): string | undefined {
   if (value === undefined) {
@@ -660,13 +644,8 @@ export async function readCaseRecord<T extends Record<string, unknown>>(
   return structuredClone(value) as T;
 }
 
-type TemplateTestFile = {
-  path: string;
-  bytes: Uint8Array;
-};
-
-async function readFileTree(root: string, excluded?: (path: string) => boolean): Promise<TemplateTestFile[]> {
-  const files: TemplateTestFile[] = [];
+async function readFileTree(root: string, excluded?: (path: string) => boolean): Promise<BytesFile[]> {
+  const files: BytesFile[] = [];
   await walk(root, async path => {
     const relativePath = path.slice(root.length + 1);
     if (relativePath === STATE_FILE || relativePath === TEST_OUTPUT_MARKER || excluded?.(relativePath)) {
@@ -677,16 +656,6 @@ async function readFileTree(root: string, excluded?: (path: string) => boolean):
   return files.sort((left, right) => comparePaths(left.path, right.path));
 }
 
-async function writeFileTree(root: string, files: TemplateTestFile[]): Promise<void> {
-  await rm(root, { recursive: true, force: true });
-  await mkdir(root, { recursive: true });
-  for (const file of files) {
-    const target = safeJoin(root, file.path);
-    await mkdir(dirname(target), { recursive: true });
-    await Bun.write(target, file.bytes);
-  }
-}
-
 async function walk(root: string, visit: (path: string) => Promise<void>): Promise<void> {
   if (!(await exists(root))) {
     throw new Error(`Expected directory not found: ${root}`);
@@ -694,33 +663,4 @@ async function walk(root: string, visit: (path: string) => Promise<void>): Promi
   for (const entry of await Array.fromAsync(new Bun.Glob('**/*').scan({ cwd: root, onlyFiles: true, dot: true }))) {
     await visit(join(root, entry));
   }
-}
-
-// Byte-for-byte compare: tree shape AND exact bytes (text and binary).
-function compareFileTrees(expected: TemplateTestFile[], actual: TemplateTestFile[]): string | undefined {
-  const expectedMap = new Map(expected.map(file => [file.path, file.bytes]));
-  const actualMap = new Map(actual.map(file => [file.path, file.bytes]));
-  for (const path of [...expectedMap.keys()].sort()) {
-    if (!actualMap.has(path)) {
-      return `Missing output file: ${path}`;
-    }
-    const expectedBytes = expectedMap.get(path) ?? new Uint8Array();
-    const actualBytes = actualMap.get(path) ?? new Uint8Array();
-    if (!bytesEqual(actualBytes, expectedBytes)) {
-      return `Output mismatch: ${path}`;
-    }
-  }
-  for (const path of [...actualMap.keys()].sort()) {
-    if (!expectedMap.has(path)) {
-      return `Unexpected output file: ${path}`;
-    }
-  }
-  return undefined;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) {
-    return false;
-  }
-  return left.every((byte, index) => byte === right[index]);
 }
