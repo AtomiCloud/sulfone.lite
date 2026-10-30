@@ -110,6 +110,8 @@ export async function runDetachedCommand(args: {
    * subtree instead.
    */
   detached?: boolean;
+  /** Full environment for the command; defaults to inheriting the caller's. */
+  env?: Record<string, string | undefined>;
 }): Promise<DetachedCommandResult> {
   const detached = args.detached ?? true;
   const proc = Bun.spawn(['sh', '-c', args.command], {
@@ -118,6 +120,7 @@ export async function runDetachedCommand(args: {
     stderr: 'pipe',
     stdin: 'ignore',
     detached,
+    ...(args.env ? { env: args.env } : {}),
   });
   const release = detached ? trackProcessGroup(proc.pid) : undefined;
   const stdout = collectPipe(proc.stdout);
