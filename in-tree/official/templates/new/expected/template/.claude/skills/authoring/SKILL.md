@@ -107,7 +107,7 @@ Producers may be async (prompts already are) — `load` awaits them. A failed pr
 
 ## Template files and the default processor
 
-Files live under `template/`. Processors and plugins receive them through **file scopes**: `{ root, glob, exclude, type }`. `type: 'Template'` decodes UTF-8 text for transformation; `type: 'Copy'` copies bytes untouched — use Copy for images, fonts, and other binary assets.
+Files live under `template/`. Processors and plugins receive them through **file scopes**: `{ root, glob, exclude, type }`. `type: 'Template'` decodes UTF-8 text for transformation; `type: 'Copy'` copies bytes untouched — use Copy for images, fonts, and other binary assets. Executable bits on template files survive create, update, and push.
 
 The official **default processor** `cyan/default` renders both file contents and file _paths_ with variable substitution (Eta-based). Config: `vars` (the substitution map) and optional `parser.varSyntax` tag pairs. Unknown placeholders are left untouched, so literal double-underscore tokens in your files survive.
 
@@ -118,7 +118,7 @@ All composition is declared in `cyan.yaml`'s `templates:` dictionary. Keys are `
 ```yaml
 templates:
   cyanprint/tri-a@5: {} # pinned to version 5, no config
-  cyanprint/tri-b: # unpinned = latest at create; floats on update
+  cyanprint/tri-b: # unpinned: authoring uses the cached copy (artifact bundle index) if present, else the single local match (several unpinned local matches in one folder are an error); cyanprint push pins the registry's latest
     answers:
       flavor: batteries
     deterministicState:
@@ -162,13 +162,13 @@ resolvers:
     files: ['package.json', '**/*.json']
 ```
 
-When layers emit the same path, each contributing template nominates a resolver. If ALL contributors nominate the same ref with identical config, that resolver runs **once with every variation** of the path (origins included); anything else is **last writer wins** — the highest layer wins and an `lww-override` is recorded (a visible, assertable conflict — see the testing skill). Binary files are never resolver-merged.
+When layers emit the same path, each contributing template nominates a resolver. If ALL contributors nominate the same ref with identical config, that resolver runs **once with every variation** of the path (origins included); anything else is **last writer wins** — the highest layer wins and an `lww-override` is recorded (a visible, assertable conflict — see the testing skill). Only true binaries are never resolver-merged: files are classified by their bytes (valid UTF-8 without NUL is text), so a `Copy`-scope text file still reaches a nominated resolver.
 
 Resolution happens at three tiers: this template's own **processor** outputs, the **dependency** tree (each child's merged subtree plus your own post-plugin layer, self last so self wins LWW), and **sibling** installations in a multi-install project. Resolvers merge _template-vs-template_ output during layering only — they never run in `cyanprint update`'s three-way merge; git handles user edits there.
 
 ## Post-generation commands
 
-Return `commands: [{ command: 'bun', args: ['install'], allow: true }]` to run setup after files land. Commands without `allow: true` are skipped with a warning. Keep them idempotent. A failing command still writes `.cyan_state.yaml`, so the project remains updatable.
+Return `commands: [{ command: 'bun', args: ['install'], allow: true }]` to run setup after files land. Commands without `allow: true` are skipped with a warning. Keep them idempotent. Each command is killed after 10 minutes (`CYANPRINT_COMMAND_TIMEOUT_MS` overrides). A failing command still writes `.cyan_state.yaml`, so the project remains updatable.
 
 ## Author for `cyanprint update`
 
@@ -183,6 +183,7 @@ Return `commands: [{ command: 'bun', args: ['install'], allow: true }]` to run s
 
 - `cyanprint try <dir>` — generate into a scratch folder.
 - `cyanprint trace <dir> --headless` — per-file provenance (decision, segment, resolver, every contributing origin), each template's isolated output, and diffs of each contribution vs the final result. Point it at a **generated project** and it reads the persisted provenance from `.cyan_state.yaml` directly and reuses the recorded answers and deterministic state (`--template` overrides the recorded ref).
+- Test-case `validations` in `cyan.test.yaml` run with `sh -c` (a string is the shell line; structured commands are quoted into one) and are killed after 5 minutes — set `validationTimeoutMs` on a case for slow builds or nested tests.
 - `cyanprint create` prints each generation step live (template → processors → resolver merges → plugins → commands), so slow or failing artifacts are easy to spot.
 
 ## Rules
