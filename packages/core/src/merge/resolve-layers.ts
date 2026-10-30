@@ -116,7 +116,7 @@ export async function resolveLayers(args: {
 }
 
 function sameFileContent(left: VfsFile, right: VfsFile): boolean {
-  return left.content === right.content && left.bytesBase64 === right.bytesBase64;
+  return left.content === right.content && left.bytesBase64 === right.bytesBase64 && left.mode === right.mode;
 }
 
 /** First `resolvers:` entry whose `files:` globs match the path — per template, per path. */
