@@ -16,6 +16,8 @@ export function useUrlState(options?: { onNavigate?: (url: string, navigation?: 
   pathname: string;
   params: URLSearchParams;
   update: (next: Record<string, string | undefined>, navigation?: NavigationOptions) => void;
+  /** True when the Next router has caught up with the URL this hook last wrote (no soft navigation in flight). */
+  settled: boolean;
 } {
   const onNavigate = options?.onNavigate;
   const nextPathname = usePathname();
@@ -56,6 +58,11 @@ export function useUrlState(options?: { onNavigate?: (url: string, navigation?: 
         }
       }
       const query = params.toString();
+      // A no-op update (e.g. the default light theme with no theme param) must not navigate:
+      // it would start a router.replace while `settled` already reads true.
+      if (query === current.params.toString()) {
+        return;
+      }
       const url = `${current.pathname}${query ? `?${query}` : ''}`;
       window.history.replaceState(null, '', url);
       setState({ pathname: current.pathname, params });
@@ -65,7 +72,9 @@ export function useUrlState(options?: { onNavigate?: (url: string, navigation?: 
     [onNavigate],
   );
 
-  return useMemo(() => ({ pathname: state.pathname, params: state.params, update }), [state, update]);
+  const settled = state.pathname === routeState.pathname && state.params.toString() === routeState.params.toString();
+
+  return useMemo(() => ({ pathname: state.pathname, params: state.params, update, settled }), [state, update, settled]);
 }
 
 function readUrlState(): UrlState {
