@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { CyanError } from '@cyanprint/contracts';
+import { CyanError, type VfsFile } from '@cyanprint/contracts';
 import { resolveCyanRunDir } from '@cyanprint/contracts/run-dir';
 import YAML from 'yaml';
 import {
@@ -22,6 +22,7 @@ import {
   exists,
   gitThreeWayMerge,
   loadGeneratedState,
+  readMergeOurs,
   migrateGeneratedState,
   resolveCyanCacheDir,
   resolveLayers,
@@ -2156,6 +2157,100 @@ describe('applyMergedTree', () => {
       } finally {
         reader.kill();
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('merge path clashes with the user own paths', () => {
+  const base: VfsFile[] = [{ path: 'README', content: 'r\n' }];
+
+  async function mergeInto(dir: string, tiers: { base: VfsFile[]; theirs: VfsFile[] }) {
+    const ours = await readMergeOurs(dir, tiers);
+    return await gitThreeWayMerge({ base: tiers.base, ours, theirs: tiers.theirs });
+  }
+
+  test('a template file added where the user has a folder conflicts instead of crashing the apply', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await writeFile(join(dir, 'README'), 'r\n', 'utf8');
+      await mkdir(join(dir, 'docs'));
+      await writeFile(join(dir, 'docs/notes.md'), 'mine\n', 'utf8');
+      const merge = await mergeInto(dir, { base, theirs: [...base, { path: 'docs', content: 'new\n' }] });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'docs/notes.md')).text()).toBe('mine\n');
+      expect(await Bun.file(join(dir, 'docs~incoming')).text()).toBe('new\n');
+      expect(merge.conflicts).toEqual(['docs~incoming']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a template file added under a path the user has as a file conflicts instead of crashing the apply', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await writeFile(join(dir, 'README'), 'r\n', 'utf8');
+      await writeFile(join(dir, 'docs'), 'mine\n', 'utf8');
+      const merge = await mergeInto(dir, { base, theirs: [...base, { path: 'docs/x', content: 'new\n' }] });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'docs~HEAD')).text()).toBe('mine\n');
+      expect(await Bun.file(join(dir, 'docs/x')).text()).toBe('new\n');
+      expect(merge.conflicts).toEqual(['docs~HEAD']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a template file the user turned into a folder conflicts when the template edits it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await mkdir(join(dir, 'config'));
+      await writeFile(join(dir, 'config/a'), 'x\n', 'utf8');
+      const merge = await mergeInto(dir, {
+        base: [{ path: 'config', content: 'c1\n' }],
+        theirs: [{ path: 'config', content: 'c2\n' }],
+      });
+      await applyMergedTree(dir, merge);
+      expect(await Bun.file(join(dir, 'config/a')).text()).toBe('x\n');
+      expect(await Bun.file(join(dir, 'config~incoming')).text()).toBe('c2\n');
+      expect(merge.conflicts).toEqual(['config~incoming']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('applyMergedTree refuses a clashing tree before writing anything', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cyanprint-clash-'));
+    try {
+      await mkdir(join(dir, 'docs'));
+      await writeFile(join(dir, 'docs/notes.md'), 'mine\n', 'utf8');
+      await expect(
+        applyMergedTree(dir, {
+          files: [
+            { path: 'a.txt', content: 'first\n' },
+            { path: 'docs', content: 'new\n' },
+          ],
+          deletions: [],
+          conflicts: [],
+        }),
+      ).rejects.toThrow(/docs/);
+      expect(await Bun.file(join(dir, 'a.txt')).exists()).toBe(false);
+      expect(await Bun.file(join(dir, 'docs/notes.md')).text()).toBe('mine\n');
+
+      await rm(join(dir, 'docs'), { recursive: true });
+      await writeFile(join(dir, 'docs'), 'mine\n', 'utf8');
+      await expect(
+        applyMergedTree(dir, {
+          files: [
+            { path: 'a.txt', content: 'first\n' },
+            { path: 'docs/x', content: 'new\n' },
+          ],
+          deletions: [],
+          conflicts: [],
+        }),
+      ).rejects.toThrow(/docs/);
+      expect(await Bun.file(join(dir, 'a.txt')).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

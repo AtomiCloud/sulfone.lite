@@ -45,6 +45,7 @@ import { gitThreeWayMerge, type GitThreeWayMergeResult } from '../update/git-mer
 import {
   assertRootSafeDelete,
   assertRootSafeRead,
+  assertRootSafeWrite,
   comparePaths,
   decodeText,
   fileSha,
@@ -1041,27 +1042,90 @@ function stripTemplateProbeSurface(files: VfsFile[]): VfsFile[] {
   return files.filter(file => !isTemplateProbePath(file.path));
 }
 
-/** Write a merged working tree back to the project: merge deletions first, then changed files. */
+/**
+ * Write a merged working tree back to the project: merge deletions first, then changed files.
+ * The whole tree is validated before the first byte is written, so a refusal (a symlink or
+ * hard link in the way, or a file-vs-directory clash with the user's own paths) leaves the
+ * project exactly as it was instead of half-updated.
+ */
 export async function applyMergedTree(outDir: string, merge: GitThreeWayMergeResult): Promise<void> {
-  // Deletions must land before writes: a merge can replace a file with a directory (or a
-  // directory with a file), and writing first hits the stale entry still on disk (EEXIST
-  // from mkdir over the old file, EISDIR writing over the old directory).
-  for (const path of merge.deletions) {
-    // Guard the delete vector the way `writeVfsFile` guards writes: a symlinked parent component
-    // would make `rm` follow the link and unlink a file outside the project root.
-    await assertRootSafeDelete(outDir, path);
-    await rm(safeJoin(outDir, path), { force: true }).catch(() => undefined);
-    await pruneEmptyDirs(outDir, path);
-  }
+  const writes: VfsFile[] = [];
   for (const file of merge.files) {
     // Rewrite only what the merge actually changed. `ours` carries unchanged files through
     // the merge verbatim; rewriting them would touch every file in the project (and trip the
     // hard-link guard on installer-managed files such as node_modules).
-    if (await matchesOnDisk(outDir, file)) {
-      continue;
+    if (!(await matchesOnDisk(outDir, file))) {
+      writes.push(file);
     }
+  }
+  await assertMergeApplicable(outDir, merge.deletions, writes);
+  // Deletions must land before writes: a merge can replace a file with a directory (or a
+  // directory with a file), and writing first hits the stale entry still on disk (EEXIST
+  // from mkdir over the old file, EISDIR writing over the old directory).
+  for (const path of merge.deletions) {
+    await rm(safeJoin(outDir, path), { force: true }).catch(() => undefined);
+    await pruneEmptyDirs(outDir, path);
+  }
+  for (const file of writes) {
     await writeVfsFile(outDir, file);
   }
+}
+
+/**
+ * Dry-run of {@link applyMergedTree}: every guard the real writes and deletes apply, plus the
+ * file-vs-directory clashes that would otherwise surface half-way as EISDIR/EEXIST. A path
+ * being written may only meet an existing entry that the merge itself deletes.
+ */
+async function assertMergeApplicable(outDir: string, deletions: string[], writes: VfsFile[]): Promise<void> {
+  const deleted = new Set(deletions);
+  // Guard the delete vector the way `writeVfsFile` guards writes: a symlinked parent component
+  // would make `rm` follow the link and unlink a file outside the project root.
+  for (const path of deletions) {
+    await assertRootSafeDelete(outDir, path);
+  }
+  const clash = (path: string, why: string): CyanError =>
+    new CyanError(
+      problem(
+        'validation',
+        'merge_path_clash',
+        `Cannot apply the merge: "${path}" ${why}. Nothing was written; move or remove it and re-run.`,
+        { path },
+      ),
+    );
+  for (const file of writes) {
+    await assertRootSafeWrite(outDir, file.path);
+    const parts = file.path.split('/');
+    for (let index = 1; index < parts.length; index += 1) {
+      const ancestor = parts.slice(0, index).join('/');
+      const info = await lstat(safeJoin(outDir, ancestor)).catch(() => undefined);
+      if (info && !info.isDirectory() && !deleted.has(ancestor)) {
+        throw clash(file.path, `needs "${ancestor}" to be a folder, but it is a file in your project`);
+      }
+    }
+    const info = await lstat(safeJoin(outDir, file.path)).catch(() => undefined);
+    if (info?.isDirectory()) {
+      const remaining = await survivingEntries(safeJoin(outDir, file.path), file.path, deleted);
+      if (remaining !== undefined) {
+        throw clash(file.path, `is a file in the update but a folder in your project (it still holds "${remaining}")`);
+      }
+    }
+  }
+}
+
+/** First non-directory entry under `dir` that the merge does not delete (undefined when none). */
+async function survivingEntries(dir: string, rel: string, deleted: Set<string>): Promise<string | undefined> {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const entryRel = `${rel}/${entry.name}`;
+    if (entry.isDirectory()) {
+      const nested = await survivingEntries(join(dir, entry.name), entryRel, deleted);
+      if (nested !== undefined) {
+        return nested;
+      }
+    } else if (!deleted.has(entryRel)) {
+      return entryRel;
+    }
+  }
+  return undefined;
 }
 
 /** True when `file` already sits on disk as a regular file with exactly these bytes. */
@@ -1210,29 +1274,54 @@ export function reportWarnings(warnings: CompatibilityWarning[], json?: boolean)
 }
 
 /**
- * The `ours` side of a three-way merge. Only paths the merge can act on (base ∪ theirs) are
- * read, so dependency and build output (node_modules, dist, ...) is never copied into the temp
- * git repo. Files outside base ∪ theirs are never changed by the merge, and state-tracked
- * paths outside that set are command output with the same property, so they need no read.
+ * The `ours` side of a three-way merge. Only paths the merge can act on are read, so
+ * dependency and build output (node_modules, dist, ...) is never copied into the temp git
+ * repo. That is base ∪ theirs, plus any on-disk path that is an ancestor or descendant of one
+ * of them: git can only see a file-vs-directory clash (the update adds `docs` where the user
+ * has a `docs/` folder, or `docs/x` where the user has a `docs` file) when both sides are
+ * present. Other files are never changed by the merge, and state-tracked paths outside that
+ * set are command output with the same property, so they need no read.
  * Trade-off: git rename detection can only pair a deleted base file with a *new* user file, so
- * when a base path is missing on disk the remaining project files (minus node_modules)
- * are read as well, to keep a user's rename of a template file merging as a rename.
+ * when a base path is not a regular file on disk (missing, or replaced by a folder) the
+ * remaining project files (minus node_modules) are read as well, to keep a user's rename of a
+ * template file merging as a rename.
  */
 export async function readMergeOurs(
   projectDir: string,
   tiers: { base: VfsFile[]; theirs: VfsFile[] },
 ): Promise<VfsFile[]> {
   const known = new Set([...tiers.base, ...tiers.theirs].map(file => file.path));
+  const knownAncestors = new Set<string>();
+  for (const path of known) {
+    const parts = path.split('/');
+    for (let index = 1; index < parts.length; index += 1) {
+      knownAncestors.add(parts.slice(0, index).join('/'));
+    }
+  }
+  const underKnown = (path: string): boolean => {
+    const parts = path.split('/');
+    for (let index = 1; index < parts.length; index += 1) {
+      if (known.has(parts.slice(0, index).join('/'))) {
+        return true;
+      }
+    }
+    return false;
+  };
   let renameCandidates = false;
   for (const file of tiers.base) {
-    if (!(await lstat(safeJoin(projectDir, file.path)).catch(() => undefined))) {
+    const info = await lstat(safeJoin(projectDir, file.path)).catch(() => undefined);
+    if (!info?.isFile()) {
       renameCandidates = true;
       break;
     }
   }
   return await readProjectFiles(
     projectDir,
-    path => known.has(path) || (renameCandidates && !path.split('/').includes('node_modules')),
+    path =>
+      known.has(path) ||
+      knownAncestors.has(path) ||
+      underKnown(path) ||
+      (renameCandidates && !path.split('/').includes('node_modules')),
   );
 }
 
